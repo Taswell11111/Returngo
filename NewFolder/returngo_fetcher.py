@@ -1,11 +1,12 @@
 import os
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import requests
 import json
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
+import csv
 
 # --- Optional: Calendar Widget ---
 try:
@@ -35,6 +36,11 @@ STATUS_OPTIONS = [
     "Pending", "Approved", "Received", "Validated",
     "Done", "Rejected", "Canceled"
 ]
+
+OPEN_STATUSES = [
+    "Pending", "Approved", "Received", "Validated"
+]
+
 
 class ReturnGoApp:
     def __init__(self, root):
@@ -84,6 +90,12 @@ class ReturnGoApp:
         self.fetch_btn = ttk.Button(btn_frame, text="Fetch Data", command=self.start_fetch_thread)
         self.fetch_btn.pack(side="left", padx=5)
 
+        self.fetch_open_btn = ttk.Button(btn_frame, text="Fetch All Open RMAs", command=lambda: self.start_fetch_thread(fetch_open=True))
+        self.fetch_open_btn.pack(side="left", padx=5)
+
+        self.download_btn = ttk.Button(btn_frame, text="Download as CSV", command=self.download_to_csv)
+        self.download_btn.pack(side="left", padx=5)
+
         self.copy_btn = ttk.Button(btn_frame, text="Copy Current Tab", command=self.copy_to_clipboard)
         self.copy_btn.pack(side="left", padx=5)
 
@@ -126,12 +138,16 @@ class ReturnGoApp:
         scroll_x = ttk.Scrollbar(table_frame, orient="horizontal")
         scroll_x.pack(side="bottom", fill="x")
 
-        columns = ("shop", "rma_id", "order_name", "status", "created_date", "action_date", "action_by", "trigger")
+        columns = ("shop", "rma_id", "order_name", "status", "created_date", 
+                   "last_updated", "return_method", "shipping_label_status", 
+                   "tracking_number", "trigger")
         self.detail_tree = ttk.Treeview(table_frame, columns=columns, show="headings", 
                                         yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
         
         for col in columns:
-            self.detail_tree.heading(col, text=col.replace("_", " ").title().replace("Rma", "RMA"))
+            # Special case for RMA ID
+            text = col.replace("_", " ").title() if col != "rma_id" else "RMA ID"
+            self.detail_tree.heading(col, text=text)
             self.detail_tree.column(col, width=120)
 
         self.detail_tree.pack(fill="both", expand=True)
@@ -168,16 +184,20 @@ class ReturnGoApp:
             return widget.get_date().strftime("%Y-%m-%d")
         return widget.get()
 
-    def get_api_params(self):
-        status = self.status_var.get()
-        start_date_str = self.get_text_from_date_widget(self.start_date_entry)
-        end_date_str = self.get_text_from_date_widget(self.end_date_entry)
-        try:
-            start_iso = f"gte:{start_date_str}T00:00:00"
-            end_iso = f"lte:{end_date_str}T23:59:59"
-        except Exception:
-            return None
-        return {"pagesize": 50, "status": status, "rma_created_at": [start_iso, end_iso]}, start_date_str, end_date_str
+    def get_api_params(self, fetch_open=False):
+        if fetch_open:
+            # For fetching all open RMAs, we don't filter by date.
+            # We query for multiple statuses.
+            return {"pagesize": 50, "status": OPEN_STATUSES}, None, None
+        else:
+            status = self.status_var.get()
+            start_date_str = self.get_text_from_date_widget(self.start_date_entry)
+            end_date_str = self.get_text_from_date_widget(self.end_date_entry)
+            try:
+                start_iso = f"gte:{start_date_str}T00:00:00"
+                end_iso = f"lte:{end_date_str}T23:59:59"
+                return {"pagesize": 50, "status": status, "rma_created_at": [start_iso, end_iso]}, start_date_str, end_date_str
+            except Exception: return None, None, None
 
     def fetch_deep_details(self, rma_id, shop_name):
         url = f"{API_URL_DETAIL}/{rma_id}"
@@ -208,68 +228,35 @@ class ReturnGoApp:
                     rma_id = rma.get("rmaId", rma.get("id"))
                     order_name = rma.get("order_name") or "N/A"
                     status = rma.get("status", "N/A")
-                    created_date_raw = rma.get("createdAt")
+                    created_at = rma.get("createdAt")
                     
-                    # --- Date Filter Check ---
-                    if created_date_raw:
-                        row_date_str = created_date_raw[:10]
-                        if row_date_str < start_date_filter or row_date_str > end_date_filter:
+                    # --- Date Filter Check (only if not fetching all open) ---
+                    if start_date_filter and end_date_filter and created_at:
+                        row_date_str = created_at[:10]
+                        if not (start_date_filter <= row_date_str <= end_date_filter):
                             continue # Skip
 
-                    action_date = "-"
-                    action_by_user = "-"
-
                     # --- DEEP FETCH ---
-                    # We do a deep scan for statuses that involve a manual user action we want to track.
-                    if status in ["Approved", "Done", "Rejected"]:
-                        self.log(f"  > Deep scanning '{status}' RMA: {rma_id} ({order_name})")
-                        full_details = self.fetch_deep_details(rma_id, shop_name)
-                        comments = full_details.get("comments", [])
-                        
-                        found_user = False
-                        for comment in comments:
-                            html = str(comment.get("htmlText", "")).lower()
-                            c_user = comment.get("triggeredBy")
-                            c_date = comment.get("datetime")
+                    self.log(f"  > Fetching details for RMA: {rma_id} ({order_name})")
+                    full_details = self.fetch_deep_details(rma_id, shop_name)
 
-                            # Logic for 'Approved'
-                            if status == "Approved" and "approved" in html and ("created" in html or "request" in html):
-                                if c_user and c_user != "ReturnGO API":
-                                    action_by_user = c_user
-                                    found_user = True
-                                if c_date:
-                                    action_date = c_date[:10]
-                                    break # Stop searching comments
-                            
-                            # Logic for 'Done'
-                            elif status == "Done" and "rma status changed to done" in html:
-                                if c_user and c_user != "ReturnGO API":
-                                    action_by_user = c_user
-                                    found_user = True
-                                # Also grab the date for the 'Done' action
-                                if c_date:
-                                    action_date = c_date[:10]
-                                    found_user = True
-                                    break # Stop searching comments
-                            
-                            # Logic for 'Rejected' could be added here similarly
-                        
-                        if found_user:
-                            self.log(f"    -> Found User: {action_by_user}")
-                        else:
-                            self.log(f"    -> No explicit user found in comments for this action.")
-                    
-                    # Clean up
-                    if created_date_raw: created_date_raw = created_date_raw.replace("T", " ")[:19]
+                    # Extract more fields from the detailed response
+                    last_updated = full_details.get("updatedAt", "").replace("T", " ")[:19]
+                    return_method = full_details.get("returnMethod", {}).get("name", "-")
+                    shipping_label = full_details.get("shippingLabel", {})
+                    shipping_label_status = shipping_label.get("status", "-")
+                    tracking_number = shipping_label.get("trackingNumber", "-")
 
                     rows.append({
                         "shop": shop_name.replace(".myshopify.com", ""),
                         "rma_id": rma_id,
                         "order_name": order_name,
                         "status": status,
-                        "created_date": created_date_raw or "N/A",
-                        "action_date": action_date,
-                        "action_by": action_by_user,
+                        "created_date": (created_at or "N/A").replace("T", " ")[:19],
+                        "last_updated": last_updated,
+                        "return_method": return_method,
+                        "shipping_label_status": shipping_label_status,
+                        "tracking_number": tracking_number,
                         "trigger": rma.get("triggeredVia", "-")
                     })
             else:
@@ -278,10 +265,12 @@ class ReturnGoApp:
             self.log(f"Error for {shop_name}: {e}")
         return rows
 
-    def start_fetch_thread(self):
+    def start_fetch_thread(self, fetch_open=False):
         """Starts the background thread."""
         self.fetch_btn.config(state="disabled", text="Running...")
         self.copy_btn.config(state="disabled")
+        self.download_btn.config(state="disabled")
+        self.fetch_open_btn.config(state="disabled")
         
         # Clear logs
         self.log_text.config(state='normal')
@@ -289,24 +278,28 @@ class ReturnGoApp:
         self.log_text.config(state='disabled')
         
         # Start Thread
-        thread = threading.Thread(target=self.run_process_background)
+        thread = threading.Thread(target=self.run_process_background, args=(fetch_open,))
         thread.daemon = True # Ensures thread dies if app closes
         thread.start()
 
-    def run_process_background(self):
+    def run_process_background(self, fetch_open=False):
         """The actual work happening in the background."""
         # 1. Clear Tables (Must be done via main thread really, but usually ok here, or use root.after)
         self.root.after(0, self.clear_tables)
 
         self.all_fetched_rows = []
-        selected_option = self.shop_var.get()
-        params, start_date, end_date = self.get_api_params()
+        params, start_date, end_date = self.get_api_params(fetch_open=fetch_open)
         
         if not params:
-            self.log("Invalid Date Parameters.")
+            if not fetch_open:
+                self.log("Invalid Date Parameters.")
+            else:
+                # This case shouldn't happen for "fetch open"
+                self.log("Error preparing API request.")
             self.root.after(0, self.finish_fetching)
             return
 
+        selected_option = self.shop_var.get()
         shops = SHOP_LIST if selected_option == "ALL STORES" else [selected_option]
         
         for shop in shops:
@@ -324,23 +317,32 @@ class ReturnGoApp:
         # Populate Detail
         for row in self.all_fetched_rows:
             self.detail_tree.insert("", "end", values=(
-                row["shop"], row["rma_id"], row["order_name"], row["status"],
-                row["created_date"], row["action_date"], row["action_by"], row["trigger"]
+                row.get("shop"), row.get("rma_id"), row.get("order_name"), row.get("status"),
+                row.get("created_date"), row.get("last_updated"), row.get("return_method"),
+                row.get("shipping_label_status"), row.get("tracking_number"), row.get("trigger")
             ))
         
         self.populate_pivot_summary()
         self.log("Done! Process Complete.")
-        self.fetch_btn.config(state="normal", text="Fetch Data")
-        self.copy_btn.config(state="normal")
+        self.finish_fetching()
         messagebox.showinfo("Done", f"Fetched {len(self.all_fetched_rows)} records.")
 
+    def finish_fetching(self):
+        """Re-enables buttons after fetching is complete or has failed."""
+        self.fetch_btn.config(state="normal", text="Fetch Data")
+        self.copy_btn.config(state="normal")
+        self.download_btn.config(state="normal")
+        self.fetch_open_btn.config(state="normal", text="Fetch All Open RMAs")
+
     def populate_pivot_summary(self):
+        # This function is less relevant for the "all open" request, but we'll keep it.
+        # It pivots based on creation date.
         matrix = defaultdict(lambda: defaultdict(int))
         all_dates = set()
         for row in self.all_fetched_rows:
-            d_str = row["action_date"] if row["action_date"] != "-" else row["created_date"][:10]
-            if not d_str: continue
-            matrix[d_str][row["shop"]] += 1
+            d_str = row.get("created_date", "N/A")[:10]
+            if d_str == "N/A": continue
+            matrix[d_str][row.get("shop")] += 1
             all_dates.add(d_str)
 
         for d in sorted(list(all_dates), reverse=True):
@@ -368,6 +370,33 @@ class ReturnGoApp:
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(out))
         messagebox.showinfo("Copied", "Copied to clipboard!")
+
+    def download_to_csv(self):
+        if not self.all_fetched_rows:
+            messagebox.showwarning("No Data", "There is no data to download. Please fetch data first.")
+            return
+
+        # Propose a filename
+        filename_proposal = f"returngo_export_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.csv"
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=filename_proposal,
+            title="Save RMA Data as CSV"
+        )
+
+        if not filepath:
+            return # User cancelled
+
+        try:
+            headers = [self.detail_tree.heading(c)['text'] for c in self.detail_tree['columns']]
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                writer.writerows(self.detail_tree.item(item)['values'] for item in self.detail_tree.get_children())
+            messagebox.showinfo("Success", f"Data successfully saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save file: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
