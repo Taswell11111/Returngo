@@ -1,378 +1,437 @@
 import streamlit as st
-import pandas as pd
+import sqlite3
 import requests
+import json
+import pandas as pd
+import os
+from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from datetime import datetime, timezone
-import os
+import concurrent.futures
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="RMA Central | Web", layout="wide", page_icon="📦")
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="👖")
 
-# --- CSS STYLING ---
-st.markdown(
-    """
+# ACCESS SECRETS
+try:
+    # Try getting from secrets (Cloud)
+    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+except (FileNotFoundError, KeyError):
+    # Fallback to Environment Variable (Local)
+    MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
+
+if not MY_API_KEY:
+    st.error("API Key not found! Please set 'RETURNGO_API_KEY' in .streamlit/secrets.toml or Environment Variables.")
+    st.stop()
+
+CACHE_EXPIRY_HOURS = 4
+STORE_URL = "levis-sa.myshopify.com"
+DB_FILE = "levis_cache.db"
+
+# --- STYLING ---
+st.markdown("""
     <style>
-    /* Dark Theme Base */
     .stApp { background-color: #0e1117; color: white; }
     
-    /* Blue Header Boxes */
-    div[data-testid="column"] {
+    /* Metrics/Filter Boxes */
+    div.stButton > button {
+        width: 100%;
+        border: 1px solid #4b5563;
+        background-color: #1f2937;
+        color: white;
+        border-radius: 8px;
+        padding: 10px 0px;
+        font-size: 16px;
+        font-weight: bold;
+    }
+    div.stButton > button:hover {
+        border-color: #c41230; /* Levi's Red */
+        color: #c41230;
+    }
+    div.stButton > button:focus {
+        border-color: #c41230;
+        color: #c41230;
+        background-color: #2d1b1b;
+    }
+
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+        border-bottom: 1px solid #333;
+        padding-left: 20px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 40px;
         background-color: #1a1c24;
-        border-radius: 5px;
-        padding: 10px;
+        border-radius: 4px 4px 0 0;
         border: 1px solid #333;
+        border-bottom: none;
+        color: #aaa;
     }
-    
-    /* Live Logger Style */
-    .stTextArea textarea {
-        background-color: #000000 !important;
-        color: #00ff00 !important;
-        font-family: 'Consolas', monospace !important;
-        font-size: 12px !important;
+    .stTabs [aria-selected="true"] {
+        background-color: #c41230 !important;
+        color: white !important;
+        border-color: #c41230 !important;
     }
-    
-    /* Timeline Block */
-    .timeline-box {
-        background-color: #2b2b2b;
-        padding: 10px;
-        margin: 5px 0 5px 20px;
-        border-radius: 5px;
-        border-left: 3px solid #666;
+
+    /* Action Panel Highlight */
+    .action-panel {
+        border: 1px solid #c41230;
+        padding: 20px;
+        border-radius: 10px;
+        background-color: #1a1a1a;
+        margin-top: 20px;
     }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-# --- CONFIGURATION ---
-MY_API_KEY = os.environ.get("ReturnGo_API", "")
-if not MY_API_KEY:
-    # For local testing you may set env var ReturnGo_API or change this default
-    MY_API_KEY = os.environ.get("RETURNGO_API", "")
-
-STORES = [
-    {"name": "Diesel", "url": "diesel-dev-south-africa.myshopify.com"},
-    {"name": "Hurley", "url": "hurley-dev-south-africa.myshopify.com"},
-    {"name": "Jeep Apparel", "url": "jeep-apparel-dev-south-africa.myshopify.com"},
-    {"name": "Reebok", "url": "reebok-dev-south-africa.myshopify.com"},
-    {"name": "Superdry", "url": "superdry-dev-south-africa.myshopify.com"},
-]
-
-# --- SESSION STATE INITIALIZATION ---
-if "logs" not in st.session_state:
-    st.session_state["logs"] = []
-if "rma_list" not in st.session_state:
-    st.session_state["rma_list"] = []
-if "counts" not in st.session_state:
-    st.session_state["counts"] = {
-        s["url"]: {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0}
-        for s in STORES
-    }
-
-# --- LOGGING ---
-def add_log(message: str, is_error: bool = False) -> str:
-    ts = datetime.now().strftime("%H:%M:%S")
-    icon = "❌" if is_error else "ℹ️"
-    entry = f"[{ts}] {icon} {message}"
-    st.session_state["logs"].append(entry)
-    return "\n".join(st.session_state["logs"])
-
-
-# --- NETWORK SESSION ---
+# Helper for Session
 @st.cache_resource
 def get_session():
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retries))
+    session.mount('https://', HTTPAdapter(max_retries=retries))
     return session
 
+# ==========================================
+# 2. DATABASE MANAGER
+# ==========================================
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS rmas
+                 (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
+                  created_at TEXT, json_data TEXT, last_fetched TIMESTAMP)''')
+    conn.commit()
+    conn.close()
 
-# --- SYNC ALL STORES (FULL) ---
-def sync_counts(log_placeholder):
-    session = get_session()
-    st.session_state["logs"] = []
+def save_rma_to_db(rma_id, status, created_at, data):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    c.execute('''INSERT OR REPLACE INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched)
+                 VALUES (?, ?, ?, ?, ?, ?)''', 
+                 (str(rma_id), STORE_URL, status, created_at, json.dumps(data), now))
+    conn.commit()
+    conn.close()
 
-    log_text = add_log("Starting Sync Process...")
-    log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+def get_rma_from_db(rma_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT json_data, last_fetched FROM rmas WHERE rma_id=?", (str(rma_id),))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return json.loads(row[0]), datetime.fromisoformat(row[1])
+    return None, None
 
-    new_counts = {k: v.copy() for k, v in st.session_state["counts"].items()}
+def get_all_active_from_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Fetch Pending, Approved AND Received
+    c.execute("SELECT json_data FROM rmas WHERE store_url=? AND status IN ('Pending', 'Approved', 'Received')", (STORE_URL,))
+    rows = c.fetchall()
+    conn.close()
+    return [json.loads(r[0]) for r in rows]
 
-    with st.spinner("Syncing stores..."):
-        for store in STORES:
-            add_log(f"Syncing {store['name']}...")
-            log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
+init_db()
 
-            headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store["url"]}
-            for status in ["Pending", "Approved", "Received"]:
-                try:
-                    resp = session.get(
-                        f"https://api.returngo.ai/rmas?status={status}&pagesize=50",
-                        headers=headers,
-                        timeout=8,
-                    )
-                    if resp.status_code == 200:
-                        rmas = resp.json().get("rmas", [])
-                        new_counts[store["url"]][status] = len(rmas)
+# ==========================================
+# 3. BACKEND LOGIC
+# ==========================================
 
-                        if status == "Approved" and len(rmas) > 0:
-                            no_track = 0
-                            for r in rmas:
-                                try:
-                                    det = session.get(f"https://api.returngo.ai/rma/{r['rmaId']}", headers=headers, timeout=6)
-                                    if det.status_code == 200:
-                                        det_json = det.json()
-                                        shipments = det_json.get("shipments", [])
-                                        if not shipments or all(not s.get("trackingNumber") for s in shipments):
-                                            no_track += 1
-                                except Exception:
-                                    # ignore individual rma failures
-                                    pass
-                            new_counts[store["url"]]["NoTrack"] = no_track
-                            if no_track > 0:
-                                add_log(f"{store['name']}: {no_track} missing tracking", is_error=True)
-                                log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
-                except Exception as e:
-                    add_log(f"Error syncing {store['name']} {status}: {e}", is_error=True)
-                    log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
-
-    st.session_state["counts"] = new_counts
-    add_log("Full sync complete.")
-    log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
-
-
-# --- TARGETED SYNC FOR A SINGLE STORE/STATUS ---
-def targeted_sync(store_url: str, sync_status: str | None = None, log_placeholder=None):
-    session = get_session()
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
-    counts = st.session_state["counts"].get(store_url, {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0}).copy()
-
-    statuses = ["Pending", "Approved", "Received"] if sync_status is None else [sync_status]
-
-    for status in statuses:
+def fetch_all_pages(session, headers, status):
+    """Iterates through API pages using cursor logic to get TRUE total."""
+    all_rmas = []
+    cursor = None
+    page_count = 1
+    
+    # Optional: Log to terminal if running locally
+    # print(f"Fetching {status}... Page {page_count}")
+    
+    while True:
         try:
-            resp = session.get(
-                f"https://api.returngo.ai/rmas?status={status}&pagesize=50",
-                headers=headers,
-                timeout=8,
-            )
-            if resp.status_code == 200:
-                rmas = resp.json().get("rmas", [])
-                counts[status] = len(rmas)
+            # Build URL with cursor
+            base_url = f"https://api.returngo.ai/rmas?status={status}&pagesize=50"
+            if cursor:
+                url = f"{base_url}&cursor={cursor}"
+            else:
+                url = base_url
+            
+            res = session.get(url, headers=headers, timeout=15)
+            if res.status_code != 200: break
+            
+            data = res.json()
+            rmas = data.get("rmas", [])
+            if not rmas: break
+            
+            all_rmas.extend(rmas)
+            
+            # Check for next cursor
+            cursor = data.get("next_cursor")
+            if not cursor: break
+            
+            page_count += 1
+            if page_count > 100: break # Safety break
+        except: break
+    return all_rmas
 
-                if status == "Approved":
-                    no_track = 0
-                    for r in rmas:
-                        try:
-                            det = session.get(f"https://api.returngo.ai/rma/{r['rmaId']}", headers=headers, timeout=6)
-                            if det.status_code == 200:
-                                det_json = det.json()
-                                shipments = det_json.get("shipments", [])
-                                if not shipments or all(not s.get("trackingNumber") for s in shipments):
-                                    no_track += 1
-                        except Exception:
-                            pass
-                    counts["NoTrack"] = no_track
-        except Exception as e:
-            if log_placeholder is not None:
-                add_log(f"Targeted sync error for {store_url} {status}: {e}", is_error=True)
-                log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
+def fetch_rma_detail(rma_summary):
+    rma_id = rma_summary.get('rmaId')
+    
+    cached_data, last_fetched = get_rma_from_db(rma_id)
+    if cached_data and last_fetched:
+        if (datetime.now() - last_fetched) < timedelta(hours=CACHE_EXPIRY_HOURS):
+            return cached_data
 
-    st.session_state["counts"][store_url] = counts
-
-
-# --- FETCH TABLE DATA ---
-def load_rmas(url: str, status_type: str, log_placeholder):
     session = get_session()
-
-    add_log(f"Fetching {status_type} list for {url}...")
-    log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
-
-    st.session_state["rma_list"] = []
-
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": url}
-    api_status = "Approved" if status_type == "NoTrack" else status_type
-
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
     try:
-        resp = session.get(
-            f"https://api.returngo.ai/rmas?status={api_status}&pagesize=50&sort_by=+rma_created_at",
-            headers=headers,
-            timeout=12,
-        )
-        if resp.status_code == 200:
-            rmas = resp.json().get("rmas", [])
-            add_log(f"Found {len(rmas)} items. Downloading details...")
-            log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
+        res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            save_rma_to_db(rma_id, rma_summary.get('status'), rma_summary.get('createdAt'), data)
+            return data
+    except: pass
+    return None
 
-            temp = []
-            for r in rmas:
-                try:
-                    det_resp = session.get(f"https://api.returngo.ai/rma/{r['rmaId']}", headers=headers, timeout=8)
-                    if det_resp.status_code != 200:
-                        continue
-                    det = det_resp.json()
+def perform_sync():
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
+    
+    status_msg = st.empty()
+    status_msg.info("⏳ Starting Deep Sync... fetching all pages.")
+    
+    active_summaries = []
+    
+    # 1. Fetch ALL pages for relevant statuses
+    for s in ["Pending", "Approved", "Received"]:
+        rmas = fetch_all_pages(session, headers, s)
+        active_summaries.extend(rmas)
+    
+    total = len(active_summaries)
+    status_msg.info(f"⏳ Found {total} records. Downloading details...")
+    
+    # 2. Parallel Fetch Details
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_rma_detail, rma): rma for rma in active_summaries}
+        completed = 0
+        for future in concurrent.futures.as_completed(futures):
+            completed += 1
+            if completed % 10 == 0:
+                status_msg.progress(completed / total, text=f"Syncing: {completed}/{total} RMAs")
+                
+    st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    status_msg.success(f"✅ Sync Complete! Total: {total}")
+    st.rerun()
 
-                    shipments = det.get("shipments", [])
-                    track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
-                    track_str = ", ".join(track_nums) if track_nums else "N/A"
-
-                    if status_type == "NoTrack" and track_nums:
-                        # skip rmas that have tracking when user asked for NoTrack
-                        continue
-
-                    raw_create = det.get("createdAt") or r.get("createdAt")
-                    created_display = str(raw_create)[:10] if raw_create else "N/A"
-
-                    raw_update = det.get("lastUpdated")
-                    updated_display = str(raw_update)[:10] if raw_update else "N/A"
-
-                    days_since = "0"
-                    if raw_update:
-                        try:
-                            dt_obj = datetime.fromisoformat(raw_update.replace("Z", "+00:00"))
-                            now = datetime.now(dt_obj.tzinfo or timezone.utc)
-                            delta = now - dt_obj
-                            days_since = str(max(0, delta.days))
-                        except Exception:
-                            pass
-
-                    temp.append(
-                        {
-                            "id": r.get("rmaId"),
-                            "order": r.get("order_name"),
-                            "tracking": track_str,
-                            "created": created_display,
-                            "updated": updated_display,
-                            "status": r.get("status"),
-                            "days": days_since,
-                            "timeline": det.get("comments", []),
-                        }
-                    )
-                except Exception:
-                    # ignore individual item errors
-                    pass
-
-            st.session_state["rma_list"] = temp
-            add_log("Table loaded successfully.")
-            log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
+def push_tracking_update(rma_id, shipment_id, tracking_number):
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
+    
+    payload = {
+        "status": "LabelCreated",
+        "carrierName": "CourierGuy",
+        "trackingNumber": tracking_number,
+        "trackingURL": f"https://optimise.parcelninja.com/shipment/track/{tracking_number}",
+        "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null"
+    }
+    
+    try:
+        # Use PUT /shipment/{id}
+        res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
+        
+        if res.status_code == 200:
+            fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
+            if fresh_res.status_code == 200:
+                fresh_data = fresh_res.json()
+                summary = fresh_data.get('rmaSummary', {})
+                save_rma_to_db(rma_id, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
+            return True, "Success"
         else:
-            add_log(f"Failed fetching list: HTTP {resp.status_code}", is_error=True)
-            log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
+            return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
-        add_log(f"Fetch error: {e}", is_error=True)
-        log_placeholder.text_area("Live System Log", value="\n".join(st.session_state["logs"]), height=150, disabled=True)
+        return False, str(e)
 
+# ==========================================
+# 4. FRONTEND UI
+# ==========================================
 
-# --- MAIN UI LAYOUT ---
-st.title("🚀 RMA Central")
+# --- Header ---
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.title("Levi's RMA Ops 👖")
+    last_sync = st.session_state.get('last_sync', 'Not run yet')
+    st.caption(f"Connected to: {STORE_URL} | Last Sync: {last_sync}")
+with col2:
+    if st.button("🔄 Sync All Data", type="primary", use_container_width=True):
+        perform_sync()
 
-# 1. STATUS BOXES
-cols = st.columns(len(STORES))
-log_col_area = st.container()
+# --- Data Processing ---
+raw_data = get_all_active_from_db()
+processed_rows = []
+counts = {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0}
 
-for i, store in enumerate(STORES):
-    c = st.session_state["counts"].get(store["url"], {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0})
-    with cols[i]:
-        st.markdown(f"**{store['name']}**")
+for rma in raw_data:
+    summary = rma.get('rmaSummary', {})
+    shipments = rma.get('shipments', [])
+    comments = rma.get('comments', [])
+    
+    status = summary.get('status', 'Unknown')
+    rma_id = summary.get('rmaId', 'N/A')
+    order_name = summary.get('order_name', 'N/A')
+    
+    # Tracking
+    track_nums = [s.get('trackingNumber') for s in shipments if s.get('trackingNumber')]
+    track_str = ", ".join(track_nums) if track_nums else ""
+    shipment_id = shipments[0].get('shipmentId') if shipments else None
+    
+    # Created Date
+    created_at = summary.get('createdAt')
+    if not created_at:
+        for evt in summary.get('events', []):
+            if evt.get('eventName') == 'RMA_CREATED':
+                created_at = evt.get('eventDate')
+                break
+    created_display = str(created_at)[:10] if created_at else "N/A"
 
-        # unique keys for buttons using index
-        if st.button(f"Pending: {c['Pending']}", key=f"pending_{i}"):
-            st.session_state["trigger"] = ("load", store["url"], "Pending")
-        if st.button(f"Approved: {c['Approved']}", key=f"approved_{i}"):
-            st.session_state["trigger"] = ("load", store["url"], "Approved")
-        if st.button(f"Received: {c['Received']}", key=f"received_{i}"):
-            st.session_state["trigger"] = ("load", store["url"], "Received")
+    # Days Since
+    updated_at = rma.get('lastUpdated')
+    days_since = 0
+    if updated_at:
+        try:
+            d = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+            days_since = (datetime.now(timezone.utc).date() - d.date()).days
+        except: pass
 
-        label = f"No ID: {c['NoTrack']}"
-        # no-track button key also unique
-        if st.button(label, key=f"notrack_{i}"):
-            st.session_state["trigger"] = ("load", store["url"], "NoTrack")
+    # Counting
+    if status in counts: counts[status] += 1
+    
+    is_no_track = False
+    if status == "Approved":
+        if not shipments or not track_str:
+            counts["NoTrack"] += 1
+            is_no_track = True
+            
+    is_flagged = False
+    if any("flagged" in c.get('htmlText', '').lower() for c in comments):
+        counts["Flagged"] += 1
+        is_flagged = True
 
-st.markdown("---")
+    processed_rows.append({
+        "RMA ID": rma_id,
+        "Order": order_name,
+        "Status": status,
+        "Tracking": track_str,
+        "Created": created_display,
+        "Updated": str(updated_at)[:10] if updated_at else "N/A",
+        "Days": days_since,
+        "IsNoTrack": is_no_track,
+        "IsFlagged": is_flagged,
+        "shipment_id": shipment_id,
+        "full_data": rma
+    })
 
-# 2. LOGGING & ACTIONS AREA
-col_act, col_log = st.columns([1, 3])
+# --- Interactive Filter Boxes ---
+if 'filter_status' not in st.session_state:
+    st.session_state.filter_status = "All"
 
-with col_act:
-    if st.button("🔄 Sync All", use_container_width=True, key="sync_all_btn"):
-        st.session_state["trigger"] = ("sync", None, None)
+b1, b2, b3, b4, b5 = st.columns(5)
 
-    st.markdown("**Live System Log:**")
-    log_placeholder = st.empty()
-    current_logs = "\n".join(st.session_state["logs"]) if st.session_state["logs"] else "Ready..."
-    log_placeholder.text_area("Live System Log", value=current_logs, height=150, disabled=True, label_visibility="collapsed")
+def set_filter(f): st.session_state.filter_status = f
 
-# 3. HANDLE TRIGGERS
-if "trigger" in st.session_state:
-    action, url, status = st.session_state["trigger"]
-    del st.session_state["trigger"]
+with b1:
+    if st.button(f"Pending\n{counts['Pending']}"): set_filter("Pending")
+with b2:
+    if st.button(f"Approved\n{counts['Approved']}"): set_filter("Approved")
+with b3:
+    if st.button(f"Received\n{counts['Received']}"): set_filter("Received")
+with b4:
+    if st.button(f"No Tracking\n{counts['NoTrack']}"): set_filter("NoTrack")
+with b5:
+    if st.button(f"🚩 Flagged\n{counts['Flagged']}"): set_filter("Flagged")
 
-    if action == "sync":
-        sync_counts(log_placeholder)
-        st.experimental_rerun()
-    elif action == "load":
-        # targeted sync then load records
-        targeted_sync(url, status, log_placeholder)
-        load_rmas(url, status, log_placeholder)
-        st.experimental_rerun()
+# --- Table Display ---
+st.divider()
+st.subheader(f"📋 {st.session_state.filter_status} Records")
 
-# 4. DATA TABLE
-with col_log:
-    st.subheader(f"📋 Active List ({len(st.session_state['rma_list'])})")
+df = pd.DataFrame(processed_rows)
 
-    search = st.text_input("🔍 Filter (RMA, Order, or Tracking)", placeholder="Type to search...", key="search_input")
+if not df.empty:
+    f_stat = st.session_state.filter_status
+    if f_stat == "Pending": display_df = df[df['Status'] == 'Pending']
+    elif f_stat == "Approved": display_df = df[df['Status'] == 'Approved']
+    elif f_stat == "Received": display_df = df[df['Status'] == 'Received']
+    elif f_stat == "NoTrack": display_df = df[df['IsNoTrack'] == True]
+    elif f_stat == "Flagged": display_df = df[df['IsFlagged'] == True]
+    else: display_df = df
 
-    # Header - Added "Updated" Column and Row No
-    # Weights: No, ID, Order, Track, Created, Updated, Days, Action
-    h0, h1, h2, h3, h4, h5, h6, h7 = st.columns([1, 2, 2, 3, 2, 2, 1, 2])
-    h0.markdown("**No.**")
-    h1.markdown("**RMA ID**")
-    h2.markdown("**Order #**")
-    h3.markdown("**Tracking**")
-    h4.markdown("**Created**")
-    h5.markdown("**Updated**")
-    h6.markdown("**Days**")
-    h7.markdown("**Action**")
-    st.divider()
+    display_df = display_df.sort_values(by="Created", ascending=False)
 
-    # Rows (with numbering)
-    for idx, row in enumerate(st.session_state["rma_list"], 1):
-        search_str = f"{row.get('id','')} {row.get('order','')} {row.get('tracking','')}".lower()
-        if search and search.lower() not in search_str:
-            continue
+    # --- MAIN TABLE (Removed ButtonColumn) ---
+    col_config = {
+        "RMA ID": st.column_config.TextColumn("RMA ID", help="Copyable"),
+        "Order": st.column_config.TextColumn("Order #"),
+    }
+    
+    # We display a selection table
+    event = st.dataframe(
+        display_df[["RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        key="main_table"
+    )
+    
+    # --- Action Panel (Selection Based) ---
+    selected = st.session_state.main_table.get("selection", {}).get("rows", [])
+    
+    if selected:
+        idx = selected[0]
+        if idx < len(display_df):
+            record = display_df.iloc[idx]
+            
+            st.markdown("<div class='action-panel'>", unsafe_allow_html=True)
+            st.markdown(f"### 🛠️ Manage RMA: `{record['RMA ID']}`")
+            
+            # Tabs for Actions
+            act_tab1, act_tab2 = st.tabs(["📝 Timeline Review", "✏️ Update Tracking"])
+            
+            with act_tab1:
+                full = record['full_data']
+                timeline = full.get('comments', [])
+                if not timeline:
+                    st.info("No timeline events found.")
+                else:
+                    for t in timeline:
+                        d_str = t.get('datetime', '')[:16].replace('T', ' ')
+                        who = t.get('triggeredBy', 'System')
+                        msg = t.get('htmlText', '')
+                        st.markdown(f"**{d_str}** | `{who}`")
+                        st.caption(msg, unsafe_allow_html=True)
+                        st.divider()
 
-        c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 2, 2, 3, 2, 2, 1, 2])
-        c0.markdown(f"**{idx}**")
-        c1.code(row.get("id", ""))
-        c2.write(row.get("order", ""))
-        c3.write(row.get("tracking", ""))
-        c4.write(row.get("created", ""))
-        c5.write(row.get("updated", ""))
+            with act_tab2:
+                with st.form("update_track_form"):
+                    new_track = st.text_input("New Tracking Number", value=record['Tracking'])
+                    submitted = st.form_submit_button("Save Changes")
+                    
+                    if submitted:
+                        if not record['shipment_id']:
+                            st.error("No Shipment ID associated with this RMA.")
+                        else:
+                            ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track)
+                            if ok:
+                                st.success("Tracking Updated! Refreshing...")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+            st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.info("👆 Click on any row in the table to view Timeline or Update Tracking.")
 
-        days_val = row.get("days", "0")
-        days_int = int(days_val) if str(days_val).isdigit() else 0
-        if days_int > 7:
-            c6.error(f"{days_int}")
-        else:
-            c6.success(f"{days_int}")
-
-        with c7:
-            with st.expander("Timeline"):
-                for t in row.get("timeline", []):
-                    triggered_by = t.get("triggeredBy", "System")
-                    datetime_str = (t.get("datetime") or "")[:16]
-                    html = t.get("htmlText", "")
-                    st.markdown(
-                        f"""
-                        <div class="timeline-box">
-                            <small style="color:#aaa">{triggered_by} | {datetime_str}</small><br>
-                            {html}
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-        st.markdown("<hr style='margin: 5px 0; opacity: 0.2'>", unsafe_allow_html=True)
-
-if not st.session_state["rma_list"]:
-    st.info("Select a status above to load records.")
+else:
+    st.warning("No records found in database. Please click 'Sync All Data' to fetch initial data.")
