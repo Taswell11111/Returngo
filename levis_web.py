@@ -40,7 +40,7 @@ st.markdown("""
         background-color: #1f2937;
         color: white;
         border-radius: 8px;
-        padding: 10px 0px;
+        padding: 10px 4px;
         font-size: 16px;
         font-weight: bold;
     }
@@ -427,6 +427,7 @@ if not df.empty:
 
 else:
     st.warning("No records found in database. Please click 'Sync All Data' to fetch initial data.")
+
 
 
 
