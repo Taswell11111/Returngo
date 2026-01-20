@@ -159,13 +159,16 @@ def fetch_all_pages(session, headers, status):
     return all_rmas
 
 def fetch_rma_detail(args):
-    rma_summary, store_url = args
+    # UPDATED: Now accepts force_refresh as the 3rd argument
+    rma_summary, store_url, force_refresh = args
     rma_id = rma_summary.get('rmaId')
     
-    cached_data, last_fetched = get_rma_from_db(rma_id)
-    if cached_data and last_fetched:
-        if (datetime.now() - last_fetched) < timedelta(hours=CACHE_EXPIRY_HOURS):
-            return cached_data
+    # Only use cache if we are NOT forcing a refresh
+    if not force_refresh:
+        cached_data, last_fetched = get_rma_from_db(rma_id)
+        if cached_data and last_fetched:
+            if (datetime.now() - last_fetched) < timedelta(hours=CACHE_EXPIRY_HOURS):
+                return cached_data
 
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
@@ -201,7 +204,8 @@ def perform_sync(target_store=None, target_status=None):
         for s in statuses:
             rmas = fetch_all_pages(session, headers, s)
             for r in rmas:
-                tasks.append((r, store['url']))
+                # UPDATED: Pass 'True' to force refresh this specific sync
+                tasks.append((r, store['url'], True))
             total_found += len(rmas)
         if list_bar: list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
     if list_bar: list_bar.empty()
