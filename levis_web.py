@@ -14,7 +14,16 @@ import concurrent.futures
 # ==========================================
 st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="👖")
 
-MY_API_KEY = "WsIPXwH9w45gaaGrl5BfZ9EeF52MlUqp79G0fIEU"
+# ACCESS SECRETS
+try:
+    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+except FileNotFoundError:
+    st.error("Secrets file not found! Please create .streamlit/secrets.toml for local use.")
+    st.stop()
+except KeyError:
+    st.error("RETURNGO_API_KEY not found in secrets!")
+    st.stop()
+
 CACHE_EXPIRY_HOURS = 4
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
@@ -24,6 +33,7 @@ st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: white; }
     
+    /* Metrics/Filter Boxes */
     div.stButton > button {
         width: 100%;
         border: 1px solid #4b5563;
@@ -35,9 +45,16 @@ st.markdown("""
         font-weight: bold;
     }
     div.stButton > button:hover {
-        border-color: #c41230; 
+        border-color: #c41230; /* Levi's Red */
         color: #c41230;
     }
+    div.stButton > button:focus {
+        border-color: #c41230;
+        color: #c41230;
+        background-color: #2d1b1b;
+    }
+
+    /* Tabs Styling */
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px;
         border-bottom: 1px solid #333;
@@ -56,6 +73,8 @@ st.markdown("""
         color: white !important;
         border-color: #c41230 !important;
     }
+
+    /* Action Panel Highlight */
     .action-panel {
         border: 1px solid #c41230;
         padding: 20px;
@@ -115,31 +134,24 @@ def get_all_active_from_db():
     conn.close()
     return [json.loads(r[0]) for r in rows]
 
-def clear_db():
-    try:
-        os.remove(DB_FILE)
-        init_db()
-        return True
-    except Exception as e:
-        return False
-
 init_db()
 
 # ==========================================
 # 3. BACKEND LOGIC
 # ==========================================
 
-def fetch_all_pages(session, headers, status, progress_bar, status_text):
+def fetch_all_pages(session, headers, status):
     """Iterates through API pages using cursor logic to get TRUE total."""
     all_rmas = []
     cursor = None
     page_count = 1
     
-    status_text.text(f"Fetching {status} list... Page {page_count}")
+    # Optional: Log to terminal if running locally
+    # print(f"Fetching {status}... Page {page_count}")
     
     while True:
         try:
-            # Build URL with cursor if available
+            # Build URL with cursor
             base_url = f"https://api.returngo.ai/rmas?status={status}&pagesize=50"
             if cursor:
                 url = f"{base_url}&cursor={cursor}"
@@ -149,26 +161,19 @@ def fetch_all_pages(session, headers, status, progress_bar, status_text):
             res = session.get(url, headers=headers, timeout=15)
             if res.status_code != 200: break
             
-            response_data = res.json()
-            rmas = response_data.get("rmas", [])
-            
+            data = res.json()
+            rmas = data.get("rmas", [])
             if not rmas: break
             
             all_rmas.extend(rmas)
-            status_text.text(f"Fetching {status} list... Page {page_count} (Found {len(all_rmas)} total)")
             
             # Check for next cursor
-            cursor = response_data.get("next_cursor")
-            
-            # Stop if no cursor (end of list)
+            cursor = data.get("next_cursor")
             if not cursor: break
             
             page_count += 1
             if page_count > 100: break # Safety break
-        except Exception as e: 
-            status_text.text(f"Error fetching page: {e}")
-            break
-            
+        except: break
     return all_rmas
 
 def fetch_rma_detail(rma_summary):
@@ -194,49 +199,30 @@ def perform_sync():
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
     
-    # Create Progress Container
-    progress_container = st.empty()
-    with progress_container.container():
-        st.info("🚀 Starting Sync Process...")
-        my_bar = st.progress(0, text="Initializing...")
-        status_text = st.empty()
+    status_msg = st.empty()
+    status_msg.info("⏳ Starting Deep Sync... fetching all pages.")
     
     active_summaries = []
     
-    # 1. Fetch Lists with Visual Feedback
-    statuses = ["Pending", "Approved", "Received"]
-    for i, s in enumerate(statuses):
-        my_bar.progress((i / len(statuses)) * 0.3, text=f"Step 1/2: Fetching List - {s}") # First 30% is list fetching
-        rmas = fetch_all_pages(session, headers, s, my_bar, status_text)
+    # 1. Fetch ALL pages for relevant statuses
+    for s in ["Pending", "Approved", "Received"]:
+        rmas = fetch_all_pages(session, headers, s)
         active_summaries.extend(rmas)
     
     total = len(active_summaries)
+    status_msg.info(f"⏳ Found {total} records. Downloading details...")
     
-    if total == 0:
-        my_bar.progress(100, text="Complete")
-        status_text.text("No active records found.")
-        st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        st.rerun()
-        return
-
-    # 2. Parallel Fetch Details with Progress Bar
-    my_bar.progress(0.3, text=f"Step 2/2: Downloading Details for {total} RMAs...")
-    
+    # 2. Parallel Fetch Details
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(fetch_rma_detail, rma): rma for rma in active_summaries}
         completed = 0
         for future in concurrent.futures.as_completed(futures):
             completed += 1
-            # Calculate remaining 70% of progress bar
-            progress = 0.3 + ((completed / total) * 0.7)
-            
-            if completed % 5 == 0:
-                rma_id = futures[future].get('rmaId')
-                my_bar.progress(min(progress, 1.0), text=f"Downloading Details: {completed}/{total} (Current: {rma_id})")
+            if completed % 10 == 0:
+                status_msg.progress(completed / total, text=f"Syncing: {completed}/{total} RMAs")
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    my_bar.progress(100, text="✅ Sync Complete!")
-    status_text.text(f"Successfully synced {total} records.")
+    status_msg.success(f"✅ Sync Complete! Total: {total}")
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number):
@@ -252,6 +238,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
     }
     
     try:
+        # Use PUT /shipment/{id}
         res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
         
         if res.status_code == 200:
@@ -279,10 +266,6 @@ with col1:
 with col2:
     if st.button("🔄 Sync All Data", type="primary", use_container_width=True):
         perform_sync()
-    if st.button("🗑️ Reset Cache", type="secondary"):
-        if clear_db():
-            st.success("Cache cleared! Please Sync All.")
-            st.rerun()
 
 # --- Data Processing ---
 raw_data = get_all_active_from_db()
@@ -386,7 +369,6 @@ if not df.empty:
     display_df = display_df.sort_values(by="Created", ascending=False)
 
     # --- MAIN TABLE ---
-    # We display a selection table first
     event = st.dataframe(
         display_df[["RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
         use_container_width=True,
