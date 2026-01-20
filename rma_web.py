@@ -4,6 +4,7 @@ import requests
 import json
 import pandas as pd
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -185,7 +186,7 @@ def perform_sync(target_store=None, target_status=None):
     session = get_session()
     
     status_msg = st.empty()
-    status_msg.info("⏳ Connecting to API...")
+    status_msg.info("⏳ Connecting to API (Server-Side)...")
     
     tasks = [] 
     stores_to_sync = [target_store] if target_store else STORES
@@ -197,7 +198,7 @@ def perform_sync(target_store=None, target_status=None):
 
     total_found = 0
     list_bar = None
-    if not target_store: list_bar = st.progress(0, text="Fetching Lists...")
+    if not target_store: list_bar = st.progress(0, text="Fetching Lists from ReturnGO...")
 
     for i, store in enumerate(stores_to_sync):
         headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
@@ -223,7 +224,9 @@ def perform_sync(target_store=None, target_status=None):
                     bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
         bar.empty()
                 
-    st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state['show_toast'] = True # Trigger toast on next run
+    
     status_msg.success(f"✅ Sync Complete!")
     # FORCE REFRESH HERE
     st.rerun()
@@ -266,6 +269,11 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
 if 'filter_state' not in st.session_state:
     st.session_state.filter_state = {"store": None, "status": "All"}
 
+# Show toast if sync just finished
+if st.session_state.get('show_toast'):
+    st.toast("✅ API Sync Complete! Data refreshed from ReturnGO.", icon="🔄")
+    st.session_state['show_toast'] = False
+
 # Helper to handle button clicks
 def handle_filter_click(store_url, status):
     st.session_state.filter_state = {"store": store_url, "status": status}
@@ -281,7 +289,8 @@ col1, col2 = st.columns([3, 1])
 with col1:
     st.title("RMA Central (Multi-Store) 📦")
     last_sync = st.session_state.get('last_sync', 'Not run yet')
-    st.caption(f"Last Sync: {last_sync}")
+    # Use green color for recent syncs to give visual feedback
+    st.markdown(f"**Last Sync:** :green[{last_sync}]")
 with col2:
     if st.button("🔄 Sync All Data", type="primary", use_container_width=True):
         perform_sync()
