@@ -260,7 +260,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
 # --- Header ---
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.title("Levi's RMA Operations 👖")
+    st.title("Levi's ReturnGO RMA Operations")
     last_sync = st.session_state.get('last_sync', 'Not run yet')
     st.caption(f"Connected to: {STORE_URL} | Last Sync: {last_sync}")
 with col2:
@@ -427,3 +427,4 @@ if not df.empty:
 
 else:
     st.warning("No records found in database. Please click 'Sync All Data' to fetch initial data.")
+
