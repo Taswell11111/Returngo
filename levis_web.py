@@ -195,7 +195,7 @@ def fetch_rma_detail(rma_summary):
     except: pass
     return None
 
-def perform_sync():
+def perform_sync(statuses=None):
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
     
@@ -205,7 +205,10 @@ def perform_sync():
     active_summaries = []
     
     # 1. Fetch ALL pages for relevant statuses
-    for s in ["Pending", "Approved", "Received"]:
+    if statuses is None:
+        statuses = ["Pending", "Approved", "Received"]
+
+    for s in statuses:
         rmas = fetch_all_pages(session, headers, s)
         active_summaries.extend(rmas)
     
@@ -218,8 +221,14 @@ def perform_sync():
         completed = 0
         for future in concurrent.futures.as_completed(futures):
             completed += 1
-            if completed % 10 == 0:
-                status_msg.progress(completed / total, text=f"Syncing: {completed}/{total} RMAs")
+            if total and completed % 10 == 0:
+                try:
+                    status_msg.progress(completed / total, text=f"Syncing: {completed}/{total} RMAs")
+                except Exception:
+                    try:
+                        status_msg.progress(completed / total)
+                    except Exception:
+                        pass
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     status_msg.success(f"✅ Sync Complete! Total: {total}")
@@ -338,7 +347,15 @@ if 'filter_status' not in st.session_state:
 
 b1, b2, b3, b4, b5 = st.columns(5)
 
-def set_filter(f): st.session_state.filter_status = f
+# updated set_filter to optionally perform targeted syncs
+def set_filter(f):
+    st.session_state.filter_status = f
+    # If the user clicked one of the primary statuses, do a targeted fetch for fresh data
+    if f in ["Pending", "Approved", "Received"]:
+        perform_sync(statuses=[f])
+    else:
+        # No network action required for derived filters — just rerun to refresh UI
+        st.experimental_rerun()
 
 with b1:
     if st.button(f"Pending\n{counts['Pending']}"): set_filter("Pending")
@@ -347,9 +364,9 @@ with b2:
 with b3:
     if st.button(f"Received\n{counts['Received']}"): set_filter("Received")
 with b4:
-    if st.button(f"No Tracking\n{counts['NoTrack']}"): set_filter("NoTrack")
+    if st.button(f"No Tracking\n{counts['NoTrack']} "): set_filter("NoTrack")
 with b5:
-    if st.button(f"🚩 Flagged\n{counts['Flagged']}"): set_filter("Flagged")
+    if st.button(f"🚩 Flagged\n{counts['Flagged']} "): set_filter("Flagged")
 
 # --- Table Display ---
 st.divider()
@@ -366,11 +383,13 @@ if not df.empty:
     elif f_stat == "Flagged": display_df = df[df['IsFlagged'] == True]
     else: display_df = df
 
-    display_df = display_df.sort_values(by="Created", ascending=False)
+    # sort and add row numbers
+    display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
+    display_df.insert(0, "No", range(1, len(display_df) + 1))
 
     # --- MAIN TABLE ---
     event = st.dataframe(
-        display_df[["RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
+        display_df[["No", "RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
         width='stretch',
         hide_index=True,
         selection_mode="single-row",
@@ -402,7 +421,7 @@ if not df.empty:
                         d_str = t.get('datetime', '')[:16].replace('T', ' ')
                         who = t.get('triggeredBy', 'System')
                         msg = t.get('htmlText', '')
-                        st.markdown(f"**{d_str}** | `{who}`")
+                        st.markdown(f"**{d_str}** | `{{who}}`")
                         st.caption(msg, unsafe_allow_html=True)
                         st.divider()
 
@@ -427,8 +446,3 @@ if not df.empty:
 
 else:
     st.warning("No records found in database. Please click 'Sync All Data' to fetch initial data.")
-
-
-
-
-
