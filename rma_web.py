@@ -159,7 +159,6 @@ def fetch_all_pages(session, headers, status):
     return all_rmas
 
 def fetch_rma_detail(args):
-    """Worker for parallel detail fetching"""
     rma_summary, store_url = args
     rma_id = rma_summary.get('rmaId')
     
@@ -188,8 +187,6 @@ def perform_sync(target_store=None, target_status=None):
     tasks = [] # List of (rma, store_url)
     
     stores_to_sync = [target_store] if target_store else STORES
-    
-    # Determine Statuses to fetch
     statuses = [target_status] if target_status else ["Pending", "Approved", "Received"]
     if target_status == "NoTrack": statuses = ["Approved"]
     if target_status == "Flagged": statuses = ["Pending", "Approved"]
@@ -197,11 +194,8 @@ def perform_sync(target_store=None, target_status=None):
 
     # 1. Fetch Lists
     total_found = 0
-    
-    # Show progress bar for list fetching if multiple stores
     list_bar = None
-    if not target_store:
-         list_bar = st.progress(0, text="Fetching Lists...")
+    if not target_store: list_bar = st.progress(0, text="Fetching Lists...")
 
     for i, store in enumerate(stores_to_sync):
         headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
@@ -210,10 +204,7 @@ def perform_sync(target_store=None, target_status=None):
             for r in rmas:
                 tasks.append((r, store['url']))
             total_found += len(rmas)
-        
-        if list_bar:
-             list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
-            
+        if list_bar: list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
     if list_bar: list_bar.empty()
 
     status_msg.info(f"⏳ Found {total_found} records. Downloading details...")
@@ -232,7 +223,6 @@ def perform_sync(target_store=None, target_status=None):
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     status_msg.success(f"✅ Sync Complete!")
-    # FORCE REFRESH HERE
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
@@ -248,6 +238,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     }
     
     try:
+        # Use PUT /shipment/{id}
         res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
         
         if res.status_code == 200:
@@ -255,6 +246,15 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
             if fresh_res.status_code == 200:
                 fresh_data = fresh_res.json()
+                
+                # --- FORCE UPDATE MEMORY ---
+                # Ensure the shipment object has the new tracking number before saving
+                # This handles API latency where GET might return old data for a second
+                shipments = fresh_data.get('shipments', [])
+                for s in shipments:
+                    if s.get('shipmentId') == shipment_id:
+                        s['trackingNumber'] = tracking_number
+                
                 summary = fresh_data.get('rmaSummary', {})
                 save_rma_to_db(rma_id, store_url, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
             return True, "Success"
@@ -354,8 +354,6 @@ if 'filter_state' not in st.session_state:
 
 def set_filter(store, status):
     st.session_state.filter_state = {"store": store, "status": status}
-    
-    # Trigger targeted sync
     if status != "All":
         store_obj = next((s for s in STORES if s['url'] == store), None)
         if store_obj:
