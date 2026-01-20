@@ -40,65 +40,26 @@ st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: white; }
     
-    /* Metrics/Filter Boxes - Distinct styling */
     div.stButton > button {
         width: 100%;
         border: 1px solid #4b5563;
         background-color: #1f2937;
         color: white;
         border-radius: 8px;
-        padding: 15px 0px; 
-        font-size: 16px;
+        padding: 10px 0px;
+        font-size: 14px;
         font-weight: bold;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        transition: all 0.2s;
     }
     div.stButton > button:hover {
         border-color: #1f538d; 
         color: #1f538d;
-        transform: translateY(-2px);
     }
-    div.stButton > button:active {
-        background-color: #2d1b1b;
-        transform: translateY(0);
-    }
-
-    /* Tabs Styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        border-bottom: 2px solid #333;
-        padding-left: 20px;
-        margin-top: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 45px;
-        background-color: #1a1c24;
-        border-radius: 6px 6px 0 0;
-        border: 1px solid #333;
-        border-bottom: none;
-        color: #aaa;
-        padding: 0 20px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #1f538d !important;
-        color: white !important;
-        border-color: #1f538d !important;
-        border-bottom: 2px solid #1f538d;
-    }
-
-    /* Action Panel Highlight */
     .action-panel {
         border: 2px solid #1f538d;
-        padding: 25px;
-        border-radius: 12px;
-        background-color: #151515;
-        margin-top: 25px;
-    }
-    
-    /* Table Headers */
-    [data-testid="stDataFrame"] th {
-        background-color: #1f538d !important;
-        color: white !important;
+        padding: 20px;
+        border-radius: 10px;
+        background-color: #1a1a1a;
+        margin-top: 20px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -159,8 +120,7 @@ def get_all_active_from_db():
 
 def clear_db():
     try:
-        if os.path.exists(DB_FILE):
-            os.remove(DB_FILE)
+        os.remove(DB_FILE)
         init_db()
         return True
     except: return False
@@ -171,14 +131,10 @@ init_db()
 # 3. BACKEND LOGIC
 # ==========================================
 
-def fetch_all_pages(session, headers, status, progress_bar=None, status_text=None):
-    """Iterates through API pages using cursor/page logic to get TRUE total."""
+def fetch_all_pages(session, headers, status):
     all_rmas = []
     page = 1
     cursor = None
-    
-    if status_text:
-        status_text.text(f"Fetching {status} list... Page {page}")
     
     while True:
         try:
@@ -194,17 +150,12 @@ def fetch_all_pages(session, headers, status, progress_bar=None, status_text=Non
             
             all_rmas.extend(rmas)
             
-            if status_text:
-                status_text.text(f"Fetching {status} list... Page {page} (Found {len(all_rmas)} total)")
-            
             cursor = data.get("next_cursor")
             if not cursor: break
             
             page += 1
             if page > 100: break
-        except Exception as e:
-             if status_text: status_text.text(f"Error fetching page: {e}")
-             break
+        except: break
     return all_rmas
 
 def fetch_rma_detail(args):
@@ -230,15 +181,10 @@ def fetch_rma_detail(args):
 def perform_sync(target_store=None, target_status=None):
     session = get_session()
     
-    # Progress UI Container
-    progress_container = st.empty()
-    with progress_container.container():
-        st.info("⏳ Connecting to API...")
-        my_bar = st.progress(0, text="Initializing...")
-        status_text = st.empty()
+    status_msg = st.empty()
+    status_msg.info("⏳ Connecting to API...")
     
     tasks = [] 
-    
     stores_to_sync = [target_store] if target_store else STORES
     
     statuses = [target_status] if target_status else ["Pending", "Approved", "Received"]
@@ -246,40 +192,36 @@ def perform_sync(target_store=None, target_status=None):
     if target_status == "Flagged": statuses = ["Pending", "Approved"]
     if target_status == "All": statuses = ["Pending", "Approved", "Received"]
 
-    # 1. Fetch Lists
     total_found = 0
-    
+    list_bar = None
+    if not target_store: list_bar = st.progress(0, text="Fetching Lists...")
+
     for i, store in enumerate(stores_to_sync):
-        store_url = store['url'] if isinstance(store, dict) else store
-        store_name = next((s['name'] for s in STORES if s['url'] == store_url), "Store")
-        
-        headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
+        headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
         for s in statuses:
-            my_bar.progress((i + 1) / len(stores_to_sync) * 0.3, text=f"Step 1/2: Fetching List - {store_name} ({s})")
-            rmas = fetch_all_pages(session, headers, s, my_bar, status_text)
+            rmas = fetch_all_pages(session, headers, s)
             for r in rmas:
-                tasks.append((r, store_url))
+                tasks.append((r, store['url']))
             total_found += len(rmas)
-            
-    status_text.text(f"Found {total_found} records. Downloading details...")
+        if list_bar: list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
+    if list_bar: list_bar.empty()
+
+    status_msg.info(f"⏳ Found {total_found} records. Downloading details...")
     
-    # 2. Parallel Fetch Details
     if total_found > 0:
-        my_bar.progress(0.3, text=f"Step 2/2: Downloading Details for {total_found} RMAs...")
+        bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(fetch_rma_detail, task): task for task in tasks}
             completed = 0
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
-                progress = 0.3 + ((completed / total_found) * 0.7)
                 if completed % 10 == 0:
-                     my_bar.progress(min(progress, 1.0), text=f"Downloading Details: {completed}/{total_found}")
-    
+                    bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
+        bar.empty()
+                
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    my_bar.progress(100, text="✅ Sync Complete!")
-    status_text.text(f"Successfully synced {total_found} records.")
-    
-    # Force UI Refresh
+    status_msg.success(f"✅ Sync Complete!")
+    # FORCE REFRESH HERE
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
@@ -298,18 +240,13 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
         res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
         
         if res.status_code == 200:
-            # Immediate Cache Refresh
+            # --- CRITICAL FIX: UPDATE CACHE IMMEDIATELY ---
+            # Fetch the fresh full RMA details to get the updated shipment info
             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
             if fresh_res.status_code == 200:
                 fresh_data = fresh_res.json()
-                
-                # --- FORCE UPDATE IN MEMORY ---
-                shipments = fresh_data.get('shipments', [])
-                for s in shipments:
-                    if s.get('shipmentId') == shipment_id:
-                        s['trackingNumber'] = tracking_number
-                
                 summary = fresh_data.get('rmaSummary', {})
+                # Save to DB so the UI updates instantly
                 save_rma_to_db(rma_id, store_url, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
             return True, "Success"
         else:
@@ -318,8 +255,24 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
         return False, str(e)
 
 # ==========================================
-# 4. FRONTEND UI
+# 4. FRONTEND UI LOGIC
 # ==========================================
+
+# Initialize Filter State
+if 'filter_state' not in st.session_state:
+    st.session_state.filter_state = {"store": None, "status": "All"}
+
+# Helper to handle button clicks
+def handle_filter_click(store_url, status):
+    st.session_state.filter_state = {"store": store_url, "status": status}
+    
+    # TRIGGER SYNC HERE -> Then Rerun
+    if status != "All":
+        store_obj = next((s for s in STORES if s['url'] == store_url), None)
+        if store_obj:
+            perform_sync(store_obj, status)
+
+# --- Header ---
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title("RMA Central (Multi-Store) 📦")
@@ -333,7 +286,7 @@ with col2:
             st.success("Cache cleared!")
             st.rerun()
 
-# --- Process Data (All Stores) ---
+# --- Process Data (Load from DB) ---
 raw_data = get_all_active_from_db()
 processed_rows = []
 store_counts = {s['url']: {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0} for s in STORES}
@@ -350,12 +303,10 @@ for rma in raw_data:
     rma_id = summary.get('rmaId', 'N/A')
     order_name = summary.get('order_name', 'N/A')
     
-    # Tracking
     track_nums = [s.get('trackingNumber') for s in shipments if s.get('trackingNumber')]
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get('shipmentId') if shipments else None
     
-    # Dates
     created_at = summary.get('createdAt')
     if not created_at:
         for evt in summary.get('events', []):
@@ -371,16 +322,13 @@ for rma in raw_data:
             days_since = (datetime.now(timezone.utc).date() - d.date()).days
         except: pass
 
-    # Counting
     if store_url in store_counts:
         if status in store_counts[store_url]: store_counts[store_url][status] += 1
-        
         is_no_track = False
         if status == "Approved":
             if not shipments or not track_str:
                 store_counts[store_url]["NoTrack"] += 1
                 is_no_track = True
-        
         is_flagged = False
         if any("flagged" in c.get('htmlText', '').lower() for c in comments):
             store_counts[store_url]["Flagged"] += 1
@@ -402,33 +350,28 @@ for rma in raw_data:
             "full_data": rma
         })
 
-# --- Interactive Filter Boxes ---
-if 'filter_state' not in st.session_state:
-    st.session_state.filter_state = {"store": None, "status": "All"}
-
-def set_filter(store, status):
-    st.session_state.filter_state = {"store": store, "status": status}
-    
-    # TARGETED SYNC: If user clicks a box, fetch fresh data for that specific status
-    if status != "All":
-        store_obj = next((s for s in STORES if s['url'] == store), None)
-        if store_obj:
-            perform_sync(store_obj, status)
-
+# --- Draw Metric Boxes ---
 cols = st.columns(len(STORES))
 
 for i, store in enumerate(STORES):
     c = store_counts[store['url']]
     with cols[i]:
         st.markdown(f"**{store['name']}**")
-        if st.button(f"Pending: {c['Pending']}", key=f"p_{i}"): set_filter(store['url'], "Pending")
-        if st.button(f"Approved: {c['Approved']}", key=f"a_{i}"): set_filter(store['url'], "Approved")
-        if st.button(f"Received: {c['Received']}", key=f"r_{i}"): set_filter(store['url'], "Received")
-        if st.button(f"No Track: {c['NoTrack']}", key=f"n_{i}"): set_filter(store['url'], "NoTrack")
-        if st.button(f"🚩 Flagged: {c['Flagged']}", key=f"f_{i}"): set_filter(store['url'], "Flagged")
+        # Buttons invoke the handler function directly
+        if st.button(f"Pending\n{c['Pending']}", key=f"p_{i}"): 
+             handle_filter_click(store['url'], "Pending")
+        if st.button(f"Approved\n{c['Approved']}", key=f"a_{i}"): 
+             handle_filter_click(store['url'], "Approved")
+        if st.button(f"Received\n{c['Received']}", key=f"r_{i}"): 
+             handle_filter_click(store['url'], "Received")
+        if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}"): 
+             handle_filter_click(store['url'], "NoTrack")
+        if st.button(f"🚩 Flagged\n{c['Flagged']}", key=f"f_{i}"): 
+             handle_filter_click(store['url'], "Flagged")
 
 st.divider()
 
+# --- Filter & Display Table ---
 current_filter = st.session_state.filter_state
 filter_desc = f"{current_filter['status']} Records"
 if current_filter['store']:
@@ -442,6 +385,7 @@ df = pd.DataFrame(processed_rows)
 if not df.empty:
     if current_filter['store']:
         df = df[df['Store URL'] == current_filter['store']]
+    
     f_stat = current_filter['status']
     if f_stat == "Pending": df = df[df['Status'] == 'Pending']
     elif f_stat == "Approved": df = df[df['Status'] == 'Approved']
