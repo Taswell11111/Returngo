@@ -40,26 +40,65 @@ st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: white; }
     
+    /* Metrics/Filter Boxes - Distinct styling */
     div.stButton > button {
         width: 100%;
         border: 1px solid #4b5563;
         background-color: #1f2937;
         color: white;
         border-radius: 8px;
-        padding: 10px 0px;
-        font-size: 14px;
+        padding: 15px 0px; 
+        font-size: 16px;
         font-weight: bold;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        transition: all 0.2s;
     }
     div.stButton > button:hover {
         border-color: #1f538d; 
         color: #1f538d;
+        transform: translateY(-2px);
     }
+    div.stButton > button:active {
+        background-color: #2d1b1b;
+        transform: translateY(0);
+    }
+
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom: 2px solid #333;
+        padding-left: 20px;
+        margin-top: 10px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 45px;
+        background-color: #1a1c24;
+        border-radius: 6px 6px 0 0;
+        border: 1px solid #333;
+        border-bottom: none;
+        color: #aaa;
+        padding: 0 20px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #1f538d !important;
+        color: white !important;
+        border-color: #1f538d !important;
+        border-bottom: 2px solid #1f538d;
+    }
+
+    /* Action Panel Highlight */
     .action-panel {
         border: 2px solid #1f538d;
-        padding: 20px;
-        border-radius: 10px;
-        background-color: #1a1a1a;
-        margin-top: 20px;
+        padding: 25px;
+        border-radius: 12px;
+        background-color: #151515;
+        margin-top: 25px;
+    }
+    
+    /* Table Headers */
+    [data-testid="stDataFrame"] th {
+        background-color: #1f538d !important;
+        color: white !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -120,7 +159,8 @@ def get_all_active_from_db():
 
 def clear_db():
     try:
-        os.remove(DB_FILE)
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
         init_db()
         return True
     except: return False
@@ -131,10 +171,14 @@ init_db()
 # 3. BACKEND LOGIC
 # ==========================================
 
-def fetch_all_pages(session, headers, status):
+def fetch_all_pages(session, headers, status, progress_bar=None, status_text=None):
+    """Iterates through API pages using cursor/page logic to get TRUE total."""
     all_rmas = []
     page = 1
     cursor = None
+    
+    if status_text:
+        status_text.text(f"Fetching {status} list... Page {page}")
     
     while True:
         try:
@@ -150,12 +194,17 @@ def fetch_all_pages(session, headers, status):
             
             all_rmas.extend(rmas)
             
+            if status_text:
+                status_text.text(f"Fetching {status} list... Page {page} (Found {len(all_rmas)} total)")
+            
             cursor = data.get("next_cursor")
             if not cursor: break
             
             page += 1
             if page > 100: break
-        except: break
+        except Exception as e:
+             if status_text: status_text.text(f"Error fetching page: {e}")
+             break
     return all_rmas
 
 def fetch_rma_detail(args):
@@ -181,12 +230,17 @@ def fetch_rma_detail(args):
 def perform_sync(target_store=None, target_status=None):
     session = get_session()
     
-    status_msg = st.empty()
-    status_msg.info("⏳ Connecting to API...")
+    # Progress UI Container
+    progress_container = st.empty()
+    with progress_container.container():
+        st.info("⏳ Connecting to API...")
+        my_bar = st.progress(0, text="Initializing...")
+        status_text = st.empty()
     
-    tasks = [] # List of (rma, store_url)
+    tasks = [] 
     
     stores_to_sync = [target_store] if target_store else STORES
+    
     statuses = [target_status] if target_status else ["Pending", "Approved", "Received"]
     if target_status == "NoTrack": statuses = ["Approved"]
     if target_status == "Flagged": statuses = ["Pending", "Approved"]
@@ -194,35 +248,38 @@ def perform_sync(target_store=None, target_status=None):
 
     # 1. Fetch Lists
     total_found = 0
-    list_bar = None
-    if not target_store: list_bar = st.progress(0, text="Fetching Lists...")
-
+    
     for i, store in enumerate(stores_to_sync):
-        headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
+        store_url = store['url'] if isinstance(store, dict) else store
+        store_name = next((s['name'] for s in STORES if s['url'] == store_url), "Store")
+        
+        headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
         for s in statuses:
-            rmas = fetch_all_pages(session, headers, s)
+            my_bar.progress((i + 1) / len(stores_to_sync) * 0.3, text=f"Step 1/2: Fetching List - {store_name} ({s})")
+            rmas = fetch_all_pages(session, headers, s, my_bar, status_text)
             for r in rmas:
-                tasks.append((r, store['url']))
+                tasks.append((r, store_url))
             total_found += len(rmas)
-        if list_bar: list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
-    if list_bar: list_bar.empty()
-
-    status_msg.info(f"⏳ Found {total_found} records. Downloading details...")
+            
+    status_text.text(f"Found {total_found} records. Downloading details...")
     
     # 2. Parallel Fetch Details
     if total_found > 0:
-        bar = st.progress(0, text="Downloading Details...")
+        my_bar.progress(0.3, text=f"Step 2/2: Downloading Details for {total_found} RMAs...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(fetch_rma_detail, task): task for task in tasks}
             completed = 0
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
+                progress = 0.3 + ((completed / total_found) * 0.7)
                 if completed % 10 == 0:
-                    bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
-        bar.empty()
-                
+                     my_bar.progress(min(progress, 1.0), text=f"Downloading Details: {completed}/{total_found}")
+    
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    status_msg.success(f"✅ Sync Complete!")
+    my_bar.progress(100, text="✅ Sync Complete!")
+    status_text.text(f"Successfully synced {total_found} records.")
+    
+    # Force UI Refresh
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
@@ -238,7 +295,6 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     }
     
     try:
-        # Use PUT /shipment/{id}
         res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
         
         if res.status_code == 200:
@@ -247,9 +303,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
             if fresh_res.status_code == 200:
                 fresh_data = fresh_res.json()
                 
-                # --- FORCE UPDATE MEMORY ---
-                # Ensure the shipment object has the new tracking number before saving
-                # This handles API latency where GET might return old data for a second
+                # --- FORCE UPDATE IN MEMORY ---
                 shipments = fresh_data.get('shipments', [])
                 for s in shipments:
                     if s.get('shipmentId') == shipment_id:
@@ -354,6 +408,8 @@ if 'filter_state' not in st.session_state:
 
 def set_filter(store, status):
     st.session_state.filter_state = {"store": store, "status": status}
+    
+    # TARGETED SYNC: If user clicks a box, fetch fresh data for that specific status
     if status != "All":
         store_obj = next((s for s in STORES if s['url'] == store), None)
         if store_obj:
@@ -394,9 +450,13 @@ if not df.empty:
     elif f_stat == "Flagged": df = df[df['IsFlagged'] == True]
 
     df = df.sort_values(by="Created", ascending=False)
+    
+    # Add Row Numbers
+    df = df.reset_index(drop=True)
+    df.insert(0, "No", range(1, len(df) + 1))
 
     event = st.dataframe(
-        df[["Store Name", "RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
+        df[["No", "Store Name", "RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
         use_container_width=True,
         hide_index=True,
         selection_mode="single-row",
