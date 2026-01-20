@@ -35,7 +35,7 @@ st.markdown("""
     
     /* Metrics/Filter Boxes */
     div.stButton > button {
-        width: 100%;
+        width='stretch': 100%;
         border: 1px solid #4b5563;
         background-color: #1f2937;
         color: white;
@@ -264,7 +264,7 @@ with col1:
     last_sync = st.session_state.get('last_sync', 'Not run yet')
     st.caption(f"Connected to: {STORE_URL} | Last Sync: {last_sync}")
 with col2:
-    if st.button("🔄 Sync All Data", type="primary", width=True):
+    if st.button("🔄 Sync All Data", type="primary", width='stretch'=True):
         perform_sync()
 
 # --- Data Processing ---
@@ -371,7 +371,7 @@ if not df.empty:
     # --- MAIN TABLE ---
     event = st.dataframe(
         display_df[["RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
-        width=True,
+        width='stretch'=True,
         hide_index=True,
         selection_mode="single-row",
         on_select="rerun",
@@ -427,5 +427,6 @@ if not df.empty:
 
 else:
     st.warning("No records found in database. Please click 'Sync All Data' to fetch initial data.")
+
 
 
