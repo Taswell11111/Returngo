@@ -65,7 +65,7 @@ if 'counts' not in st.session_state:
 def add_log(message, is_error=False):
     timestamp = datetime.now().strftime('%H:%M:%S')
     icon = "❌" if is_error else "ℹ️"
-    entry = f"[{timestamp}] {icon} {message}"
+    entry = f"[{timestamp}] {{icon}} {{message}}"
     st.session_state.logs.append(entry)
     return "\n".join(st.session_state.logs)
 
@@ -85,55 +85,104 @@ def sync_counts(log_placeholder):
     log_text = add_log("Starting Sync Process...")
     log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
     
-    new_counts = st.session_state.counts.copy()
+    new_counts = {k: v.copy() for k, v in st.session_state.counts.items()}
     
-    with st.status("Syncing Stores...", expanded=True) as status_box:
-        for store in STORES:
-            status_box.write(f"Connecting to {store['name']}...")
-            headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store["url"]}
-            
-            log_text = add_log(f"Syncing {store['name']}...")
-            log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
-            
-            for status in ["Pending", "Approved", "Received"]:
-                try:
-                    res = session.get(f"https://api.returngo.ai/rmas?status={status}&pagesize=50", headers=headers, timeout=5)
-                    if res.status_code == 200:
-                        data = res.json().get("rmas", [])
-                        count = len(data)
-                        new_counts[store['url']][status] = count
-                        
-                        if status == "Approved" and count > 0:
-                            no_track = 0
-                            for rma in data:
-                                try:
-                                    det = session.get(f"https://api.returngo.ai/rma/{rma['rmaId']}", headers=headers, timeout=5).json()
-                                    shipments = det.get('shipments', [])
-                                    if not shipments:
-                                        no_track += 1
-                                    elif all(not s.get('trackingNumber') for s in shipments):
-                                        no_track += 1
-                                except: pass
-                            new_counts[store['url']]["NoTrack"] = no_track
-                            if no_track > 0:
-                                log_text = add_log(f"  > {store['name']}: {no_track} Missing IDs found!", is_error=True)
-                                log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+    # Use status context if available; otherwise fall back to spinner/message
+    try:
+        status_ctx = st.status("Syncing Stores...", expanded=True)
+    except Exception:
+        status_ctx = None
 
-                except Exception as e:
-                    log_text = add_log(f"Error {store['name']}: {e}", is_error=True)
-                    log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+    if status_ctx:
+        status_ctx.write("Starting...")
+    else:
+        status_ctx = None
+
+    for store in STORES:
+        if status_ctx:
+            status_ctx.write(f"Connecting to {store['name']}...")
+        headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store["url"]}
         
-        status_box.update(label="Sync Complete!", state="complete", expanded=False)
+        log_text = add_log(f"Syncing {store['name']}...")
+        log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+        
+        for status in ["Pending", "Approved", "Received"]:
+            try:
+                res = session.get(f"https://api.returngo.ai/rmas?status={{status}}&pagesize=50", headers=headers, timeout=5)
+                if res.status_code == 200:
+                    data = res.json().get("rmas", [])
+                    count = len(data)
+                    new_counts[store['url']][status] = count
+                    
+                    if status == "Approved" and count > 0:
+                        no_track = 0
+                        for rma in data:
+                            try:
+                                det = session.get(f"https://api.returngo.ai/rma/{{rma['rmaId']}}", headers=headers, timeout=5).json()
+                                shipments = det.get('shipments', [])
+                                if not shipments:
+                                    no_track += 1
+                                elif all(not s.get('trackingNumber') for s in shipments):
+                                    no_track += 1
+                            except:
+                                pass
+                        new_counts[store['url']]["NoTrack"] = no_track
+                        if no_track > 0:
+                            log_text = add_log(f"  > {{store['name']}}: {{no_track}} Missing IDs found!")
+                            log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+
+            except Exception as e:
+                log_text = add_log(f"Error {{store['name']}}: {{e}}", is_error=True)
+                log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+
+    if status_ctx:
+        try:
+            status_ctx.update(label="Sync Complete!", state="complete", expanded=False)
+        except Exception:
+            pass
 
     st.session_state.counts = new_counts
     log_text = add_log("Sync Complete. Ready.")
     log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
 
+# --- TARGETED SYNC FOR A SINGLE STORE/STATUS ---
+def targeted_sync(store_url, sync_status=None, log_placeholder=None):
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
+    counts = st.session_state.counts.get(store_url, {"Pending":0, "Approved":0, "Received":0, "NoTrack":0}).copy()
+
+    statuses = ["Pending", "Approved", "Received"] if sync_status is None else [sync_status]
+
+    for status in statuses:
+        try:
+            res = session.get(f"https://api.returngo.ai/rmas?status={{status}}&pagesize=50", headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json().get("rmas", [])
+                counts[status] = len(data)
+
+                if status == "Approved":
+                    no_track = 0
+                    for rma in data:
+                        try:
+                            det = session.get(f"https://api.returngo.ai/rma/{{rma['rmaId']}}", headers=headers, timeout=5).json()
+                            shipments = det.get('shipments', [])
+                            if not shipments or all(not s.get('trackingNumber') for s in shipments):
+                                no_track += 1
+                        except:
+                            pass
+                    counts["NoTrack"] = no_track
+        except Exception as e:
+            if log_placeholder is not None:
+                log_text = add_log(f"Targeted sync error for {{store_url}} {{status}}: {{e}}", is_error=True)
+                log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
+
+    st.session_state.counts[store_url] = counts
+
 # --- FETCH TABLE DATA ---
 def load_rmas(url, status_type, log_placeholder):
     session = get_session()
     
-    log_text = add_log(f"Fetching {status_type} list for {url}...")
+    log_text = add_log(f"Fetching {{status_type}} list for {{url}}...")
     log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
     
     st.session_state.rma_list = [] 
@@ -142,16 +191,16 @@ def load_rmas(url, status_type, log_placeholder):
     api_status = "Approved" if status_type == "NoTrack" else status_type
     
     try:
-        res = session.get(f"https://api.returngo.ai/rmas?status={api_status}&pagesize=50&sort_by=+rma_created_at", headers=headers, timeout=10)
+        res = session.get(f"https://api.returngo.ai/rmas?status={{api_status}}&pagesize=50&sort_by=+rma_created_at", headers=headers, timeout=10)
         if res.status_code == 200:
             rmas = res.json().get("rmas", [])
-            log_text = add_log(f"Found {len(rmas)} items. Downloading details...")
+            log_text = add_log(f"Found {{len(rmas)}} items. Downloading details...")
             log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
             
             temp_list = []
             for rma in rmas:
                 try:
-                    det = session.get(f"https://api.returngo.ai/rma/{rma['rmaId']}", headers=headers, timeout=5).json()
+                    det = session.get(f"https://api.returngo.ai/rma/{{rma['rmaId']}}", headers=headers, timeout=5).json()
                     
                     shipments = det.get('shipments', [])
                     track_nums = [s.get('trackingNumber') for s in shipments if s.get('trackingNumber')]
@@ -173,19 +222,20 @@ def load_rmas(url, status_type, log_placeholder):
                             dt_obj = datetime.fromisoformat(raw_update.replace('Z', '+00:00'))
                             delta = datetime.now(dt_obj.tzinfo) - dt_obj
                             days_since = str(delta.days)
-                        except: pass
+                        except:
+                            pass
                         
                     temp_list.append({
                         "id": rma.get('rmaId'),
                         "order": rma.get('order_name'),
                         "tracking": track_str,
                         "created": created_display,
-                        "updated": updated_display, # Added Field
+                        "updated": updated_display,
                         "status": rma.get('status'),
                         "days": days_since,
                         "timeline": det.get('comments', [])
                     })
-                except Exception as e:
+                except Exception:
                     pass
             
             st.session_state.rma_list = temp_list
@@ -193,7 +243,7 @@ def load_rmas(url, status_type, log_placeholder):
             log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
             
     except Exception as e:
-        log_text = add_log(f"Fetch Error: {e}", is_error=True)
+        log_text = add_log(f"Fetch Error: {{e}}", is_error=True)
         log_placeholder.text_area("Live System Log", value=log_text, height=150, disabled=True)
 
 # --- MAIN UI LAYOUT ---
@@ -206,17 +256,17 @@ log_col_area = st.container()
 for i, store in enumerate(STORES):
     c = st.session_state.counts[store['url']]
     with cols[i]:
-        st.markdown(f"**{store['name']}**")
+        st.markdown(f"**{{store['name']}}**")
         
-        if st.button(f"Pending: {c['Pending']}", key=f"p{i}"): 
+        if st.button(f"Pending: {{c['Pending']}}", key=f"p{{i}}"):
             st.session_state['trigger'] = ('load', store['url'], "Pending")
-        if st.button(f"Approved: {c['Approved']}", key=f"a{i}"): 
+        if st.button(f"Approved: {{c['Approved']}}", key=f"a{{i}}"):
             st.session_state['trigger'] = ('load', store['url'], "Approved")
-        if st.button(f"Received: {c['Received']}", key=f"r{i}"): 
+        if st.button(f"Received: {{c['Received']}}", key=f"r{{i}}"):
             st.session_state['trigger'] = ('load', store['url'], "Received")
         
-        label = f"No ID: {c['NoTrack']}"
-        if st.button(label, key=f"n{i}", type="primary" if c['NoTrack']>0 else "secondary"): 
+        label = f"No ID: {{c['NoTrack']}}"
+        if st.button(label, key=f"n{{i}}", type="primary" if c['NoTrack']>0 else "secondary"):
             st.session_state['trigger'] = ('load', store['url'], "NoTrack")
 
 st.markdown("---")
@@ -242,54 +292,57 @@ if 'trigger' in st.session_state:
         sync_counts(log_placeholder)
         st.rerun()
     elif action == 'load':
+        # perform a targeted sync for this store/status to refresh counts before loading
+        targeted_sync(url, status, log_placeholder)
         load_rmas(url, status, log_placeholder)
         st.rerun()
 
 # 4. DATA TABLE
 with col_log:
-    st.subheader(f"📋 Active List ({len(st.session_state.rma_list)})")
+    st.subheader(f"📋 Active List ({{len(st.session_state.rma_list)}})")
     
     search = st.text_input("🔍 Filter (RMA, Order, or Tracking)", placeholder="Type to search...")
     
-    # Header - Added "Updated" Column
-    # Weights: ID, Order, Track, Created, Updated, Days, Action
-    h1, h2, h3, h4, h5, h6, h7 = st.columns([2, 2, 3, 2, 2, 1, 2])
+    # Header - Added "Updated" Column and Row No
+    # Weights: No, ID, Order, Track, Created, Updated, Days, Action
+    h0, h1, h2, h3, h4, h5, h6, h7 = st.columns([1, 2, 2, 3, 2, 2, 1, 2])
+    h0.markdown("**No.**")
     h1.markdown("**RMA ID**")
     h2.markdown("**Order #**")
     h3.markdown("**Tracking**")
     h4.markdown("**Created**")
-    h5.markdown("**Updated**") # New Column
+    h5.markdown("**Updated**")
     h6.markdown("**Days**")
     h7.markdown("**Action**")
     st.divider()
 
-    # Rows
-    for row in st.session_state.rma_list:
-        search_str = f"{row['id']} {row['order']} {row['tracking']}".lower()
+    # Rows (with numbering)
+    for idx, row in enumerate(st.session_state.rma_list, 1):
+        search_str = f"{{row['id']}} {{row['order']}} {{row['tracking']}}".lower()
         if search and search.lower() not in search_str:
             continue
             
-        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 3, 2, 2, 1, 2])
-        
+        c0, c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 2, 2, 3, 2, 2, 1, 2])
+        c0.markdown(f"**{{idx}}**")
         c1.code(row['id'])
         c2.write(row['order'])
         c3.write(row['tracking'])
         c4.write(row['created'])
-        c5.write(row['updated']) # New Data
+        c5.write(row['updated'])
         
-        days_int = int(row['days'])
+        days_int = int(row['days']) if str(row['days']).isdigit() else 0
         if days_int > 7:
-            c6.error(f"{days_int}")
+            c6.error(f"{{days_int}}")
         else:
-            c6.success(f"{days_int}")
+            c6.success(f"{{days_int}}")
             
         with c7:
             with st.expander("Timeline"):
                 for t in row['timeline']:
                     st.markdown(f"""
                         <div class="timeline-box">
-                            <small style="color:#aaa">{t.get('triggeredBy')} | {t.get('datetime')[:16]}</small><br>
-                            {t.get('htmlText')}
+                            <small style="color:#aaa">{{t.get('triggeredBy')}} | {{t.get('datetime')[:16]}}</small><br>
+                            {{t.get('htmlText')}}
                         </div>
                     """, unsafe_allow_html=True)
         
