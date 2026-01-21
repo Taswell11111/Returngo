@@ -4,6 +4,7 @@ import requests
 import json
 import pandas as pd
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -27,6 +28,8 @@ except KeyError:
 CACHE_EXPIRY_HOURS = 4
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
+# LOCK FOR THREAD-SAFE DB WRITES
+DB_LOCK = threading.Lock()
 
 # --- STYLING ---
 st.markdown("""
@@ -40,7 +43,7 @@ st.markdown("""
         background-color: #1f2937;
         color: white;
         border-radius: 8px;
-        padding: 10px 4px;
+        padding: 12px 24px;
         font-size: 16px;
         font-weight: bold;
     }
@@ -54,33 +57,10 @@ st.markdown("""
         background-color: #2d1b1b;
     }
 
-    /* Tabs Styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        border-bottom: 1px solid #333;
-        padding-left: 20px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 40px;
-        background-color: #1a1c24;
-        border-radius: 4px 4px 0 0;
-        border: 1px solid #333;
-        border-bottom: none;
-        color: #aaa;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #c41230 !important;
-        color: white !important;
-        border-color: #c41230 !important;
-    }
-
-    /* Action Panel Highlight */
-    .action-panel {
-        border: 1px solid #c41230;
-        padding: 20px;
-        border-radius: 10px;
+    /* Modal Styling Fixes */
+    div[data-testid="stDialog"] {
         background-color: #1a1a1a;
-        margin-top: 20px;
+        border: 1px solid #c41230;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -97,42 +77,66 @@ def get_session():
 # 2. DATABASE MANAGER
 # ==========================================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS rmas
-                 (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
-                  created_at TEXT, json_data TEXT, last_fetched TIMESTAMP)''')
-    conn.commit()
-    conn.close()
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS rmas
+                     (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
+                      created_at TEXT, json_data TEXT, last_fetched TIMESTAMP)''')
+        conn.commit()
+        conn.close()
 
 def save_rma_to_db(rma_id, status, created_at, data):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    now = datetime.now().isoformat()
-    c.execute('''INSERT OR REPLACE INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched)
-                 VALUES (?, ?, ?, ?, ?, ?)''', 
-                 (str(rma_id), STORE_URL, status, created_at, json.dumps(data), now))
-    conn.commit()
-    conn.close()
+    with DB_LOCK:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            now = datetime.now().isoformat()
+            c.execute('''INSERT OR REPLACE INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched)
+                         VALUES (?, ?, ?, ?, ?, ?)''', 
+                         (str(rma_id), STORE_URL, status, created_at, json.dumps(data), now))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"DB Error saving {rma_id}: {e}")
 
 def get_rma_from_db(rma_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT json_data, last_fetched FROM rmas WHERE rma_id=?", (str(rma_id),))
-    row = c.fetchone()
-    conn.close()
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT json_data, last_fetched FROM rmas WHERE rma_id=?", (str(rma_id),))
+        row = c.fetchone()
+        conn.close()
     if row:
         return json.loads(row[0]), datetime.fromisoformat(row[1])
     return None, None
 
 def get_all_active_from_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # Fetch Pending, Approved AND Received
-    c.execute("SELECT json_data FROM rmas WHERE store_url=? AND status IN ('Pending', 'Approved', 'Received')", (STORE_URL,))
-    rows = c.fetchall()
-    conn.close()
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        # Fetch Pending, Approved AND Received
+        c.execute("SELECT json_data FROM rmas WHERE store_url=? AND status IN ('Pending', 'Approved', 'Received')", (STORE_URL,))
+        rows = c.fetchall()
+        conn.close()
     return [json.loads(r[0]) for r in rows]
+
+def get_local_ids_for_status(status):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT rma_id FROM rmas WHERE store_url=? AND status=?", (STORE_URL, status))
+        rows = c.fetchall()
+        conn.close()
+    return {r[0] for r in rows}
+
+def clear_db():
+    with DB_LOCK:
+        try:
+            if os.path.exists(DB_FILE):
+                os.remove(DB_FILE)
+            return True
+        except: return False
 
 init_db()
 
@@ -145,9 +149,6 @@ def fetch_all_pages(session, headers, status):
     all_rmas = []
     cursor = None
     page_count = 1
-    
-    # Optional: Log to terminal if running locally
-    # print(f"Fetching {status}... Page {page_count}")
     
     while True:
         try:
@@ -177,20 +178,29 @@ def fetch_all_pages(session, headers, status):
     return all_rmas
 
 def fetch_rma_detail(rma_summary):
+    # Determine if we are being called with a tuple (from parallel executor in sync) or just a dict
+    # Although in this single store version we might pass dict, let's standardize.
+    # Actually, in perform_sync below I will submit just the rma_summary dict or tuple.
+    # To keep it simple and consistent with previous levis logic, let's assume rma_summary is the dict.
+    
     rma_id = rma_summary.get('rmaId')
     
-    cached_data, last_fetched = get_rma_from_db(rma_id)
-    if cached_data and last_fetched:
-        if (datetime.now() - last_fetched) < timedelta(hours=CACHE_EXPIRY_HOURS):
-            return cached_data
-
+    # We are usually forcing refresh in sync, but let's keep cache logic if needed
+    # For full sync we want fresh data.
+    
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
     try:
         res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            save_rma_to_db(rma_id, rma_summary.get('status'), rma_summary.get('createdAt'), data)
+            
+            # CRITICAL FIX: Extract TRUE status from fresh data
+            fresh_summary = data.get('rmaSummary', {})
+            true_status = fresh_summary.get('status', 'Unknown')
+            true_created = fresh_summary.get('createdAt')
+            
+            save_rma_to_db(rma_id, true_status, true_created, data)
             return data
     except: pass
     return None
@@ -209,8 +219,22 @@ def perform_sync(statuses=None):
         statuses = ["Pending", "Approved", "Received"]
 
     for s in statuses:
-        rmas = fetch_all_pages(session, headers, s)
-        active_summaries.extend(rmas)
+        # A. Fetch Fresh List from API
+        api_rmas = fetch_all_pages(session, headers, s)
+        
+        # B. Get local IDs for cleanup logic
+        local_ids = get_local_ids_for_status(s)
+        
+        # C. Identify Stale items
+        api_ids = {r.get('rmaId') for r in api_rmas}
+        stale_ids = local_ids - api_ids
+        
+        # D. Add API items to list
+        active_summaries.extend(api_rmas)
+        
+        # E. Add Stale items to list (to force update their status)
+        for stale_id in stale_ids:
+            active_summaries.append({'rmaId': stale_id, 'status': 'CHECK_UPDATE', 'createdAt': None})
     
     total = len(active_summaries)
     status_msg.info(f"⏳ Found {total} records. Downloading details...")
@@ -221,16 +245,13 @@ def perform_sync(statuses=None):
         completed = 0
         for future in concurrent.futures.as_completed(futures):
             completed += 1
-            if total and completed % 10 == 0:
+            if total and completed % 5 == 0:
                 try:
                     status_msg.progress(completed / total, text=f"Syncing: {completed}/{total} RMAs")
-                except Exception:
-                    try:
-                        status_msg.progress(completed / total)
-                    except Exception:
-                        pass
+                except Exception: pass
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    st.session_state['show_toast'] = True
     status_msg.success(f"✅ Sync Complete! Total: {total}")
     st.rerun()
 
@@ -266,15 +287,67 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
 # 4. FRONTEND UI
 # ==========================================
 
+if 'filter_status' not in st.session_state:
+    st.session_state.filter_status = "All"
+
+if st.session_state.get('show_toast'):
+    st.toast("✅ Data Refreshed Successfully!", icon="📤")
+    st.session_state['show_toast'] = False
+
+# --- Modal Function ---
+@st.dialog("RMA Details")
+def show_rma_modal(record):
+    st.markdown(f"### 🛠️ Manage RMA: `{record['RMA ID']}`")
+    
+    t1, t2 = st.tabs(["📝 Timeline", "✏️ Update Tracking"])
+    
+    with t1:
+        full = record['full_data']
+        timeline = full.get('comments', [])
+        if not timeline:
+            st.info("No timeline events found.")
+        else:
+            for t in timeline:
+                d_str = t.get('datetime', '')[:16].replace('T', ' ')
+                who = t.get('triggeredBy', 'System')
+                msg = t.get('htmlText', '')
+                st.markdown(f"**{d_str}** | `{who}`")
+                st.caption(msg, unsafe_allow_html=True)
+                st.divider()
+
+    with t2:
+        # Use DisplayTrack (raw text) for the input box value
+        raw_track = record['DisplayTrack']
+        with st.form("update_track_form"):
+            new_track = st.text_input("New Tracking Number", value=raw_track)
+            submitted = st.form_submit_button("Save Changes")
+            
+            if submitted:
+                if not record['shipment_id']:
+                    st.error("No Shipment ID associated with this RMA.")
+                else:
+                    ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track)
+                    if ok:
+                        st.success("Tracking Updated! Refreshing...")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
 # --- Header ---
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title("Levi's ReturnGO RMA Operations")
     last_sync = st.session_state.get('last_sync', 'Not run yet')
-    st.caption(f"Connected to: {STORE_URL} | Last Sync: {last_sync}")
+    st.markdown(f"**Connected to:** {STORE_URL} | **Last Sync:** :green[{last_sync}]")
 with col2:
     if st.button("🔄 Sync All Data", type="primary", width='stretch'):
         perform_sync()
+    if st.button("🗑️ Reset Cache", type="secondary", width='stretch'):
+        if clear_db():
+            st.success("Cache cleared!")
+            st.rerun()
+        else:
+            st.error("Could not clear cache.")
 
 # --- Data Processing ---
 raw_data = get_all_active_from_db()
@@ -294,6 +367,12 @@ for rma in raw_data:
     track_nums = [s.get('trackingNumber') for s in shipments if s.get('trackingNumber')]
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get('shipmentId') if shipments else None
+    
+    # URL Generation
+    track_url = None
+    if track_str:
+        primary_track = track_nums[0] if track_nums else ""
+        track_url = f"https://portal.thecourierguy.co.za/track?ref={primary_track}"
     
     # Created Date
     created_at = summary.get('createdAt')
@@ -331,10 +410,11 @@ for rma in raw_data:
         "RMA ID": rma_id,
         "Order": order_name,
         "Status": status,
-        "Tracking": track_str,
+        "TrackingNumber": track_url if track_url else track_str,
+        "DisplayTrack": track_str,
         "Created": created_display,
         "Updated": str(updated_at)[:10] if updated_at else "N/A",
-        "Days": days_since,
+        "Days since updated": days_since,
         "IsNoTrack": is_no_track,
         "IsFlagged": is_flagged,
         "shipment_id": shipment_id,
@@ -342,9 +422,6 @@ for rma in raw_data:
     })
 
 # --- Interactive Filter Boxes ---
-if 'filter_status' not in st.session_state:
-    st.session_state.filter_status = "All"
-
 b1, b2, b3, b4, b5 = st.columns(5)
 
 # updated set_filter to optionally perform targeted syncs
@@ -355,7 +432,7 @@ def set_filter(f):
         perform_sync(statuses=[f])
     else:
         # No network action required for derived filters — just rerun to refresh UI
-        st.experimental_rerun()
+        st.rerun()
 
 with b1:
     if st.button(f"Pending\n{counts['Pending']}"): set_filter("Pending")
@@ -383,66 +460,43 @@ if not df.empty:
     elif f_stat == "Flagged": display_df = df[df['IsFlagged'] == True]
     else: display_df = df
 
-    # sort and add row numbers
-    display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
-    display_df.insert(0, "No", range(1, len(display_df) + 1))
+    if not display_df.empty:
+        # sort and add row numbers
+        display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
+        display_df.insert(0, "No", range(1, len(display_df) + 1))
+        
+        # Format columns for Left Indent
+        display_df['No'] = display_df['No'].astype(str)
+        display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-    # --- MAIN TABLE ---
-    event = st.dataframe(
-        display_df[["No", "RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
-        width='stretch',
-        hide_index=True,
-        selection_mode="single-row",
-        on_select="rerun",
-        key="main_table"
-    )
-    
-    # --- Action Panel (Selection Based) ---
-    selected = st.session_state.main_table.get("selection", {}).get("rows", [])
-    
-    if selected:
-        idx = selected[0]
-        if idx < len(display_df):
-            record = display_df.iloc[idx]
-            
-            st.markdown("<div class='action-panel'>", unsafe_allow_html=True)
-            st.markdown(f"### 🛠️ Manage RMA: `{record['RMA ID']}`")
-            
-            # Tabs for Actions
-            act_tab1, act_tab2 = st.tabs(["📝 Timeline Review", "✏️ Update Tracking"])
-            
-            with act_tab1:
-                full = record['full_data']
-                timeline = full.get('comments', [])
-                if not timeline:
-                    st.info("No timeline events found.")
-                else:
-                    for t in timeline:
-                        d_str = t.get('datetime', '')[:16].replace('T', ' ')
-                        who = t.get('triggeredBy', 'System')
-                        msg = t.get('htmlText', '')
-                        st.markdown(f"**{d_str}** | `{{who}}`")
-                        st.caption(msg, unsafe_allow_html=True)
-                        st.divider()
+        # --- MAIN TABLE ---
+        event = st.dataframe(
+            display_df[["No", "RMA ID", "Order", "Status", "TrackingNumber", "Created", "Updated", "Days since updated"]],
+            use_container_width=True,
+            height=700,
+            hide_index=True,
+            selection_mode="single-row",
+            on_select="rerun",
+            key="main_table",
+            column_config={
+                "TrackingNumber": st.column_config.LinkColumn(
+                    "TrackingNumber",
+                    display_text=r"ref=(.*)"
+                ),
+                "No": st.column_config.TextColumn("No", width="small"),
+                "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
+            }
+        )
+        
+        # --- Trigger Modal on Selection ---
+        selected = st.session_state.main_table.get("selection", {}).get("rows", [])
+        if selected:
+            idx = selected[0]
+            if idx < len(display_df):
+                record = display_df.iloc[idx]
+                show_rma_modal(record)
 
-            with act_tab2:
-                with st.form("update_track_form"):
-                    new_track = st.text_input("New Tracking Number", value=record['Tracking'])
-                    submitted = st.form_submit_button("Save Changes")
-                    
-                    if submitted:
-                        if not record['shipment_id']:
-                            st.error("No Shipment ID associated with this RMA.")
-                        else:
-                            ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track)
-                            if ok:
-                                st.success("Tracking Updated! Refreshing...")
-                                st.rerun()
-                            else:
-                                st.error(msg)
-            st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.info("👆 Click on any row in the table to view Timeline or Update Tracking.")
-
+        st.info("No records match the current filter.")
 else:
     st.warning("No records found in database. Please click 'Sync All Data' to fetch initial data.")
