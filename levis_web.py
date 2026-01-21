@@ -75,7 +75,9 @@ st.markdown("""
 @st.cache_resource
 def get_session():
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+    # Added 429 to status_forcelist and increased retries/backoff
+    # 429 = Too Many Requests
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     return session
 
@@ -338,7 +340,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
                 fresh_data = fresh_res.json(); summary = fresh_data.get('rmaSummary', {})
                 save_rma_to_db(rma_id, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
             return True, "Success"
-        return False, f"API Error {res.status_code}"
+        return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e: return False, str(e)
 
 def push_comment_update(rma_id, comment_text):
@@ -502,16 +504,17 @@ with b5:
 
 # --- Search Bar & Clear Button ---
 st.divider()
+
+# CALLBACK FUNCTION TO CLEAR SEARCH
+def clear_search_cb():
+    st.session_state.search_query_input = ""
+
 sc1, sc2 = st.columns([9, 1])
 with sc1:
     search_query = st.text_input("Search", placeholder="🔍 Search Order, RMA, or Tracking...", label_visibility="collapsed", key="search_query_input")
 with sc2:
-    if st.button("❌", help="Clear Search", key="clear_search_btn"):
-        # We don't need complex logic; just rerunning with empty default handled by Streamlit key management usually, 
-        # but to be safe we can use a callback or rely on user clearing.
-        # Streamlit doesn't easily clear 'key' inputs programmatically without session state manipulation.
-        st.session_state.search_query_input = ""
-        st.rerun()
+    # Use on_click callback here
+    st.button("❌", help="Clear Search", key="clear_search_btn", on_click=clear_search_cb)
 
 st.write("") # Spacer
 
@@ -534,7 +537,10 @@ if not df_view.empty:
         # KEY CYCLING: Forces table to clear checkboxes after one is clicked
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
-            use_container_width=True, height=700, hide_index=True, key=f"main_table_{st.session_state.table_key}",
+            width="stretch",
+            height=700, 
+            hide_index=True, 
+            key=f"main_table_{st.session_state.table_key}",
             column_config={
                 "No": st.column_config.TextColumn("No", width="small"),
                 "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
