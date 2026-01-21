@@ -1,13 +1,3 @@
-# app.py
-"""
-Levi's ReturnGO Ops Dashboard (Streamlit)
-
-- Copy-to-clipboard copies EXACTLY the server-rendered table:
-  * same visible columns you choose
-  * same server-side sorting you choose
-  * same filtering you applied
-"""
-
 import concurrent.futures
 import json
 import os
