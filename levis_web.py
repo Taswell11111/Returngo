@@ -336,46 +336,48 @@ def push_comment_update(rma_id, comment_text):
 # 4. FRONTEND UI
 # ==========================================
 
-# Dialog Triggers via Session State
-if 'active_action' not in st.session_state: st.session_state.active_action = None
-if 'active_record' not in st.session_state: st.session_state.active_record = None
+# PERSISTENT TRIGGER FIX:
+# Check if a dialog needs to be opened, then clear the trigger immediately
+if 'modal_rma' in st.session_state and st.session_state.modal_rma:
+    rma_to_show = st.session_state.modal_rma
+    action_type = st.session_state.modal_action
+    
+    # CLEAR IMMEDIATELY so rerun (on close) doesn't reopen it
+    st.session_state.modal_rma = None
+    st.session_state.modal_action = None
 
-@st.dialog("Update Tracking")
-def show_update_tracking_dialog(record):
-    st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
-    with st.form("upd_track"):
-        new_track = st.text_input("New Tracking Number", value=record['DisplayTrack'])
-        if st.form_submit_button("Save Changes"):
-            if not record['shipment_id']: st.error("No Shipment ID.")
-            else:
-                ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track)
-                if ok: st.success("Updated!"); time.sleep(1); st.rerun()
-                else: st.error(msg)
+    @st.dialog("Update Tracking")
+    def show_update_tracking_dialog(record):
+        st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
+        with st.form("upd_track"):
+            new_track = st.text_input("New Tracking Number", value=record['DisplayTrack'])
+            if st.form_submit_button("Save Changes"):
+                if not record['shipment_id']: st.error("No Shipment ID.")
+                else:
+                    ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track)
+                    if ok: st.success("Updated!"); time.sleep(1); st.rerun()
+                    else: st.error(msg)
 
-@st.dialog("View Timeline")
-def show_timeline_dialog(record):
-    st.markdown(f"### Timeline for `{record['RMA ID']}`")
-    with st.expander("➕ Add Comment", expanded=False):
-        with st.form("add_comm"):
-            comment_text = st.text_area("New Note")
-            if st.form_submit_button("Post Comment"):
-                ok, msg = push_comment_update(record['RMA ID'], comment_text)
-                if ok: st.success("Posted!"); st.rerun()
-                else: st.error(msg)
-    full = record['full_data']; timeline = full.get('comments', [])
-    if not timeline: st.info("No timeline events found.")
-    else:
-        for t in timeline:
-            d_str = t.get('datetime', '')[:16].replace('T', ' ')
-            st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
-            st.divider()
+    @st.dialog("View Timeline")
+    def show_timeline_dialog(record):
+        st.markdown(f"### Timeline for `{record['RMA ID']}`")
+        with st.expander("➕ Add Comment", expanded=False):
+            with st.form("add_comm"):
+                comment_text = st.text_area("New Note")
+                if st.form_submit_button("Post Comment"):
+                    ok, msg = push_comment_update(record['RMA ID'], comment_text)
+                    if ok: st.success("Posted!"); st.rerun()
+                    else: st.error(msg)
+        full = record['full_data']; timeline = full.get('comments', [])
+        if not timeline: st.info("No timeline events.")
+        else:
+            for t in timeline:
+                d_str = t.get('datetime', '')[:16].replace('T', ' ')
+                st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
+                st.divider()
 
-if st.session_state.active_action == 'edit':
-    show_update_tracking_dialog(st.session_state.active_record)
-    st.session_state.active_action = None
-elif st.session_state.active_action == 'view':
-    show_timeline_dialog(st.session_state.active_record)
-    st.session_state.active_action = None
+    if action_type == 'edit': show_update_tracking_dialog(rma_to_show)
+    elif action_type == 'view': show_timeline_dialog(rma_to_show)
 
 if 'filter_status' not in st.session_state: st.session_state.filter_status = "All"
 if st.session_state.get('show_toast'): st.toast("✅ API Sync Complete!", icon="🔄"); st.session_state['show_toast'] = False
@@ -427,7 +429,7 @@ for rma in raw_data:
             "Tracking Number": track_link_url, "Tracking Status": local_status,
             "Created": str(created_at)[:10] if created_at else "N/A",
             "Updated": str(u_at)[:10] if u_at else "N/A", "Days since updated": str(d_since),
-            "Update Tracking Number": False, "View Timeline": False,
+            "Update Tracking Number": "", "View Timeline": "", # Start empty
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
@@ -466,7 +468,7 @@ if not df_view.empty:
         display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-        # UI Update: Reverting headers to text and maintaining narrow widths
+        # TEXT TRIGGERS in cells: Use SelectboxColumn with a single option "Edit" or "View"
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
@@ -476,22 +478,25 @@ if not df_view.empty:
                 "Order": st.column_config.TextColumn("Order", width="small"),
                 "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
                 "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
-                "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
+                "Update Tracking Number": st.column_config.SelectboxColumn("Update Tracking Number", options=["", "Edit"], width="small"),
+                "View Timeline": st.column_config.SelectboxColumn("View Timeline", options=["", "View"], width="small"),
                 "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated"]
         )
         
-        # --- Handle Action Logic with Rerun-to-Clear Fix ---
+        # Detect selection and TRIGGER RERUN to clear the table selection before modal opens
         for idx, row in edited.iterrows():
-            if row["Update Tracking Number"]:
-                st.session_state.active_action = 'edit'
-                st.session_state.active_record = display_df.iloc[idx]
-                st.rerun() # Forces table reset before dialog appears
-            if row["View Timeline"]:
-                st.session_state.active_action = 'view'
-                st.session_state.active_record = display_df.iloc[idx]
+            if row["Update Tracking Number"] == "Edit":
+                st.session_state.modal_rma = display_df.iloc[idx]
+                st.session_state.modal_action = 'edit'
+                # Clear the edited_rows state to reset the selectbox
+                st.session_state.main_table["edited_rows"] = {}
+                st.rerun()
+            if row["View Timeline"] == "View":
+                st.session_state.modal_rma = display_df.iloc[idx]
+                st.session_state.modal_action = 'view'
+                st.session_state.main_table["edited_rows"] = {}
                 st.rerun()
     else: st.info("No matching records found.")
 else: st.warning("Database empty. Click Sync All Data to start.")
