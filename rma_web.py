@@ -398,7 +398,6 @@ def check_courier_status(tracking_number, rma_id):
             found = False
             for k in prioritized_keywords:
                 if re.search(k, content, re.IGNORECASE):
-                    # Found a match! Clean up the regex pattern to nice text
                     status_text = k.replace(r"\s+", " ").title()
                     # Fix specific casings
                     if "At Delivery Depot" in status_text: status_text = "At Delivery Depot"
