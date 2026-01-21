@@ -297,6 +297,7 @@ def perform_sync(statuses=None):
     
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     st.session_state['show_toast'] = True
+    status_msg.success(f"✅ Sync Complete!")
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number):
@@ -335,8 +336,9 @@ def push_comment_update(rma_id, comment_text):
 # 4. FRONTEND UI
 # ==========================================
 
-if 'filter_status' not in st.session_state: st.session_state.filter_status = "All"
-if st.session_state.get('show_toast'): st.toast("✅ API Sync Complete!", icon="🔄"); st.session_state['show_toast'] = False
+# Dialog Triggers via Session State
+if 'active_action' not in st.session_state: st.session_state.active_action = None
+if 'active_record' not in st.session_state: st.session_state.active_record = None
 
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
@@ -367,6 +369,16 @@ def show_timeline_dialog(record):
             d_str = t.get('datetime', '')[:16].replace('T', ' ')
             st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
             st.divider()
+
+if st.session_state.active_action == 'edit':
+    show_update_tracking_dialog(st.session_state.active_record)
+    st.session_state.active_action = None
+elif st.session_state.active_action == 'view':
+    show_timeline_dialog(st.session_state.active_record)
+    st.session_state.active_action = None
+
+if 'filter_status' not in st.session_state: st.session_state.filter_status = "All"
+if st.session_state.get('show_toast'): st.toast("✅ API Sync Complete!", icon="🔄"); st.session_state['show_toast'] = False
 
 def set_filter(f):
     st.session_state.filter_status = f
@@ -412,10 +424,10 @@ for rma in raw_data:
     if not search_query or (search_query.lower() in str(rma_id).lower() or search_query.lower() in str(order_name).lower() or search_query.lower() in str(track_str).lower()):
         processed_rows.append({
             "No": "", "RMA ID": rma_id, "Order": order_name, "Status": status,
-            "TrackingNumber": track_link_url, "TrackingStatus": local_status,
+            "Tracking Number": track_link_url, "Tracking Status": local_status,
             "Created": str(created_at)[:10] if created_at else "N/A",
-            "Updated": str(u_at)[:10] if u_at else "N/A", "Days": str(d_since),
-            "Update TrackingNumber": False, "View Timeline": False,
+            "Updated": str(u_at)[:10] if u_at else "N/A", "Days since updated": str(d_since),
+            "Update Tracking Number": False, "View Timeline": False,
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
@@ -451,35 +463,35 @@ if not df_view.empty:
 
     if not display_df.empty:
         display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
-        display_df['No'] = (display_df.index + 1).astype(str); display_df['Days'] = display_df['Days'].astype(str)
+        display_df['No'] = (display_df.index + 1).astype(str)
+        display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-        # UI Update: Icons in Headers and narrow columns for Action triggers
+        # UI Update: Reverting headers to text and maintaining narrow widths
         edited = st.data_editor(
-            display_df[["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days", "Update TrackingNumber", "View Timeline"]],
+            display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
             column_config={
                 "No": st.column_config.TextColumn("No", width="small"),
                 "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
                 "Order": st.column_config.TextColumn("Order", width="small"),
-                "TrackingNumber": st.column_config.LinkColumn("Tracking", display_text=r"ref=(.*)", width="medium"),
-                "TrackingStatus": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update TrackingNumber": st.column_config.CheckboxColumn("✏️", help="Edit Tracking Number", width="small"),
-                "View Timeline": st.column_config.CheckboxColumn("📋", help="View Timeline", width="small"),
-                "Days": st.column_config.TextColumn("Days", width="small")
+                "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
+                "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
+                "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
+                "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
+                "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
             },
-            disabled=["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days"]
+            disabled=["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated"]
         )
         
-        # Action Logic with state resetting to clear icons
+        # --- Handle Action Logic with Rerun-to-Clear Fix ---
         for idx, row in edited.iterrows():
-            if row["Update TrackingNumber"]:
-                # Reset state in background before dialog so it doesn't loop
-                st.session_state.main_table["edited_rows"][idx]["Update TrackingNumber"] = False
-                show_update_tracking_dialog(display_df.iloc[idx])
-                break
+            if row["Update Tracking Number"]:
+                st.session_state.active_action = 'edit'
+                st.session_state.active_record = display_df.iloc[idx]
+                st.rerun() # Forces table reset before dialog appears
             if row["View Timeline"]:
-                st.session_state.main_table["edited_rows"][idx]["View Timeline"] = False
-                show_timeline_dialog(display_df.iloc[idx])
-                break
+                st.session_state.active_action = 'view'
+                st.session_state.active_record = display_df.iloc[idx]
+                st.rerun()
     else: st.info("No matching records found.")
 else: st.warning("Database empty. Click Sync All Data to start.")
