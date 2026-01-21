@@ -1,5 +1,4 @@
 streamlit
 pandas
 requests
-
-beautifulsoup4  <-- Removed to avoid confusion/errors since we use regex now
+openpyxl>=3.1.2
