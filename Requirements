@@ -1,4 +1,7 @@
 beautifulsoup4
+lxml
 pandas
 requests
 streamlit
+
+Force Dependency Update v6
