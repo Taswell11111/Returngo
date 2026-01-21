@@ -6,19 +6,11 @@ import pandas as pd
 import os
 import threading
 import time
-import re
+import re  # Built-in Regex module for scraping without bs4
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-
-# --- SAFE IMPORT FOR BS4 ---
-try:
-    from bs4 import BeautifulSoup
-    BS4_AVAILABLE = True
-except ImportError:
-    BS4_AVAILABLE = False
-    BeautifulSoup = None
 
 # ==========================================
 # 1. CONFIGURATION
@@ -368,12 +360,9 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     except Exception as e:
         return False, str(e)
 
+# Updated Courier Guy Check using Regex (Zero Dependency)
 def check_courier_status(tracking_number, rma_id):
-    if not BS4_AVAILABLE:
-        return "Install 'beautifulsoup4' to enable this feature."
-        
     try:
-        # Use the optimize.parcelninja.com URL structure as requested
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         
         headers = {
@@ -389,13 +378,14 @@ def check_courier_status(tracking_number, rma_id):
         if res.status_code == 200:
             content = res.text
             
-            # 2. Scrape HTML using BeautifulSoup
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # Use specific header tags which usually contain the status in bold/headers
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4'])
-            
-            # Priority Search for most recent status
+            # 1. Try JSON First (Best case)
+            try:
+                data = res.json()
+                status = data.get('status') or data.get('currentStatus')
+                if status: return f"API Status: {status}"
+            except: pass 
+
+            # 2. Regex Priority Search
             prioritized_keywords = [
                 r"delivered",            # Priority 1: Delivered is final
                 r"out\s+for\s+delivery", # Priority 2: Almost there
@@ -407,26 +397,22 @@ def check_courier_status(tracking_number, rma_id):
             
             found = False
             for k in prioritized_keywords:
-                for h in headers:
-                    text = h.get_text(strip=True).lower()
-                    if re.search(k, text, re.IGNORECASE):
-                        status_text = k.replace(r"\s+", " ").title()
-                        if "At Delivery Depot" in status_text: status_text = "At Delivery Depot"
-                        final_status = status_text
-                        found = True
-                        break
-                if found: break
+                if re.search(k, content, re.IGNORECASE):
+                    # Found a match! Clean up the regex pattern to nice text
+                    status_text = k.replace(r"\s+", " ").title()
+                    # Fix specific casings
+                    if "At Delivery Depot" in status_text: status_text = "At Delivery Depot"
+                    final_status = status_text
+                    found = True
+                    break
 
             if not found:
-                # If headers didn't have it, search body text broadly
-                for k in prioritized_keywords:
-                    if re.search(k, content, re.IGNORECASE):
-                         status_text = k.replace(r"\s+", " ").title()
-                         final_status = status_text
-                         break
+                final_status = "Page Loaded (Status Keyword Not Found)"
             
+        elif res.status_code == 401:
+            final_status = "Auth Error (401)"
         elif res.status_code == 404:
-            final_status = "Tracking Not Found"
+            final_status = "Tracking ID Not Found"
         else:
             final_status = f"Error {res.status_code}"
             
