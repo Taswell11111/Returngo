@@ -1,24 +1,37 @@
-import streamlit as st
-import sqlite3
-import requests
+# app.py
+"""
+Levi's ReturnGO Ops Dashboard (Streamlit)
+
+- Copy-to-clipboard copies EXACTLY the server-rendered table:
+  * same visible columns you choose
+  * same server-side sorting you choose
+  * same filtering you applied
+Note: Streamlit client-side header sorting/hiding is not exposed back to Python.
+This implements explicit "View" controls so what you see == what gets copied.
+"""
+
+import concurrent.futures
 import json
-import pandas as pd
 import os
+import re
+import sqlite3
 import threading
 import time
-import re
-from io import BytesIO
+import uuid
 from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import requests
+import streamlit as st
+import streamlit.components.v1 as components
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import concurrent.futures
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
 st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
 
-# --- ACCESS SECRETS ---
 try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
 except (FileNotFoundError, KeyError):
@@ -28,7 +41,6 @@ if not MY_API_KEY:
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in Streamlit secrets or env vars.")
     st.stop()
 
-# IMPORTANT: move this token into secrets/env if you can.
 try:
     PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
 except Exception:
@@ -38,14 +50,13 @@ STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
 
-# Efficiency controls
 CACHE_EXPIRY_HOURS = 4
 COURIER_REFRESH_HOURS = 12
-MAX_WORKERS = 3            # keep concurrency low to avoid 429
-RG_RPS = 2                 # soft pacing
+MAX_WORKERS = 3
+RG_RPS = 2
 SYNC_OVERLAP_MINUTES = 5
 
-ACTIVE_STATUSES = ["Pending", "Approved", "Received"]  # "Open RMAs"
+ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 
 # ==========================================
 # 1b. STYLING
@@ -61,17 +72,17 @@ st.markdown(
         --text:#e5e7eb;
         --muted:#9ca3af;
         --accent:#c41230;
-        --accent2:#ef4444;
         --ok:#22c55e;
       }
 
-      .stApp { background: radial-gradient(1200px 600px at 20% 0%, #111827 0%, var(--bg) 55%); color: var(--text); }
+      .stApp {
+        background: radial-gradient(1200px 600px at 20% 0%, #111827 0%, var(--bg) 55%);
+        color: var(--text);
+      }
 
-      /* Top header */
       .hdr-title { font-size: 44px; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 6px 0; }
       .hdr-sub { color: var(--muted); font-weight: 600; margin-top: 0; }
 
-      /* Action buttons (right side) */
       div.stButton > button {
         width: 100%;
         border: 1px solid var(--border);
@@ -87,8 +98,7 @@ st.markdown(
         color: var(--accent);
       }
 
-      /* Metric tile buttons */
-      .tile-time {
+      .tile-time{
         display:flex;
         justify-content:center;
         font-size: 12px;
@@ -97,23 +107,13 @@ st.markdown(
         margin: 2px 0 6px 0;
       }
 
-      /* Reduce the tiny sync buttons by ~50% */
       button[kind="secondary"]{
         padding: 6px 8px !important;
         font-size: 12px !important;
         border-radius: 10px !important;
       }
-
-      /* Make the small sync button sit tight under the tile button */
       .tight-under { margin-top: -6px; }
 
-      /* Filters row chips */
-      .chip-row {
-        display:flex; gap:10px; align-items:center; margin: 8px 0 0 0;
-      }
-      .chip-hint { color: var(--muted); font-weight: 700; font-size: 13px; margin-bottom: 6px; }
-
-      /* Data editor tweaks */
       [data-testid="stDataEditor"]{
         border: 1px solid var(--border);
         border-radius: 14px;
@@ -121,12 +121,26 @@ st.markdown(
         background: rgba(17,24,39,0.65);
       }
 
-      /* Dialog styling */
       div[data-testid="stDialog"] {
         background: linear-gradient(180deg, #0b1220 0%, #0b0f16 100%);
         border: 1px solid var(--accent);
         border-radius: 14px;
       }
+
+      .cc-copy-wrap{ display:flex; gap:10px; align-items:center; }
+      .cc-copy-btn{
+        width:100%;
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, #111827 0%, #0b1220 100%);
+        color: var(--text);
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-size: 15px;
+        font-weight: 900;
+        cursor:pointer;
+      }
+      .cc-copy-btn:hover{ border-color: var(--accent); color: var(--accent); }
+      .cc-copy-status{ color: var(--muted); font-weight: 800; font-size: 12px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -150,7 +164,7 @@ def _iso_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _sleep_for_rate_limit():
+def _sleep_for_rate_limit() -> None:
     global _last_req_ts
     if RG_RPS <= 0:
         return
@@ -190,7 +204,6 @@ def rg_headers() -> dict:
 
 
 def _extract_rate_headers(headers: dict) -> dict:
-    """Try to surface any rate-limit headers if ReturnGO provides them."""
     keep = {}
     for k, v in headers.items():
         lk = k.lower()
@@ -200,7 +213,6 @@ def _extract_rate_headers(headers: dict) -> dict:
 
 
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
-    """ReturnGO request wrapper with pacing + 429 backoff."""
     session = get_thread_session()
     headers = headers or rg_headers()
 
@@ -215,7 +227,6 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
         if res.status_code != 429:
             return res, last_rate_hdrs
 
-        # 429
         ra = res.headers.get("Retry-After")
         if ra and ra.isdigit():
             sleep_s = int(ra)
@@ -239,8 +250,7 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
 # ==========================================
 # 3. DATABASE
 # ==========================================
-
-def init_db():
+def init_db() -> None:
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -269,7 +279,6 @@ def init_db():
             """
         )
 
-        # Migrations (if DB existed)
         cols_rmas = {row[1] for row in c.execute("PRAGMA table_info(rmas)").fetchall()}
         for col, coldef in [
             ("courier_status", "TEXT"),
@@ -282,10 +291,8 @@ def init_db():
                 except Exception:
                     pass
 
-        # Handle old sync_logs schemas if they exist
         cols_sync = {row[1] for row in c.execute("PRAGMA table_info(sync_logs)").fetchall()}
         if ("status" in cols_sync) or ("last_sync" in cols_sync):
-            # rebuild to new schema
             c.execute("CREATE TABLE IF NOT EXISTS sync_logs_new (scope TEXT PRIMARY KEY, last_sync_iso TEXT)")
             try:
                 c.execute(
@@ -303,7 +310,7 @@ def init_db():
         conn.close()
 
 
-def clear_db():
+def clear_db() -> bool:
     with DB_LOCK:
         try:
             if os.path.exists(DB_FILE):
@@ -314,7 +321,14 @@ def clear_db():
             return False
 
 
-def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict, courier_status=None, courier_checked_iso=None):
+def upsert_rma(
+    rma_id: str,
+    status: str,
+    created_at: str,
+    payload: dict,
+    courier_status=None,
+    courier_checked_iso=None,
+) -> None:
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -350,7 +364,7 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict, courier
         conn.close()
 
 
-def delete_rmas(rma_ids):
+def delete_rmas(rma_ids) -> None:
     if not rma_ids:
         return
     with DB_LOCK:
@@ -385,7 +399,6 @@ def get_rma(rma_id: str):
 
 
 def get_all_open_from_db():
-    """Open = Pending/Approved/Received (what you want)."""
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -419,14 +432,11 @@ def get_local_ids_for_status(status: str):
     return {r[0] for r in rows}
 
 
-def set_last_sync(scope: str, dt: datetime):
+def set_last_sync(scope: str, dt: datetime) -> None:
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO sync_logs (scope, last_sync_iso) VALUES (?, ?)",
-            (scope, _iso_utc(dt)),
-        )
+        c.execute("INSERT OR REPLACE INTO sync_logs (scope, last_sync_iso) VALUES (?, ?)", (scope, _iso_utc(dt)))
         conn.commit()
         conn.close()
 
@@ -455,7 +465,6 @@ init_db()
 # ==========================================
 # 4. PARCEL NINJA COURIER STATUS (cached)
 # ==========================================
-
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number or not PARCEL_NINJA_TOKEN:
         return "Unknown"
@@ -475,14 +484,11 @@ def check_courier_status(tracking_number: str) -> str:
             except Exception:
                 pass
 
-            # fallback HTML parse (best-effort)
             content = res.text
             clean_html = re.sub(r"<(script|style).*?</\1>", "", content, flags=re.DOTALL | re.IGNORECASE)
-
             for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                 if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                     return kw
-
             return "Unknown"
 
         if res.status_code == 404:
@@ -496,7 +502,6 @@ def check_courier_status(tracking_number: str) -> str:
 # ==========================================
 # 5. RETURNGO FETCHING (incremental + cached)
 # ==========================================
-
 def fetch_rma_list(statuses, since_dt: datetime | None):
     all_summaries = []
     cursor = None
@@ -623,7 +628,6 @@ def perform_sync(statuses=None):
 
     api_ids = {s.get("rmaId") for s in summaries if s.get("rmaId")}
 
-    # tidy locally cached open RMAs if we synced all open
     if set(statuses) == set(ACTIVE_STATUSES):
         local_open_ids = set()
         for stt in ACTIVE_STATUSES:
@@ -631,7 +635,6 @@ def perform_sync(statuses=None):
         stale = local_open_ids - api_ids
         delete_rmas(stale)
 
-    # fetch details only if stale
     to_fetch = [rid for rid in api_ids if should_refresh_detail(rid)]
     total = len(to_fetch)
     status_msg.info(f"⏳ Syncing {total} records...")
@@ -649,7 +652,6 @@ def perform_sync(statuses=None):
     now = _now_utc()
     set_last_sync(scope, now)
 
-    # Set "last full sync" only when syncing all open statuses
     if set(statuses) == set(ACTIVE_STATUSES):
         st.session_state["last_full_sync"] = now.strftime("%Y-%m-%d %H:%M")
 
@@ -661,7 +663,6 @@ def perform_sync(statuses=None):
 # ==========================================
 # 6. MUTATIONS (Tracking + Notes)
 # ==========================================
-
 def push_tracking_update(rma_id, shipment_id, tracking_number):
     headers = {**rg_headers(), "Content-Type": "application/json"}
     payload = {
@@ -672,9 +673,15 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
     }
 
-    res, _rate = rg_request("PUT", f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, timeout=15, json_body=payload)
+    res, _rate = rg_request(
+        "PUT",
+        f"https://api.returngo.ai/shipment/{shipment_id}",
+        headers=headers,
+        timeout=15,
+        json_body=payload,
+    )
     if res.status_code == 200:
-        fetch_rma_detail(rma_id)  # refresh this one
+        fetch_rma_detail(rma_id)
         return True, "Success"
     return False, f"API Error {res.status_code}: {res.text}"
 
@@ -683,7 +690,13 @@ def push_comment_update(rma_id, comment_text):
     headers = {**rg_headers(), "Content-Type": "application/json"}
     payload = {"text": comment_text, "isPublic": False}
 
-    res, _rate = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, timeout=15, json_body=payload)
+    res, _rate = rg_request(
+        "POST",
+        f"https://api.returngo.ai/rma/{rma_id}/comment",
+        headers=headers,
+        timeout=15,
+        json_body=payload,
+    )
     if res.status_code in (200, 201):
         fetch_rma_detail(rma_id)
         return True, "Success"
@@ -693,13 +706,11 @@ def push_comment_update(rma_id, comment_text):
 # ==========================================
 # 7. EXTRACTION HELPERS (dates + resolution)
 # ==========================================
-
 def _try_parse_dt(val) -> datetime | None:
     if not val:
         return None
     try:
-        s = str(val)
-        s = s.replace("Z", "+00:00")
+        s = str(val).replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -709,17 +720,12 @@ def _try_parse_dt(val) -> datetime | None:
 
 
 def _find_event_date(payload: dict, want: list[str]) -> datetime | None:
-    """
-    Best-effort: scan common places for event/status timelines.
-    want: list of keywords (any match)
-    """
     want_l = [w.lower() for w in want]
 
     def match_name(x: str) -> bool:
         xl = (x or "").lower()
         return any(w in xl for w in want_l)
 
-    # Common containers
     candidates = []
     summary = payload.get("rmaSummary") or {}
     for key in ["events", "statusHistory", "timeline", "history"]:
@@ -732,7 +738,6 @@ def _find_event_date(payload: dict, want: list[str]) -> datetime | None:
         if isinstance(v, list):
             candidates.extend(v)
 
-    # Sometimes shipment-level events exist
     shipments = payload.get("shipments") or []
     for sh in shipments:
         for key in ["events", "statusHistory", "history", "timeline"]:
@@ -740,23 +745,14 @@ def _find_event_date(payload: dict, want: list[str]) -> datetime | None:
             if isinstance(v, list):
                 candidates.extend(v)
 
-    # comments might contain datetime + text
     comments = payload.get("comments") or []
-    for c in comments:
-        candidates.append(c)
+    candidates.extend([c for c in comments if isinstance(c, dict)])
 
     found = []
     for e in candidates:
         if not isinstance(e, dict):
             continue
-        name = (
-            e.get("eventName")
-            or e.get("name")
-            or e.get("type")
-            or e.get("status")
-            or e.get("event")
-            or ""
-        )
+        name = e.get("eventName") or e.get("name") or e.get("type") or e.get("status") or e.get("event") or ""
         if not match_name(str(name)):
             continue
 
@@ -768,17 +764,12 @@ def _find_event_date(payload: dict, want: list[str]) -> datetime | None:
 
     if not found:
         return None
-    # earliest is usually the moment it happened
     return sorted(found)[0]
 
 
 def _resolution_types(payload: dict) -> str:
-    """
-    Best-effort: find resolutionType per item. If multiple distinct -> Mix.
-    """
     types = set()
 
-    # Try common item arrays
     for key in ["items", "rmaItems", "returnedItems", "products", "lineItems"]:
         arr = payload.get(key)
         if isinstance(arr, list):
@@ -789,7 +780,6 @@ def _resolution_types(payload: dict) -> str:
                     v = it.get(rk)
                     if v:
                         types.add(str(v).strip())
-                # Sometimes nested
                 reso = it.get("resolution") if isinstance(it.get("resolution"), dict) else None
                 if reso:
                     for rk in ["type", "resolutionType", "method", "name"]:
@@ -797,7 +787,6 @@ def _resolution_types(payload: dict) -> str:
                         if v:
                             types.add(str(v).strip())
 
-    # also check summary-level
     summ = payload.get("rmaSummary") or {}
     for rk in ["resolutionType", "resolution", "resolution_type"]:
         v = summ.get(rk)
@@ -812,57 +801,110 @@ def _resolution_types(payload: dict) -> str:
 
 
 def _resolution_actioned(payload: dict) -> str:
-    """
-    Best-effort indicator:
-    - Looks for transaction/refund completed, or exchange/replacement created.
-    """
     text = json.dumps(payload).lower()
 
-    # Refund indicators
-    if any(x in text for x in ["refundstatus", "refunded", "refund paid", "refund completed", "refund_complete", "refund succeeded"]):
+    if any(
+        x in text
+        for x in ["refundstatus", "refunded", "refund paid", "refund completed", "refund_complete", "refund succeeded"]
+    ):
         return "Yes"
     if any(x in text for x in ["paymentstatus", "paid", "settled"]) and "refund" in text:
         return "Yes"
-
-    # Exchange indicators
-    if any(x in text for x in ["exchangeorder", "replacementorder", "new order", "exchange created", "replacement created"]):
+    if any(
+        x in text
+        for x in ["exchangeorder", "replacementorder", "new order", "exchange created", "replacement created"]
+    ):
         return "Yes"
-
-    # If resolution exists but no clear indicator
     if "resolution" in text or "refund" in text or "exchange" in text:
         return "Unknown"
-
     return "No"
+
+
+# ==========================================
+# 7b. COPY TABLE
+# ==========================================
+def render_copy_table(df: pd.DataFrame, *, label: str = "📋 Copy table") -> None:
+    tsv = df.to_csv(sep="\t", index=False)
+    payload = json.dumps(tsv)
+    uid = uuid.uuid4().hex
+
+    with st.expander("Copy table fallback (manual)", expanded=False):
+        st.text_area("TSV", value=tsv, height=140)
+
+    components.html(
+        f"""
+        <div class="cc-copy-wrap">
+          <button class="cc-copy-btn" id="cc-copy-btn-{uid}">{label}</button>
+          <span class="cc-copy-status" id="cc-copy-status-{uid}"></span>
+        </div>
+
+        <script>
+          const text = {payload};
+          const btn = document.getElementById("cc-copy-btn-{uid}");
+          const status = document.getElementById("cc-copy-status-{uid}");
+
+          function setStatus(msg) {{
+            status.textContent = msg;
+            setTimeout(() => {{ status.textContent = ""; }}, 2500);
+          }}
+
+          btn.addEventListener("click", async () => {{
+            try {{
+              await navigator.clipboard.writeText(text);
+              setStatus("Copied ✅");
+            }} catch (e) {{
+              setStatus("Clipboard blocked — use fallback below");
+            }}
+          }});
+        </script>
+        """,
+        height=60,
+    )
 
 
 # ==========================================
 # 8. UI STATE
 # ==========================================
-
 if "filter_mode" not in st.session_state:
-    st.session_state.filter_mode = "OPEN"   # default view
+    st.session_state.filter_mode = "OPEN"
 if "filter_status" not in st.session_state:
-    st.session_state.filter_status = "OPEN" # OPEN / Pending / Approved / Received
+    st.session_state.filter_status = "OPEN"
 if "search_query_input" not in st.session_state:
     st.session_state.search_query_input = ""
 if "show_toast" not in st.session_state:
     st.session_state.show_toast = False
+if "prefilter" not in st.session_state:
+    st.session_state.prefilter = "None"
 
-# Modal state
-if "modal_action" not in st.session_state:
-    st.session_state.modal_action = None
-if "modal_record" not in st.session_state:
-    st.session_state.modal_record = None
+# View controls (so "visible" == "copied")
+DEFAULT_VISIBLE_COLS = [
+    "No",
+    "RMA URL",
+    "Order",
+    "Current Status",
+    "Tracking Number",
+    "Tracking Status",
+    "Requested date",
+    "Approved date",
+    "Received date",
+    "resolutionType",
+    "Resolution actioned",
+]
+if "visible_cols" not in st.session_state:
+    st.session_state.visible_cols = DEFAULT_VISIBLE_COLS.copy()
+if "sort_by" not in st.session_state:
+    st.session_state.sort_by = "Requested date"
+if "sort_asc" not in st.session_state:
+    st.session_state.sort_asc = False
 
 # ==========================================
-# 9. DIALOGS (NO FORCED RERUN ON OPEN)
+# 9. DIALOGS
 # ==========================================
-
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
     st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
     with st.form("upd_track"):
-        new_track = st.text_input("New Tracking Number", value=record.get("DisplayTrack",""))
+        new_track = st.text_input("New Tracking Number", value=record.get("DisplayTrack", ""))
         submitted = st.form_submit_button("Save Changes")
         if submitted:
             if not record.get("shipment_id"):
@@ -871,10 +913,11 @@ def show_update_tracking_dialog(record):
                 ok, msg = push_tracking_update(record["RMA ID"], record["shipment_id"], new_track)
                 if ok:
                     st.success("Updated!")
-                    time.sleep(0.4)
+                    time.sleep(0.25)
                     st.rerun()
                 else:
                     st.error(msg)
+
 
 @st.dialog("View Timeline")
 def show_timeline_dialog(record):
@@ -896,24 +939,25 @@ def show_timeline_dialog(record):
     timeline = full.get("comments", []) or []
     if not timeline:
         st.info("No timeline events found.")
-    else:
-        for t in timeline:
-            d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
-            st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
-            st.divider()
+        return
+
+    for t in timeline:
+        d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
+        st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
+        st.divider()
+
 
 # ==========================================
 # 10. HEADER
 # ==========================================
-
 col1, col2 = st.columns([3.2, 1.1])
 
 with col1:
-    st.markdown('<div class="hdr-title">Levi\'s ReturnGO Ops Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hdr-title">Levi\\\'s ReturnGO Ops Dashboard</div>', unsafe_allow_html=True)
     last_full = st.session_state.get("last_full_sync", "N/A")
     st.markdown(
         f'<div class="hdr-sub">CONNECTED TO: {STORE_URL.upper()} | LAST FULL SYNC: <span style="color:var(--ok)">{last_full}</span></div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 with col2:
@@ -925,7 +969,6 @@ with col2:
             st.success("Cache cleared!")
             st.rerun()
 
-# Toast
 if st.session_state.get("show_toast"):
     st.toast("✅ Sync Complete!", icon="🔄")
     st.session_state["show_toast"] = False
@@ -933,7 +976,6 @@ if st.session_state.get("show_toast"):
 # ==========================================
 # 11. LOAD + PROCESS DATA
 # ==========================================
-
 raw_data = get_all_open_from_db()
 processed_rows = []
 
@@ -950,7 +992,6 @@ for rma in raw_data:
     rma_id = summary.get("rmaId", "N/A")
     order_name = summary.get("order_name", summary.get("orderName", "N/A"))
 
-    # Tracking
     track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get("shipmentId") if shipments else None
@@ -958,16 +999,13 @@ for rma in raw_data:
     local_status = rma.get("_local_courier_status", "") or ""
     track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
-    # Dates (best-effort)
     req_dt = _find_event_date(rma, ["rma_created", "created", "rma created"]) or _try_parse_dt(summary.get("createdAt"))
     appr_dt = _find_event_date(rma, ["rma_approved", "approved"]) or _try_parse_dt(summary.get("approvedAt"))
     recv_dt = _find_event_date(rma, ["shipment_received", "received", "shipment received", "rma_received"])
 
-    # resolutionType + actioned
     res_type = _resolution_types(rma)
     res_actioned = _resolution_actioned(rma)
 
-    # Flags
     is_nt = (status == "Approved" and not track_str)
     is_fg = any("flagged" in (c.get("htmlText", "").lower()) for c in comments)
 
@@ -985,7 +1023,6 @@ for rma in raw_data:
             "Received date": recv_dt.date().isoformat() if recv_dt else "N/A",
             "resolutionType": res_type,
             "Resolution actioned": res_actioned,
-            "Days since updated": "",  # optional placeholder
             "Update Tracking": False,
             "View Timeline": False,
             "DisplayTrack": track_str,
@@ -999,21 +1036,23 @@ for rma in raw_data:
 df_view = pd.DataFrame(processed_rows)
 
 # ==========================================
-# 12. METRIC TILES (with sync buttons under)
+# 12. METRIC TILES
 # ==========================================
-
 def _tile_time(scope_key: str) -> str:
     dt = get_last_sync(scope_key)
     if not dt:
         return "UPDATED: -"
     return f"UPDATED: {dt.astimezone().strftime('%H:%M')}"
 
+
 b1, b2, b3, b4 = st.columns([1, 1, 1, 2.1])
+
 
 def set_status_filter(v):
     st.session_state.filter_status = v
     st.session_state.filter_mode = "OPEN"
     st.rerun()
+
 
 with b1:
     st.markdown(f'<div class="tile-time">{_tile_time("Pending")}</div>', unsafe_allow_html=True)
@@ -1047,13 +1086,9 @@ with b4:
 st.divider()
 
 # ==========================================
-# 13. PRE-FILTERS + SEARCH + EXPORT
+# 13. PRE-FILTERS + SEARCH
 # ==========================================
-
-if "prefilter" not in st.session_state:
-    st.session_state.prefilter = "None"
-
-pf1, pf2, pf3, pf4 = st.columns([1.2, 1.5, 2.8, 1.5])
+pf1, pf2, pf3, _pf4 = st.columns([1.2, 1.5, 2.8, 1.5])
 
 with pf1:
     if st.button("Courier Cancelled", key="pf_cancelled"):
@@ -1073,127 +1108,165 @@ with pf3:
         key="search_query_input",
     )
 
-with pf4:
-    # Export button (Excel)
-    def _to_excel_bytes(df: pd.DataFrame) -> bytes:
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Open RMAs")
-        return output.getvalue()
-
-    st.download_button(
-        "⬇️ Export Excel",
-        data=_to_excel_bytes(df_view.drop(columns=["full_data", "DisplayTrack", "shipment_id"], errors="ignore")),
-        file_name=f"levis_open_rmas_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-# Column filter controls (Streamlit doesn't support true header filters in st.data_editor)
 with st.expander("Filters", expanded=False):
     c1, c2, c3, c4 = st.columns(4)
 
-    statuses_sel = []
-    if not df_view.empty:
-        statuses_sel = sorted(df_view["Current Status"].dropna().unique().tolist())
+    statuses_sel = sorted(df_view["Current Status"].dropna().unique().tolist()) if not df_view.empty else []
 
     with c1:
         f_status = st.multiselect("Current Status", options=statuses_sel, default=[])
     with c2:
         f_track_contains = st.text_input("Tracking Status contains", value="")
     with c3:
-        f_res_type = st.multiselect("resolutionType", options=sorted(df_view["resolutionType"].dropna().unique().tolist()) if not df_view.empty else [], default=[])
+        f_res_type = st.multiselect(
+            "resolutionType",
+            options=sorted(df_view["resolutionType"].dropna().unique().tolist()) if not df_view.empty else [],
+            default=[],
+        )
     with c4:
-        f_actioned = st.multiselect("Resolution actioned", options=sorted(df_view["Resolution actioned"].dropna().unique().tolist()) if not df_view.empty else [], default=[])
+        f_actioned = st.multiselect(
+            "Resolution actioned",
+            options=sorted(df_view["Resolution actioned"].dropna().unique().tolist()) if not df_view.empty else [],
+            default=[],
+        )
 
 # ==========================================
 # 14. APPLY FILTERS
 # ==========================================
-
 display_df = df_view.copy()
 
-# Base view: OPEN means all three statuses
 if st.session_state.filter_status in ("Pending", "Approved", "Received"):
     display_df = display_df[display_df["Current Status"] == st.session_state.filter_status]
 else:
     display_df = display_df[display_df["Current Status"].isin(ACTIVE_STATUSES)]
 
-# Prefilters
 pf = st.session_state.get("prefilter", "None")
 if pf == "Courier Cancelled":
-    display_df = display_df[display_df["Tracking Status"].astype(str).str.contains("Courier Cancelled", case=False, na=False)]
+    display_df = display_df[
+        display_df["Tracking Status"].astype(str).str.contains("Courier Cancelled", case=False, na=False)
+    ]
 elif pf == "Approved > Delivered":
     display_df = display_df[
         (display_df["Current Status"] == "Approved")
         & (display_df["Tracking Status"].astype(str).str.contains("Delivered", case=False, na=False))
     ]
 
-# Search filter
 sq = (search_query or "").strip().lower()
 if sq:
     display_df = display_df[
         display_df.apply(
-            lambda r: sq in str(r.get("RMA ID","")).lower()
-                      or sq in str(r.get("Order","")).lower()
-                      or sq in str(r.get("Tracking Number","")).lower()
-                      or sq in str(r.get("Tracking Status","")).lower()
-                      or sq in str(r.get("resolutionType","")).lower(),
-            axis=1
+            lambda r: sq in str(r.get("RMA ID", "")).lower()
+            or sq in str(r.get("Order", "")).lower()
+            or sq in str(r.get("Tracking Number", "")).lower()
+            or sq in str(r.get("Tracking Status", "")).lower()
+            or sq in str(r.get("resolutionType", "")).lower(),
+            axis=1,
         )
     ]
 
-# Column filters
 if f_status:
     display_df = display_df[display_df["Current Status"].isin(f_status)]
 if f_track_contains:
-    display_df = display_df[display_df["Tracking Status"].astype(str).str.contains(f_track_contains, case=False, na=False)]
+    display_df = display_df[
+        display_df["Tracking Status"].astype(str).str.contains(f_track_contains, case=False, na=False)
+    ]
 if f_res_type:
     display_df = display_df[display_df["resolutionType"].isin(f_res_type)]
 if f_actioned:
     display_df = display_df[display_df["Resolution actioned"].isin(f_actioned)]
 
-# Sort
+# Numbering (before sort controls)
 if not display_df.empty:
-    display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
+    display_df = display_df.reset_index(drop=True)
     display_df["No"] = (display_df.index + 1).astype(str)
 
 # ==========================================
-# 15. TABLE (RMA ID is hyperlink + actions)
+# 15. VIEW CONTROLS (this is what makes copy==visible)
 # ==========================================
-
 if display_df.empty:
     st.info("No matching records found.")
     st.stop()
 
+# Keep visible columns valid
+all_possible_cols = [
+    "No",
+    "RMA URL",
+    "Order",
+    "Current Status",
+    "Tracking Number",
+    "Tracking Status",
+    "Requested date",
+    "Approved date",
+    "Received date",
+    "resolutionType",
+    "Resolution actioned",
+]
+visible_cols = [c for c in st.session_state.visible_cols if c in all_possible_cols]
+if not visible_cols:
+    visible_cols = DEFAULT_VISIBLE_COLS.copy()
+    st.session_state.visible_cols = visible_cols
+
+with st.expander("Table View", expanded=False):
+    vc1, vc2, vc3 = st.columns([2.2, 1.4, 1.0])
+
+    with vc1:
+        st.session_state.visible_cols = st.multiselect(
+            "Visible columns",
+            options=all_possible_cols,
+            default=visible_cols,
+        )
+
+    # Recompute after UI edit
+    visible_cols = [c for c in st.session_state.visible_cols if c in all_possible_cols]
+    if not visible_cols:
+        visible_cols = DEFAULT_VISIBLE_COLS.copy()
+        st.session_state.visible_cols = visible_cols
+
+    sortable_cols = [c for c in visible_cols if c not in ("No",)]
+    with vc2:
+        st.session_state.sort_by = st.selectbox(
+            "Sort by",
+            options=sortable_cols if sortable_cols else all_possible_cols,
+            index=(sortable_cols.index(st.session_state.sort_by) if st.session_state.sort_by in sortable_cols else 0),
+        )
+    with vc3:
+        st.session_state.sort_asc = st.toggle("Ascending", value=bool(st.session_state.sort_asc))
+
+# Apply server-side sort (so copy uses same order)
+sort_by = st.session_state.sort_by
+sort_asc = bool(st.session_state.sort_asc)
+if sort_by in display_df.columns:
+    display_df = display_df.sort_values(by=sort_by, ascending=sort_asc, kind="mergesort").reset_index(drop=True)
+    display_df["No"] = (display_df.index + 1).astype(str)
+
+# ==========================================
+# 16. COPY (copies EXACTLY the visible columns + current sort)
+# ==========================================
+copy_df = display_df[visible_cols].copy()
+
+copy_c1, copy_c2 = st.columns([1.4, 2.6])
+with copy_c1:
+    render_copy_table(copy_df, label="📋 Copy visible table")
+with copy_c2:
+    st.caption("Copies exactly what you configured above (visible columns + sort).")
+
+st.divider()
+
+# ==========================================
+# 17. TABLE + ACTIONS
+# ==========================================
+ACTION_COLS = ["Update Tracking", "View Timeline"]
+editor_cols = [c for c in visible_cols if c in display_df.columns] + ACTION_COLS
+
 edited = st.data_editor(
-    display_df[
-        [
-            "No",
-            "RMA URL",
-            "Order",
-            "Current Status",
-            "Tracking Number",
-            "Tracking Status",
-            "Requested date",
-            "Approved date",
-            "Received date",
-            "resolutionType",
-            "Resolution actioned",
-            "Update Tracking",
-            "View Timeline",
-        ]
-    ],
-    width="stretch",
+    display_df[editor_cols],
+    use_container_width=True,
     height=700,
     hide_index=True,
     key="main_table",
     column_config={
         "No": st.column_config.TextColumn("No", width="small"),
-        "RMA URL": st.column_config.LinkColumn(
-            "RMA ID",
-            display_text=r"rmaid=(\d+)",
-            width="small"
-        ),
+        "RMA URL": st.column_config.LinkColumn("RMA ID", display_text=r"rmaid=(\d+)", width="small"),
         "Order": st.column_config.TextColumn("Order", width="medium"),
         "Current Status": st.column_config.TextColumn("Current Status", width="small"),
         "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
@@ -1206,35 +1279,36 @@ edited = st.data_editor(
         "Update Tracking": st.column_config.CheckboxColumn("Update Tracking", width="small"),
         "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
     },
-    disabled=[
-        "No",
-        "RMA URL",
-        "Order",
-        "Current Status",
-        "Tracking Number",
-        "Tracking Status",
-        "Requested date",
-        "Approved date",
-        "Received date",
-        "resolutionType",
-        "Resolution actioned",
-    ],
+    disabled=[c for c in visible_cols if c not in ACTION_COLS],
 )
 
-# IMPORTANT:
-# We do NOT st.rerun() to open dialogs (prevents jumping back to the top / row 1).
-# The checkbox may stay ticked until the next rerun; that's the trade-off to preserve position.
+# Open at most one dialog per run
 state = st.session_state.get("main_table", {})
 edits = state.get("edited_rows", {}) if isinstance(state, dict) else {}
+opened_any = False
 
-for row_idx, changes in edits.items():
+for row_idx, changes in (edits or {}).items():
+    if opened_any:
+        break
+
     idx = int(row_idx)
+    if idx < 0 or idx >= len(display_df):
+        continue
+
     record = display_df.iloc[idx].to_dict()
 
+    rma_id = str(record.get("RMA URL", "")).split("rmaid=")[-1]
+    record["RMA ID"] = rma_id
+
+    full_row = df_view[df_view["RMA ID"].astype(str) == rma_id]
+    if not full_row.empty:
+        record["full_data"] = full_row.iloc[0].get("full_data")
+        record["shipment_id"] = full_row.iloc[0].get("shipment_id")
+        record["DisplayTrack"] = full_row.iloc[0].get("DisplayTrack") or ""
+
     if changes.get("Update Tracking"):
-        # open dialog without forcing a rerun
-        record["RMA ID"] = record.get("RMA URL","").split("rmaid=")[-1]
-        # rehydrate full_data etc from original df_view row
-        full_row = df_view[df_view["RMA ID"] == record["RMA ID"]]
-        if not full_row.empty:
-            record["full_data"] = full
+        opened_any = True
+        show_update_tracking_dialog(record)
+    elif changes.get("View Timeline"):
+        opened_any = True
+        show_timeline_dialog(record)
