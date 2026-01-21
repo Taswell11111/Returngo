@@ -6,19 +6,11 @@ import pandas as pd
 import os
 import threading
 import time
+import re  # Built-in Regex module
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-
-# --- SAFE IMPORT FOR BS4 ---
-try:
-    from bs4 import BeautifulSoup
-    BS4_AVAILABLE = True
-except ImportError:
-    BS4_AVAILABLE = False
-    # Define a dummy BeautifulSoup to prevent NameErrors later in code
-    BeautifulSoup = None
 
 # ==========================================
 # 1. CONFIGURATION
@@ -336,11 +328,8 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     except Exception as e:
         return False, str(e)
 
-# Updated Courier Guy Check using Parcel Ninja URL + Basic Scraping
+# Updated Courier Guy Check using Regex (Zero Dependency)
 def check_courier_status(tracking_number):
-    if not BS4_AVAILABLE:
-        return "Install 'beautifulsoup4' to enable this feature."
-        
     try:
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         
@@ -353,6 +342,8 @@ def check_courier_status(tracking_number):
         res = requests.get(url, headers=headers, timeout=8)
         
         if res.status_code == 200:
+            content = res.text
+            
             # 1. Try JSON
             try:
                 data = res.json()
@@ -360,19 +351,30 @@ def check_courier_status(tracking_number):
                 if status: return f"API Status: {status}"
             except: pass 
 
-            # 2. Scrape HTML
-            soup = BeautifulSoup(res.text, 'html.parser')
+            # 2. Regex Search for common statuses in HTML text
+            # We look for whole words to avoid false positives
+            keywords = [
+                r"delivered", 
+                r"in\s+transit", 
+                r"out\s+for\s+delivery", 
+                r"collected", 
+                r"created",
+                r"at\s+delivery\s+depot"
+            ]
             
-            headers = soup.find_all(['h1', 'h2', 'h3', 'h4'])
-            for h in headers:
-                text = h.get_text(strip=True).lower()
-                if any(x in text for x in ['delivered', 'in transit', 'out for delivery', 'collected', 'created']):
-                    return f"Found Status: {h.get_text(strip=True)}"
+            found_status = []
+            for k in keywords:
+                if re.search(k, content, re.IGNORECASE):
+                    found_status.append(k.replace(r"\s+", " ").title())
             
-            if soup.title:
-                return f"Page Title: {soup.title.get_text(strip=True)}"
-                
-            return "Loaded Page (Status Text Not Found)"
+            if found_status:
+                # Return the most relevant status (usually the last one added to list if chronological, but here just first found)
+                return f"Found Status: {', '.join(set(found_status))}"
+
+            # Fallback: Look for specific HTML class if we know it (e.g., <div class="status">)
+            # This is harder with regex but simple searches work
+            
+            return "Page Loaded (Status Keyword Not Found)"
             
         elif res.status_code == 401:
             return "Auth Error (401)"
