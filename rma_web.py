@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -49,7 +50,7 @@ st.markdown("""
         background-color: #1f2937;
         color: white;
         border-radius: 8px;
-        padding: 12px 24px; /* Improved Padding */
+        padding: 12px 24px;
         font-size: 14px;
         font-weight: bold;
     }
@@ -57,10 +58,16 @@ st.markdown("""
         border-color: #1f538d; 
         color: #1f538d;
     }
-    /* Modal Styling Fixes */
     div[data-testid="stDialog"] {
         background-color: #1a1a1a;
         border: 1px solid #4b5563;
+    }
+    .sync-time {
+        font-size: 0.8em;
+        color: #888;
+        text-align: center;
+        margin-top: -10px;
+        margin-bottom: 10px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -83,6 +90,9 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS rmas
                      (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
                       created_at TEXT, json_data TEXT, last_fetched TIMESTAMP)''')
+        # Table for sync timestamps
+        c.execute('''CREATE TABLE IF NOT EXISTS sync_logs
+                     (store_url TEXT, status TEXT, last_sync TIMESTAMP, PRIMARY KEY (store_url, status))''')
         conn.commit()
         conn.close()
 
@@ -134,6 +144,27 @@ def get_local_ids_for_status(store_url, status):
         rows = c.fetchall()
         conn.close()
     return {r[0] for r in rows}
+
+def update_sync_log(store_url, status):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute('''INSERT OR REPLACE INTO sync_logs (store_url, status, last_sync)
+                     VALUES (?, ?, ?)''', (store_url, status, now))
+        conn.commit()
+        conn.close()
+
+def get_last_sync(store_url, status):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        try:
+            c.execute("SELECT last_sync FROM sync_logs WHERE store_url=? AND status=?", (store_url, status))
+            row = c.fetchone()
+            return row[0] if row else None
+        except: return None
+        finally: conn.close()
 
 def clear_db():
     with DB_LOCK:
@@ -229,25 +260,37 @@ def perform_sync(target_store=None, target_status=None):
     for i, store in enumerate(stores_to_sync):
         headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
         for s in statuses:
+            # 1. Fetch Fresh List
             api_rmas = fetch_all_pages(session, headers, s)
+            
+            # 2. Compare with Local DB (One-Call Check Logic)
             local_ids = get_local_ids_for_status(store['url'], s)
             api_ids = {r.get('rmaId') for r in api_rmas}
+            
+            # Stale IDs: In DB but not in API (moved status or deleted)
             stale_ids = local_ids - api_ids
             
+            # Queue Updates
             for r in api_rmas:
+                # We fetch all active to ensure timeline/comments are up to date
                 tasks.append((r, store['url'], True))
+                
             for stale_id in stale_ids:
+                # Force fetch stale items to update their status in DB
                 placeholder = {'rmaId': stale_id, 'status': 'CHECK_UPDATE', 'createdAt': None}
                 tasks.append((placeholder, store['url'], True))
                 
             total_found += len(api_rmas) + len(stale_ids)
+            
+            # Update Timestamp for this specific box
+            update_sync_log(store['url'], s)
         
         if list_bar: 
             list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
     
     if list_bar: list_bar.empty()
 
-    status_msg.info(f"⏳ Found {total_found} records (including updates). Downloading details...")
+    status_msg.info(f"⏳ Syncing {total_found} records...")
     
     if total_found > 0:
         bar = st.progress(0, text="Downloading Details...")
@@ -263,7 +306,7 @@ def perform_sync(target_store=None, target_status=None):
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state['show_toast'] = True
-    status_msg.success(f"✅ Sync Complete! {total_found} records updated.")
+    status_msg.success(f"✅ Sync Complete!")
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
@@ -292,6 +335,19 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
             return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
         return False, str(e)
+
+# Lightweight Scraper for Courier Guy (Experimental)
+def check_courier_status(tracking_number):
+    try:
+        url = f"https://portal.thecourierguy.co.za/track?ref={tracking_number}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        # Note: This is a best-effort.
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            return "Check Portal (Scraping Restricted)" 
+        return "Connection OK"
+    except:
+        return "Error checking status"
 
 # ==========================================
 # 4. FRONTEND UI LOGIC
@@ -333,10 +389,16 @@ def show_rma_modal(record):
             st.divider()
             
     with t2:
-        # Use DisplayTrack (raw text) for the input box value, not the URL
         raw_track = record['DisplayTrack']
         with st.form("track_upd_modal"):
             new_track = st.text_input("New Tracking", value=raw_track)
+            
+            # Simple Status Check Button inside Modal
+            if raw_track:
+                if st.form_submit_button("🔍 Check Courier Status (Experimental)"):
+                    status_info = check_courier_status(raw_track)
+                    st.info(f"Courier Status: {status_info}")
+            
             if st.form_submit_button("Save"):
                 if not record['shipment_id']:
                     st.error("No Shipment ID.")
@@ -351,8 +413,9 @@ def show_rma_modal(record):
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title("Bounty Apparel ReturnGo RMAs 🔄️")
-    last_sync = st.session_state.get('last_sync', 'Not run yet')
-    st.markdown(f"**Last Sync:** :green[{last_sync}]")
+    # SEARCH BAR
+    search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
+    
 with col2:
     if st.button("🔄 Sync All Data", type="primary", use_container_width=True):
         perform_sync()
@@ -384,10 +447,8 @@ for rma in raw_data:
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get('shipmentId') if shipments else None
     
-    # URL GENERATION
     track_url = None
     if track_str:
-        # Use the first tracking number if multiple exist
         primary_track = track_nums[0] if track_nums else ""
         track_url = f"https://portal.thecourierguy.co.za/track?ref={primary_track}"
 
@@ -409,47 +470,67 @@ for rma in raw_data:
     if store_url in store_counts:
         if status in store_counts[store_url]: 
             store_counts[store_url][status] += 1
-        
         is_no_track = False
         if status == "Approved":
             if not shipments or not track_str:
                 store_counts[store_url]["NoTrack"] += 1
                 is_no_track = True
-        
         is_flagged = False
         if any("flagged" in c.get('htmlText', '').lower() for c in comments):
             store_counts[store_url]["Flagged"] += 1
             is_flagged = True
 
-        processed_rows.append({
-            "RMA ID": rma_id,
-            "Order": order_name,
-            "Store URL": store_url,
-            "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
-            "Status": status,
-            "TrackingNumber": track_url if track_url else track_str, # Store URL here if it exists
-            "DisplayTrack": track_str, # Keep raw text for display pattern
-            "Created": str(created_at)[:10] if created_at else "N/A",
-            "Updated": str(updated_at)[:10] if updated_at else "N/A",
-            "Days since updated": days_since,
-            "IsNoTrack": is_no_track,
-            "IsFlagged": is_flagged,
-            "shipment_id": shipment_id,
-            "full_data": rma
-        })
+        # Search Filtering
+        add_row = True
+        if search_query:
+            q = search_query.lower()
+            if (q not in str(rma_id).lower() and 
+                q not in str(order_name).lower() and 
+                q not in str(track_str).lower()):
+                add_row = False
+        
+        if add_row:
+            processed_rows.append({
+                "RMA ID": rma_id,
+                "Order": order_name,
+                "Store URL": store_url,
+                "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
+                "Status": status,
+                "TrackingNumber": track_url if track_url else track_str,
+                "DisplayTrack": track_str,
+                "Created": str(created_at)[:10] if created_at else "N/A",
+                "Updated": str(updated_at)[:10] if updated_at else "N/A",
+                "Days since updated": days_since,
+                "IsNoTrack": is_no_track,
+                "IsFlagged": is_flagged,
+                "shipment_id": shipment_id,
+                "full_data": rma
+            })
 
+# --- Store Boxes with Timestamps ---
 cols = st.columns(len(STORES))
 
 for i, store in enumerate(STORES):
     c = store_counts[store['url']]
     with cols[i]:
         st.markdown(f"**{store['name']}**")
-        if st.button(f"Pending\n{c['Pending']}", key=f"p_{i}"): 
-             handle_filter_click(store['url'], "Pending")
-        if st.button(f"Approved\n{c['Approved']}", key=f"a_{i}"): 
-             handle_filter_click(store['url'], "Approved")
-        if st.button(f"Received\n{c['Received']}", key=f"r_{i}"): 
-             handle_filter_click(store['url'], "Received")
+        
+        # Helper to show timestamp
+        def show_btn_and_time(label, status, key):
+            if st.button(f"{label}\n{c[status]}", key=key): 
+                handle_filter_click(store['url'], status)
+            # Show sync time if exists
+            ts = get_last_sync(store['url'], status)
+            if ts:
+                st.markdown(f"<div class='sync-time'>Updated: {ts[11:]}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='sync-time'>-</div>", unsafe_allow_html=True)
+
+        show_btn_and_time("Pending", "Pending", f"p_{i}")
+        show_btn_and_time("Approved", "Approved", f"a_{i}")
+        show_btn_and_time("Received", "Received", f"r_{i}")
+        
+        # No Track / Flagged are derived, so they don't have their own sync timestamp (they use Approved/Pending)
         if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}"): 
              handle_filter_click(store['url'], "NoTrack")
         if st.button(f"🚩 Flagged\n{c['Flagged']}", key=f"f_{i}"): 
@@ -483,14 +564,13 @@ if not df.empty:
         df = df.reset_index(drop=True)
         df.insert(0, "No", range(1, len(df) + 1))
         
-        # Left Indent Format: Convert numbers to strings
         df['No'] = df['No'].astype(str)
         df['Days since updated'] = df['Days since updated'].astype(str)
 
         event = st.dataframe(
             df[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "Created", "Updated", "Days since updated"]],
             use_container_width=True,
-            height=700, # Increased height for ~20 rows
+            height=700, 
             hide_index=True,
             selection_mode="single-row",
             on_select="rerun",
@@ -498,7 +578,7 @@ if not df.empty:
             column_config={
                 "TrackingNumber": st.column_config.LinkColumn(
                     "TrackingNumber",
-                    display_text=r"ref=(.*)" # Extract the tracking number from the URL for display
+                    display_text=r"ref=(.*)"
                 ),
                 "No": st.column_config.TextColumn("No", width="small"),
                 "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
@@ -511,7 +591,7 @@ if not df.empty:
             idx = selected[0]
             if idx < len(df):
                 record = df.iloc[idx]
-                show_rma_modal(record) # Trigger Modal
+                show_rma_modal(record) 
     else:
         st.info("No records match the current filter.")
 else:
