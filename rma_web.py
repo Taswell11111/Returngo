@@ -13,7 +13,7 @@ import concurrent.futures
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="RMA Central | Web", layout="wide", page_icon="📦")
+st.set_page_config(page_title="Bounty Apparel ReturnGo RMAs", layout="wide", page_icon="🔄️")
 
 # ACCESS SECRETS
 try:
@@ -49,7 +49,7 @@ st.markdown("""
         background-color: #1f2937;
         color: white;
         border-radius: 8px;
-        padding: 10px 0px;
+        padding: 12px 24px; /* Improved Padding */
         font-size: 14px;
         font-weight: bold;
     }
@@ -57,12 +57,10 @@ st.markdown("""
         border-color: #1f538d; 
         color: #1f538d;
     }
-    .action-panel {
-        border: 2px solid #1f538d;
-        padding: 20px;
-        border-radius: 10px;
+    /* Modal Styling Fixes */
+    div[data-testid="stDialog"] {
         background-color: #1a1a1a;
-        margin-top: 20px;
+        border: 1px solid #4b5563;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -89,7 +87,6 @@ def init_db():
         conn.close()
 
 def save_rma_to_db(rma_id, store_url, status, created_at, data):
-    # Use Lock to prevent "Database Locked" errors during multi-threading
     with DB_LOCK:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -104,7 +101,6 @@ def save_rma_to_db(rma_id, store_url, status, created_at, data):
             print(f"DB Error saving {rma_id}: {e}")
 
 def get_rma_from_db(rma_id):
-    # Reads are usually safe, but locking ensures we don't read while writing
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -126,13 +122,11 @@ def get_all_active_from_db():
     results = []
     for r in rows:
         data = json.loads(r[0])
-        # Ensure the store_url is attached to the data object for the UI to use
         data['store_url'] = r[1] 
         results.append(data)
     return results
 
 def get_local_ids_for_status(store_url, status):
-    """Helper to find what we CURRENTLY have in DB for a specific status."""
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -149,7 +143,6 @@ def clear_db():
             return True
         except: return False
 
-# Initialize DB on load
 init_db()
 
 # ==========================================
@@ -184,18 +177,15 @@ def fetch_all_pages(session, headers, status):
     return all_rmas
 
 def fetch_rma_detail(args):
-    # args tuple: (rma_summary, store_url, force_refresh)
     rma_summary, store_url, force_refresh = args
     rma_id = rma_summary.get('rmaId')
     
-    # 1. Check Cache (if not forced)
     if not force_refresh:
         cached_data, last_fetched = get_rma_from_db(rma_id)
         if cached_data and last_fetched:
             if (datetime.now() - last_fetched) < timedelta(hours=CACHE_EXPIRY_HOURS):
                 return cached_data
 
-    # 2. Fetch from API
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
     
@@ -203,40 +193,25 @@ def fetch_rma_detail(args):
         res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            
-            # --- CRITICAL FIX START ---
-            # Don't trust the rma_summary passed in arguments (it might be stale/placeholder).
-            # Extract true status from the fresh response.
             fresh_summary = data.get('rmaSummary', {})
             true_status = fresh_summary.get('status', 'Unknown')
             true_created = fresh_summary.get('createdAt')
-            
-            # 3. Save to DB with TRUE status
             save_rma_to_db(rma_id, store_url, true_status, true_created, data)
-            # --- CRITICAL FIX END ---
-            
             return data
-        else:
-            print(f"Error fetching {rma_id}: {res.status_code}")
-    except Exception as e:
-        print(f"Exception fetching {rma_id}: {e}")
+    except: pass
     return None
 
 def perform_sync(target_store=None, target_status=None):
     session = get_session()
-    
     status_msg = st.empty()
     status_msg.info("⏳ Connecting to ReturnGO API...")
-    
     tasks = [] 
     
-    # Logic to select stores
     if target_store:
         stores_to_sync = [target_store]
     else:
         stores_to_sync = STORES
     
-    # Logic to select statuses
     if target_status and target_status in ["Pending", "Approved", "Received"]:
         statuses = [target_status]
     elif target_status == "NoTrack":
@@ -244,35 +219,24 @@ def perform_sync(target_store=None, target_status=None):
     elif target_status == "Flagged":
         statuses = ["Pending", "Approved"]
     else:
-        statuses = ["Pending", "Approved", "Received"] # Default / Sync All
+        statuses = ["Pending", "Approved", "Received"]
 
     total_found = 0
     list_bar = None
     if not target_store: 
         list_bar = st.progress(0, text="Fetching Lists from ReturnGO...")
 
-    # 1. Gather all RMA Summaries
     for i, store in enumerate(stores_to_sync):
         headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
         for s in statuses:
-            # A. Fetch Fresh List from API
             api_rmas = fetch_all_pages(session, headers, s)
-            
-            # B. Get list of what we THOUGHT was in this status locally
             local_ids = get_local_ids_for_status(store['url'], s)
-            
-            # C. Identify IDs that are in local DB but NOT in API list (Stale items!)
             api_ids = {r.get('rmaId') for r in api_rmas}
             stale_ids = local_ids - api_ids
             
-            # D. Queue standard updates
             for r in api_rmas:
                 tasks.append((r, store['url'], True))
-            
-            # E. Queue STALE items for update (so they get moved to their new status in DB)
             for stale_id in stale_ids:
-                # Create a placeholder summary just to trigger the fetch
-                # fetch_rma_detail will ignore this status and get the real one from API
                 placeholder = {'rmaId': stale_id, 'status': 'CHECK_UPDATE', 'createdAt': None}
                 tasks.append((placeholder, store['url'], True))
                 
@@ -285,29 +249,21 @@ def perform_sync(target_store=None, target_status=None):
 
     status_msg.info(f"⏳ Found {total_found} records (including updates). Downloading details...")
     
-    # 2. Download details in parallel
     if total_found > 0:
         bar = st.progress(0, text="Downloading Details...")
-        # Use ThreadPool to fetch details faster
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            # Submit all tasks
             futures = {executor.submit(fetch_rma_detail, task): task for task in tasks}
             completed = 0
-            
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
-                if completed % 5 == 0: # Update progress every 5 items
-                    try:
-                        bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
+                if completed % 5 == 0:
+                    try: bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
                     except: pass
         bar.empty()
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state['show_toast'] = True
-    
     status_msg.success(f"✅ Sync Complete! {total_found} records updated.")
-    
-    # Important: Rerun to reload data from the now-updated DB
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
@@ -326,7 +282,6 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
         res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
         
         if res.status_code == 200:
-            # Update local cache immediately
             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
             if fresh_res.status_code == 200:
                 fresh_data = fresh_res.json()
@@ -342,38 +297,65 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
 # 4. FRONTEND UI LOGIC
 # ==========================================
 
-# Initialize Filter State
 if 'filter_state' not in st.session_state:
     st.session_state.filter_state = {"store": None, "status": "All"}
 
-# Show toast
 if st.session_state.get('show_toast'):
     st.toast("✅ Data Refreshed Successfully!", icon="🔄")
     st.session_state['show_toast'] = False
 
-# Helper to handle button clicks
 def handle_filter_click(store_url, status):
     st.session_state.filter_state = {"store": store_url, "status": status}
-    
-    # If clicking a specific status button (e.g., "Pending"), force a sync for that status
     if status in ["Pending", "Approved", "Received"]:
-        # Find the full store object
         store_obj = next((s for s in STORES if s['url'] == store_url), None)
         if store_obj:
             perform_sync(store_obj, status)
     else:
-        # For derived statuses like "NoTrack" or "Flagged", just rerun UI filters
         st.rerun()
+
+# --- Modal Function ---
+@st.dialog("RMA Details")
+def show_rma_modal(record):
+    st.markdown(f"### 🛠️ Manage RMA: `{record['RMA ID']}`")
+    st.caption(f"Store: {record['Store Name']}")
+    
+    t1, t2 = st.tabs(["📝 Timeline", "✏️ Update Tracking"])
+    
+    with t1:
+        full = record['full_data']
+        timeline = full.get('comments', [])
+        if not timeline: st.info("No history.")
+        for t in timeline:
+            d_str = t.get('datetime', '')[:16].replace('T', ' ')
+            who = t.get('triggeredBy', 'System')
+            msg = t.get('htmlText', '')
+            st.markdown(f"**{d_str}** | `{who}`\n> {msg}")
+            st.divider()
+            
+    with t2:
+        # Use DisplayTrack (raw text) for the input box value, not the URL
+        raw_track = record['DisplayTrack']
+        with st.form("track_upd_modal"):
+            new_track = st.text_input("New Tracking", value=raw_track)
+            if st.form_submit_button("Save"):
+                if not record['shipment_id']:
+                    st.error("No Shipment ID.")
+                else:
+                    ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track, record['Store URL'])
+                    if ok:
+                        st.success("Updated!")
+                        st.rerun()
+                    else: st.error(msg)
 
 # --- Header ---
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.title("RMA Central (Multi-Store) 📦")
+    st.title("Bounty Apparel ReturnGo RMAs 🔄️")
     last_sync = st.session_state.get('last_sync', 'Not run yet')
     st.markdown(f"**Last Sync:** :green[{last_sync}]")
 with col2:
     if st.button("🔄 Sync All Data", type="primary", use_container_width=True):
-        perform_sync() # No args = Sync All Stores, All Statuses
+        perform_sync()
     if st.button("🗑️ Reset Cache", type="secondary", use_container_width=True):
         if clear_db():
             st.success("Cache cleared!")
@@ -382,11 +364,8 @@ with col2:
             st.error("Could not clear cache. DB might be locked.")
 
 # --- Process Data (Load from DB) ---
-# This runs on every script execution to load what's currently in SQLite
 raw_data = get_all_active_from_db()
-
 processed_rows = []
-# Initialize counts for all stores
 store_counts = {s['url']: {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0} for s in STORES}
 
 for rma in raw_data:
@@ -405,7 +384,13 @@ for rma in raw_data:
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get('shipmentId') if shipments else None
     
-    # Date Handling
+    # URL GENERATION
+    track_url = None
+    if track_str:
+        # Use the first tracking number if multiple exist
+        primary_track = track_nums[0] if track_nums else ""
+        track_url = f"https://portal.thecourierguy.co.za/track?ref={primary_track}"
+
     created_at = summary.get('createdAt')
     if not created_at:
         for evt in summary.get('events', []):
@@ -413,7 +398,6 @@ for rma in raw_data:
                 created_at = evt.get('eventDate')
                 break
     
-    # Calculate Days Since Update
     updated_at = rma.get('lastUpdated')
     days_since = 0
     if updated_at:
@@ -422,9 +406,7 @@ for rma in raw_data:
             days_since = (datetime.now(timezone.utc).date() - d.date()).days
         except: pass
 
-    # Update Counts
     if store_url in store_counts:
-        # Check if the status key exists before incrementing to avoid KeyErrors
         if status in store_counts[store_url]: 
             store_counts[store_url][status] += 1
         
@@ -445,24 +427,23 @@ for rma in raw_data:
             "Store URL": store_url,
             "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
             "Status": status,
-            "Tracking": track_str,
+            "TrackingNumber": track_url if track_url else track_str, # Store URL here if it exists
+            "DisplayTrack": track_str, # Keep raw text for display pattern
             "Created": str(created_at)[:10] if created_at else "N/A",
             "Updated": str(updated_at)[:10] if updated_at else "N/A",
-            "Days": days_since,
+            "Days since updated": days_since,
             "IsNoTrack": is_no_track,
             "IsFlagged": is_flagged,
             "shipment_id": shipment_id,
             "full_data": rma
         })
 
-# --- Draw Metric Boxes ---
 cols = st.columns(len(STORES))
 
 for i, store in enumerate(STORES):
     c = store_counts[store['url']]
     with cols[i]:
         st.markdown(f"**{store['name']}**")
-        # Buttons invoke the handler function directly
         if st.button(f"Pending\n{c['Pending']}", key=f"p_{i}"): 
              handle_filter_click(store['url'], "Pending")
         if st.button(f"Approved\n{c['Approved']}", key=f"a_{i}"): 
@@ -476,7 +457,6 @@ for i, store in enumerate(STORES):
 
 st.divider()
 
-# --- Filter & Display Table ---
 current_filter = st.session_state.filter_state
 filter_desc = f"{current_filter['status']} Records"
 if current_filter['store']:
@@ -488,11 +468,9 @@ st.subheader(f"📋 {filter_desc}")
 df = pd.DataFrame(processed_rows)
 
 if not df.empty:
-    # 1. Filter by Store
     if current_filter['store']:
         df = df[df['Store URL'] == current_filter['store']]
     
-    # 2. Filter by Status
     f_stat = current_filter['status']
     if f_stat == "Pending": df = df[df['Status'] == 'Pending']
     elif f_stat == "Approved": df = df[df['Status'] == 'Approved']
@@ -500,19 +478,31 @@ if not df.empty:
     elif f_stat == "NoTrack": df = df[df['IsNoTrack'] == True]
     elif f_stat == "Flagged": df = df[df['IsFlagged'] == True]
 
-    # 3. Sort & Display
     if not df.empty:
         df = df.sort_values(by="Created", ascending=False)
         df = df.reset_index(drop=True)
         df.insert(0, "No", range(1, len(df) + 1))
+        
+        # Left Indent Format: Convert numbers to strings
+        df['No'] = df['No'].astype(str)
+        df['Days since updated'] = df['Days since updated'].astype(str)
 
         event = st.dataframe(
-            df[["No", "Store Name", "RMA ID", "Order", "Status", "Tracking", "Created", "Updated", "Days"]],
+            df[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "Created", "Updated", "Days since updated"]],
             use_container_width=True,
+            height=700, # Increased height for ~20 rows
             hide_index=True,
             selection_mode="single-row",
             on_select="rerun",
-            key="main_table"
+            key="main_table",
+            column_config={
+                "TrackingNumber": st.column_config.LinkColumn(
+                    "TrackingNumber",
+                    display_text=r"ref=(.*)" # Extract the tracking number from the URL for display
+                ),
+                "No": st.column_config.TextColumn("No", width="small"),
+                "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
+            }
         )
 
         selected = st.session_state.main_table.get("selection", {}).get("rows", [])
@@ -521,34 +511,7 @@ if not df.empty:
             idx = selected[0]
             if idx < len(df):
                 record = df.iloc[idx]
-                st.markdown("<div class='action-panel'>", unsafe_allow_html=True)
-                st.markdown(f"### 🛠️ Manage RMA: `{record['RMA ID']}` ({record['Store Name']})")
-                t1, t2 = st.tabs(["📝 Timeline", "✏️ Update Tracking"])
-                with t1:
-                    full = record['full_data']
-                    timeline = full.get('comments', [])
-                    if not timeline: st.info("No history.")
-                    for t in timeline:
-                        d_str = t.get('datetime', '')[:16].replace('T', ' ')
-                        who = t.get('triggeredBy', 'System')
-                        msg = t.get('htmlText', '')
-                        st.markdown(f"**{d_str}** | `{who}`\n> {msg}")
-                        st.divider()
-                with t2:
-                    with st.form("track_upd"):
-                        new_track = st.text_input("New Tracking", value=record['Tracking'])
-                        if st.form_submit_button("Save"):
-                            if not record['shipment_id']:
-                                st.error("No Shipment ID.")
-                            else:
-                                ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track, record['Store URL'])
-                                if ok:
-                                    st.success("Updated!")
-                                    st.rerun()
-                                else: st.error(msg)
-                st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.info("👆 Click on any row in the table to view Timeline or Update Tracking.")
+                show_rma_modal(record) # Trigger Modal
     else:
         st.info("No records match the current filter.")
 else:
