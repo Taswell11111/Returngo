@@ -92,7 +92,6 @@ def init_db():
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        # Check if column exists, if not migrate
         try:
             c.execute("SELECT courier_status FROM rmas LIMIT 1")
         except sqlite3.OperationalError:
@@ -210,91 +209,6 @@ def clear_db():
 
 init_db()
 
-# --- COURIER CHECK (First-Row Priority Logic) ---
-def check_courier_status(tracking_number, rma_id=None):
-    try:
-        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-        }
-        
-        # 8s timeout to prevent hanging the sync
-        res = requests.get(url, headers=headers, timeout=8)
-        final_status = "Unknown"
-        
-        if res.status_code == 200:
-            content = res.text
-            
-            # 1. Try JSON First (Best case)
-            try:
-                data = res.json()
-                if 'history' in data and len(data['history']) > 0:
-                    final_status = data['history'][0].get('status') or data['history'][0].get('description')
-                else:
-                    final_status = data.get('status') or data.get('currentStatus')
-                
-                if final_status:
-                     if rma_id: update_courier_status_in_db(rma_id, final_status)
-                     return f"API: {final_status}"
-            except: pass 
-
-            # 2. Regex "First Row" Logic
-            # Goal: Find the first <tr> that is NOT the header, and grab its text.
-            
-            # Remove scripts/styles
-            clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL)
-            
-            # Find all <tr> tags
-            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
-            
-            found_text = None
-            
-            # Usually row 0 is header, row 1 is latest data
-            if len(rows) > 1:
-                target_row = rows[1] 
-                
-                # Extract columns <td>...</td>
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', target_row, re.DOTALL | re.IGNORECASE)
-                
-                if cols:
-                    # Clean up HTML tags inside cells
-                    row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
-                    row_text = [t for t in row_text if t] # Remove empty strings
-                    
-                    if row_text:
-                        # Join them: "2024-01-01 - Delivered"
-                        found_text = " - ".join(row_text)
-            
-            if found_text:
-                final_status = re.sub(r'\s+', ' ', found_text).strip()
-            else:
-                # Fallback to priority keyword search if table parse failed
-                prioritized_keywords = [
-                    r"courier\s+cancelled", r"booked\s+incorrectly", 
-                    r"delivered", r"out\s+for\s+delivery", r"collected", 
-                    r"at\s+delivery\s+depot", r"in\s+transit", r"created"
-                ]
-                for k in prioritized_keywords:
-                    if re.search(k, clean_html, re.IGNORECASE):
-                        final_status = k.replace(r"\s+", " ").title()
-                        break
-            
-        elif res.status_code == 404:
-            final_status = "Tracking Not Found"
-        else:
-            final_status = f"Error {res.status_code}"
-            
-        if rma_id:
-            update_courier_status_in_db(rma_id, final_status)
-            
-        return final_status
-
-    except Exception as e:
-        return f"Check Failed: {str(e)[:20]}"
-
 # ==========================================
 # 3. BACKEND LOGIC
 # ==========================================
@@ -358,7 +272,6 @@ def fetch_rma_detail(args):
             
             final_courier_status = current_courier_status
             
-            # Check courier status if unknown (Sync Logic)
             if tracking_number and (not current_courier_status or current_courier_status == "Unknown"):
                 try:
                     final_courier_status = check_courier_status(tracking_number)
@@ -463,6 +376,101 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     except Exception as e:
         return False, str(e)
 
+def push_comment_update(rma_id, comment_text, store_url):
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
+    
+    payload = {
+        "text": comment_text,
+        "isPublic": False 
+    }
+    
+    try:
+        # Note: Endpoint assumption /rma/{id}/note.
+        res = session.post(f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, json=payload, timeout=10)
+        
+        if res.status_code in [200, 201]:
+             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
+             if fresh_res.status_code == 200:
+                 fresh_data = fresh_res.json()
+                 summary = fresh_data.get('rmaSummary', {})
+                 save_rma_to_db(rma_id, store_url, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
+             return True, "Success"
+        else:
+             return False, f"API Error {res.status_code}: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
+# --- COURIER CHECK (First-Row Priority Regex Logic) ---
+def check_courier_status(tracking_number, rma_id=None):
+    try:
+        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        }
+        
+        res = requests.get(url, headers=headers, timeout=8)
+        final_status = "Unknown"
+        
+        if res.status_code == 200:
+            content = res.text
+            
+            # 1. Try JSON First
+            try:
+                data = res.json()
+                if 'history' in data and len(data['history']) > 0:
+                    final_status = data['history'][0].get('status') or data['history'][0].get('description')
+                else:
+                    final_status = data.get('status') or data.get('currentStatus')
+                
+                if final_status:
+                     if rma_id: update_courier_status_in_db(rma_id, final_status)
+                     return f"API: {final_status}"
+            except: pass 
+
+            # 2. Regex "First Row" Logic
+            clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL)
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
+            
+            found_text = None
+            if len(rows) > 1:
+                target_row = rows[1] 
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', target_row, re.DOTALL | re.IGNORECASE)
+                if cols:
+                    row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
+                    row_text = [t for t in row_text if t]
+                    if row_text:
+                        found_text = " - ".join(row_text)
+            
+            if found_text:
+                final_status = re.sub(r'\s+', ' ', found_text).strip()
+            else:
+                prioritized_keywords = [
+                    r"courier\s+cancelled", r"booked\s+incorrectly", 
+                    r"delivered", r"out\s+for\s+delivery", r"collected", 
+                    r"at\s+delivery\s+depot", r"in\s+transit", r"created"
+                ]
+                for k in prioritized_keywords:
+                    if re.search(k, clean_html, re.IGNORECASE):
+                        final_status = k.replace(r"\s+", " ").title()
+                        break
+            
+        elif res.status_code == 404:
+            final_status = "Tracking Not Found"
+        else:
+            final_status = f"Error {res.status_code}"
+            
+        if rma_id:
+            update_courier_status_in_db(rma_id, final_status)
+            
+        return final_status
+
+    except Exception as e:
+        return f"Check Failed: {str(e)[:20]}"
+
 # ==========================================
 # 4. FRONTEND UI LOGIC
 # ==========================================
@@ -483,53 +491,55 @@ def handle_filter_click(store_url, status):
     else:
         st.rerun()
 
-# --- Modal Function ---
-@st.dialog("RMA Details")
-def show_rma_modal(record):
-    st.markdown(f"### 🛠️ Manage RMA: `{record['RMA ID']}`")
-    st.caption(f"Store: {record['Store Name']}")
+# --- Dialogs for Actions ---
+@st.dialog("Update Tracking")
+def show_update_tracking_dialog(record):
+    st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
+    raw_track = record['DisplayTrack']
     
-    t1, t2 = st.tabs(["📝 Timeline", "✏️ Update Tracking"])
+    with st.form("update_track_form"):
+        new_track = st.text_input("New Tracking Number", value=raw_track)
+        submitted = st.form_submit_button("Save Changes")
+        
+        if submitted:
+            if not record['shipment_id']:
+                st.error("No Shipment ID associated with this RMA.")
+            else:
+                ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track, record['Store URL'])
+                if ok:
+                    st.success("Tracking Updated! Refreshing...")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+@st.dialog("View Timeline")
+def show_timeline_dialog(record):
+    st.markdown(f"### Timeline for `{record['RMA ID']}`")
     
-    with t1:
-        full = record['full_data']
-        timeline = full.get('comments', [])
-        if not timeline: st.info("No history.")
+    with st.expander("➕ Add Comment", expanded=False):
+        with st.form("add_comment_form"):
+            comment_text = st.text_area("New Note")
+            if st.form_submit_button("Post Comment"):
+                ok, msg = push_comment_update(record['RMA ID'], comment_text, record['Store URL'])
+                if ok:
+                    st.success("Comment Posted!")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    full = record['full_data']
+    timeline = full.get('comments', [])
+    if not timeline:
+        st.info("No timeline events found.")
+    else:
         for t in timeline:
             d_str = t.get('datetime', '')[:16].replace('T', ' ')
             who = t.get('triggeredBy', 'System')
             msg = t.get('htmlText', '')
-            st.markdown(f"**{d_str}** | `{who}`\n> {msg}")
+            st.markdown(f"**{d_str}** | `{who}`")
+            st.caption(msg, unsafe_allow_html=True)
             st.divider()
-            
-    with t2:
-        raw_track = record['DisplayTrack']
-        with st.form("track_upd_modal"):
-            new_track = st.text_input("New Tracking", value=raw_track)
-            
-            # Updated Status Check Button
-            if raw_track:
-                if st.form_submit_button("🔍 Check Courier Status"):
-                    with st.spinner("Checking Parcel Ninja..."):
-                        status_info = check_courier_status(raw_track, record['RMA ID'])
-                    if "API" in status_info or "Found" in status_info:
-                        st.success(f"Status: {status_info}")
-                        time.sleep(1)
-                        st.rerun()
-                    elif "Missing" in status_info:
-                        st.error(status_info)
-                    else:
-                        st.warning(status_info)
-            
-            if st.form_submit_button("Save"):
-                if not record['shipment_id']:
-                    st.error("No Shipment ID.")
-                else:
-                    ok, msg = push_tracking_update(record['RMA ID'], record['shipment_id'], new_track, record['Store URL'])
-                    if ok:
-                        st.success("Updated!")
-                        st.rerun()
-                    else: st.error(msg)
 
 # --- Header ---
 col1, col2 = st.columns([3, 1])
@@ -626,7 +636,9 @@ for rma in raw_data:
                 "IsFlagged": is_flagged,
                 "shipment_id": shipment_id,
                 "full_data": rma,
-                "Check Status": False 
+                "Fetch Tracking Status": False,   # Checkbox 1
+                "Update TrackingNumber": False,   # Checkbox 2
+                "View Timeline": False            # Checkbox 3
             })
 
 # --- Store Boxes ---
@@ -675,11 +687,13 @@ if not df.empty:
     if not df.empty:
         df = df.sort_values(by="Created", ascending=False).reset_index(drop=True)
         df.insert(0, "No", range(1, len(df) + 1))
+        
+        # Format columns on 'df' which IS the display dataframe here
         df['No'] = df['No'].astype(str)
         df['Days since updated'] = df['Days since updated'].astype(str)
 
         edited_df = st.data_editor(
-            df[["No", "Check Status", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days since updated"]],
+            df[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Fetch Tracking Status", "Created", "Updated", "Days since updated", "Update TrackingNumber", "View Timeline"]],
             use_container_width=True,
             height=700,
             hide_index=True,
@@ -688,28 +702,49 @@ if not df.empty:
                 "TrackingNumber": st.column_config.LinkColumn("TrackingNumber", display_text=r"ref=(.*)"),
                 "No": st.column_config.TextColumn("No", width="small"),
                 "Days since updated": st.column_config.TextColumn("Days since updated", width="small"),
-                "TrackingStatus": st.column_config.TextColumn("TrackingStatus", width="medium"),
-                "Check Status": st.column_config.CheckboxColumn("Update Status", help="Tick to fetch latest courier status", default=False)
+                "TrackingStatus": st.column_config.TextColumn("Tracking Status", width="medium"),
+                "Fetch Tracking Status": st.column_config.CheckboxColumn("Fetch Status", help="Check courier status", default=False),
+                "Update TrackingNumber": st.column_config.CheckboxColumn("Edit Track", help="Edit Tracking Number", default=False),
+                "View Timeline": st.column_config.CheckboxColumn("Timeline", help="View Timeline & Comments", default=False)
             },
             disabled=["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days since updated"]
         )
         
         updates_triggered = False
+        row_to_process = None
+        action_type = None
+
         for index, row in edited_df.iterrows():
-            if row["Check Status"] == True:
-                updates_triggered = True
-                original_record = df.iloc[index]
-                rma_id = original_record['RMA ID']
-                tracking_raw = original_record['DisplayTrack']
-                
+            if row["Fetch Tracking Status"]:
+                row_to_process = df.iloc[index]
+                action_type = "fetch"
+                break
+            elif row["Update TrackingNumber"]:
+                row_to_process = df.iloc[index]
+                action_type = "update"
+                break
+            elif row["View Timeline"]:
+                row_to_process = df.iloc[index]
+                action_type = "timeline"
+                break
+        
+        if row_to_process is not None:
+            rma_id = row_to_process['RMA ID']
+            
+            if action_type == "fetch":
+                tracking_raw = row_to_process['DisplayTrack']
                 if tracking_raw:
                     with st.spinner(f"Checking status for {rma_id}..."):
                         check_courier_status(tracking_raw, rma_id)
                 else:
                     st.warning(f"No tracking number for {rma_id}")
-        
-        if updates_triggered:
-            st.rerun() 
+                st.rerun()
+                
+            elif action_type == "update":
+                show_update_tracking_dialog(row_to_process)
+                
+            elif action_type == "timeline":
+                show_timeline_dialog(row_to_process)
 
     else:
         st.info("No records match the current filter.")
