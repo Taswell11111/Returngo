@@ -10,7 +10,13 @@ from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-from bs4 import BeautifulSoup
+
+# Graceful Import for BeautifulSoup
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    st.error("⚠️ Library `beautifulsoup4` is missing. Please add it to requirements.txt and reboot the app.")
+    BeautifulSoup = None  # Placeholder to prevent crash
 
 # ==========================================
 # 1. CONFIGURATION
@@ -330,6 +336,9 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
 
 # Updated Courier Guy Check using Parcel Ninja URL + Basic Scraping
 def check_courier_status(tracking_number):
+    if not BeautifulSoup:
+        return "Install 'beautifulsoup4' to enable this feature."
+        
     try:
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         
@@ -342,35 +351,29 @@ def check_courier_status(tracking_number):
         res = requests.get(url, headers=headers, timeout=8)
         
         if res.status_code == 200:
-            # 1. Try JSON (if they return it despite loading HTML)
+            # 1. Try JSON
             try:
                 data = res.json()
                 status = data.get('status') or data.get('currentStatus')
                 if status: return f"API Status: {status}"
-            except: pass # Not JSON, move on to scraping
+            except: pass 
 
-            # 2. Scrape HTML using BeautifulSoup
+            # 2. Scrape HTML
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # Common patterns in tracking portals:
-            # Look for elements with class names like 'status', 'tracking-status', 'current-status'
-            # Or headers like h1, h2, h3
-            
-            # Attempt 1: Look for common semantic headers
             headers = soup.find_all(['h1', 'h2', 'h3', 'h4'])
             for h in headers:
                 text = h.get_text(strip=True).lower()
                 if any(x in text for x in ['delivered', 'in transit', 'out for delivery', 'collected', 'created']):
                     return f"Found Status: {h.get_text(strip=True)}"
             
-            # Attempt 2: Fallback to just returning title
             if soup.title:
                 return f"Page Title: {soup.title.get_text(strip=True)}"
                 
             return "Loaded Page (Status Text Not Found)"
             
         elif res.status_code == 401:
-            return "Auth Error (401) - Token might be invalid for this endpoint"
+            return "Auth Error (401)"
         elif res.status_code == 404:
             return "Tracking ID Not Found"
         else:
@@ -422,7 +425,6 @@ def show_rma_modal(record):
         with st.form("track_upd_modal"):
             new_track = st.text_input("New Tracking", value=raw_track)
             
-            # Updated Status Check Button
             if raw_track:
                 if st.form_submit_button("🔍 Check Courier Status"):
                     with st.spinner("Checking Parcel Ninja..."):
@@ -483,7 +485,6 @@ for rma in raw_data:
     track_url = None
     if track_str:
         primary_track = track_nums[0] if track_nums else ""
-        # Keep hyperlink to portal for user click
         track_url = f"https://portal.thecourierguy.co.za/track?ref={primary_track}"
 
     created_at = summary.get('createdAt')
