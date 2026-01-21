@@ -15,7 +15,7 @@ import concurrent.futures
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="👖")
+st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="📤")
 
 # ACCESS SECRETS
 try:
@@ -27,13 +27,12 @@ if not MY_API_KEY:
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
 
-# PARCEL NINJA TOKEN (TASWELL) - Shared
+# PARCEL NINJA TOKEN (TASWELL)
 PARCEL_NINJA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjJhMDI4MWNhNTBmNDEwOTRiZTkyNzdhNTQ0MDZhZGRkODMyOGExODhhYmNiZGViMiIsIm5iZiI6MTc2ODk1ODUwMSwiZXhwIjoxODYzNjUyOTAxLCJpYXQiOjE3Njg5NTg1MDEsImlzcyI6Imh0dHBzOi8vb3B0aW1pc2UucGFyY2VsbmluamEuY29tIiwiYXVkIjoiaHR0cHM6Ly9vcHRpbWlzZS5wYXJjZWxuaW5qYS5jb20ifQ.lgAi9s2INGKrzGYb3Qn_PY6N1ekh3fSBP7JBgMhX0Pk"
 
 CACHE_EXPIRY_HOURS = 4
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
-# LOCK FOR THREAD-SAFE DB WRITES
 DB_LOCK = threading.Lock()
 
 # --- STYLING ---
@@ -52,13 +51,8 @@ st.markdown("""
         font-weight: bold;
     }
     div.stButton > button:hover {
-        border-color: #c41230; /* Levi's Red */
+        border-color: #c41230; 
         color: #c41230;
-    }
-    div.stButton > button:focus {
-        border-color: #c41230;
-        color: #c41230;
-        background-color: #2d1b1b;
     }
     div[data-testid="stDialog"] {
         background-color: #1a1a1a;
@@ -74,7 +68,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Helper for Session
 @st.cache_resource
 def get_session():
     session = requests.Session()
@@ -95,7 +88,6 @@ def init_db():
             try:
                 c.execute("ALTER TABLE rmas ADD COLUMN courier_status TEXT")
             except: pass
-            
         c.execute('''CREATE TABLE IF NOT EXISTS rmas
                      (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
                       created_at TEXT, json_data TEXT, last_fetched TIMESTAMP, courier_status TEXT)''')
@@ -114,14 +106,12 @@ def save_rma_to_db(rma_id, status, created_at, data, courier_status=None):
                 c.execute("SELECT courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
                 row = c.fetchone()
                 if row: courier_status = row[0]
-            
             c.execute('''INSERT OR REPLACE INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status)
                          VALUES (?, ?, ?, ?, ?, ?, ?)''', 
                          (str(rma_id), STORE_URL, status, created_at, json.dumps(data), now, courier_status))
             conn.commit()
             conn.close()
-        except Exception as e:
-            print(f"DB Error saving {rma_id}: {e}")
+        except: pass
 
 def update_courier_status_in_db(rma_id, status_text):
     with DB_LOCK:
@@ -131,8 +121,7 @@ def update_courier_status_in_db(rma_id, status_text):
             c.execute("UPDATE rmas SET courier_status=? WHERE rma_id=?", (status_text, str(rma_id)))
             conn.commit()
             conn.close()
-        except Exception as e:
-            print(f"DB Error updating status {rma_id}: {e}")
+        except: pass
 
 def get_rma_from_db(rma_id):
     with DB_LOCK:
@@ -176,8 +165,7 @@ def update_sync_log(status):
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        c.execute('''INSERT OR REPLACE INTO sync_logs (status, last_sync)
-                     VALUES (?, ?)''', (status, now))
+        c.execute('''INSERT OR REPLACE INTO sync_logs (status, last_sync) VALUES (?, ?)''', (status, now))
         conn.commit()
         conn.close()
 
@@ -195,25 +183,22 @@ def get_last_sync(status):
 def clear_db():
     with DB_LOCK:
         try:
-            if os.path.exists(DB_FILE):
-                os.remove(DB_FILE)
+            if os.path.exists(DB_FILE): os.remove(DB_FILE)
             return True
         except: return False
 
 init_db()
 
-# --- COURIER CHECK (Strict Positional Parsing) ---
+# --- COURIER CHECK (Strict Top-Row Extraction) ---
 def check_courier_status(tracking_number, rma_id=None):
     try:
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}'
         }
         res = requests.get(url, headers=headers, timeout=10)
         final_status = "Unknown"
-        
         if res.status_code == 200:
             content = res.text
             try:
@@ -223,18 +208,12 @@ def check_courier_status(tracking_number, rma_id=None):
                 else:
                     final_status = data.get('status') or data.get('currentStatus')
                 if final_status:
-                     if rma_id: update_courier_status_in_db(rma_id, final_status)
-                     return final_status
+                    if rma_id: update_courier_status_in_db(rma_id, final_status)
+                    return final_status
             except: pass 
 
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            history_section = re.search(r'<table[^>]*?tracking-history.*?>(.*?)</table>', clean_html, re.DOTALL | re.IGNORECASE)
-            if not history_section:
-                history_section = re.search(r'<tbody[^>]*?>(.*?)</tbody>', clean_html, re.DOTALL | re.IGNORECASE)
-            
-            target_content = history_section.group(1) if history_section else clean_html
-            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', target_content, re.DOTALL | re.IGNORECASE)
-            
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
             found_text = None
             for r_html in rows:
                 if '<th' in r_html.lower(): continue
@@ -245,22 +224,17 @@ def check_courier_status(tracking_number, rma_id=None):
                     if cleaned_cells:
                         found_text = " - ".join(cleaned_cells)
                         break
-
-            if found_text:
-                final_status = re.sub(r'\s+', ' ', found_text).strip()
+            if found_text: final_status = re.sub(r'\s+', ' ', found_text).strip()
             else:
-                kw_list = ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]
-                for kw in kw_list:
+                for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                     if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                         final_status = kw
                         break
         elif res.status_code == 404: final_status = "Tracking Not Found"
         else: final_status = f"Error {res.status_code}"
-            
         if rma_id: update_courier_status_in_db(rma_id, final_status)
         return final_status
-    except Exception as e:
-        return f"Check Failed: {str(e)[:20]}"
+    except Exception as e: return f"Check Failed: {str(e)[:20]}"
 
 # ==========================================
 # 3. BACKEND LOGIC
@@ -269,59 +243,43 @@ def check_courier_status(tracking_number, rma_id=None):
 def fetch_all_pages(session, headers, status):
     all_rmas = []
     cursor = None
-    page_count = 1
     while True:
         try:
             base_url = f"https://api.returngo.ai/rmas?status={status}&pagesize=50"
             url = f"{base_url}&cursor={cursor}" if cursor else base_url
             res = session.get(url, headers=headers, timeout=15)
             if res.status_code != 200: break
-            data = res.json()
-            rmas = data.get("rmas", [])
+            data = res.json(); rmas = data.get("rmas", [])
             if not rmas: break
             all_rmas.extend(rmas)
             cursor = data.get("next_cursor")
-            if not cursor or page_count > 100: break
-            page_count += 1
+            if not cursor: break
         except: break
     return all_rmas
 
 def fetch_rma_detail(args):
-    rma_summary = args
-    rma_id = rma_summary.get('rmaId')
-    session = get_session()
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
+    rma_summary = args; rma_id = rma_summary.get('rmaId')
+    session = get_session(); headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
     try:
         res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
         if res.status_code == 200:
-            data = res.json()
-            fresh_summary = data.get('rmaSummary', {})
-            true_status = fresh_summary.get('status', 'Unknown')
-            true_created = fresh_summary.get('createdAt')
-            
-            local_data, _ = get_rma_from_db(rma_id)
-            current_courier_status = local_data.get('_local_courier_status') if local_data else None
-            shipments = data.get('shipments', [])
-            track_no = None
+            data = res.json(); sum_data = data.get('rmaSummary', {})
+            shipments = data.get('shipments', []); track_no = None
             for s in shipments:
                 if s.get('trackingNumber'): track_no = s.get('trackingNumber'); break
-            
-            final_courier_status = current_courier_status
-            if track_no and (not current_courier_status or current_courier_status == "Unknown"):
-                try: final_courier_status = check_courier_status(track_no)
+            c_status = None
+            if track_no:
+                try: c_status = check_courier_status(track_no)
                 except: pass
-            
-            save_rma_to_db(rma_id, true_status, true_created, data, final_courier_status)
-            data['_local_courier_status'] = final_courier_status
+            save_rma_to_db(rma_id, sum_data.get('status', 'Unknown'), sum_data.get('createdAt'), data, c_status)
+            data['_local_courier_status'] = c_status
             return data
     except: pass
     return None
 
 def perform_sync(statuses=None):
-    session = get_session()
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
-    status_msg = st.empty()
-    status_msg.info("⏳ Starting Deep Sync...")
+    session = get_session(); headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
+    status_msg = st.empty(); status_msg.info("⏳ Starting Deep Sync...")
     active_summaries = []
     if statuses is None: statuses = ["Pending", "Approved", "Received"]
     for s in statuses:
@@ -340,16 +298,15 @@ def perform_sync(statuses=None):
             completed = 0
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
-                if completed % 5 == 0: status_msg.progress(completed / total, text=f"Syncing: {completed}/{total}")
-                
+                if total and completed % 5 == 0: status_msg.progress(completed / total, text=f"Syncing: {completed}/{total}")
+    
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     st.session_state['show_toast'] = True
     status_msg.success(f"✅ Sync Complete!")
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number):
-    session = get_session()
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
+    session = get_session(); headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
     payload = {
         "status": "LabelCreated", "carrierName": "CourierGuy", "trackingNumber": tracking_number,
         "trackingURL": f"https://optimise.parcelninja.com/shipment/track/{tracking_number}",
@@ -360,45 +317,38 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         if res.status_code == 200:
             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
             if fresh_res.status_code == 200:
-                fresh_data = fresh_res.json()
-                summary = fresh_data.get('rmaSummary', {})
+                fresh_data = fresh_res.json(); summary = fresh_data.get('rmaSummary', {})
                 save_rma_to_db(rma_id, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
             return True, "Success"
-        return False, f"API Error {res.status_code}: {res.text}"
+        return False, f"API Error {res.status_code}"
     except Exception as e: return False, str(e)
 
 def push_comment_update(rma_id, comment_text):
-    session = get_session()
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
+    session = get_session(); headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
     payload = {"text": comment_text, "isPublic": False}
     try:
         res = session.post(f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, json=payload, timeout=10)
         if res.status_code in [200, 201]:
              fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
              if fresh_res.status_code == 200:
-                 fresh_data = fresh_res.json()
-                 summary = fresh_data.get('rmaSummary', {})
+                 fresh_data = fresh_res.json(); summary = fresh_data.get('rmaSummary', {})
                  save_rma_to_db(rma_id, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
              return True, "Success"
-        return False, f"API Error {res.status_code}"
+        return False, "API Error"
     except Exception as e: return False, str(e)
 
 # ==========================================
 # 4. FRONTEND UI
 # ==========================================
 
-if 'filter_status' not in st.session_state:
-    st.session_state.filter_status = "All"
-if st.session_state.get('show_toast'):
-    st.toast("✅ Data Refreshed!", icon="🔄")
-    st.session_state['show_toast'] = False
+if 'filter_status' not in st.session_state: st.session_state.filter_status = "All"
+if st.session_state.get('show_toast'): st.toast("✅ Data Refreshed!", icon="🔄"); st.session_state['show_toast'] = False
 
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
     st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
-    raw_track = record['DisplayTrack']
-    with st.form("update_track_form"):
-        new_track = st.text_input("New Tracking Number", value=raw_track)
+    with st.form("upd_track"):
+        new_track = st.text_input("New Tracking Number", value=record['DisplayTrack'])
         if st.form_submit_button("Save Changes"):
             if not record['shipment_id']: st.error("No Shipment ID.")
             else:
@@ -410,11 +360,11 @@ def show_update_tracking_dialog(record):
 def show_timeline_dialog(record):
     st.markdown(f"### Timeline for `{record['RMA ID']}`")
     with st.expander("➕ Add Comment", expanded=False):
-        with st.form("add_comment_form"):
+        with st.form("add_comm"):
             comment_text = st.text_area("New Note")
             if st.form_submit_button("Post Comment"):
                 ok, msg = push_comment_update(record['RMA ID'], comment_text)
-                if ok: st.success("Comment Posted!"); st.rerun()
+                if ok: st.success("Posted!"); st.rerun()
                 else: st.error(msg)
     full = record['full_data']; timeline = full.get('comments', [])
     if not timeline: st.info("No timeline events.")
@@ -432,8 +382,8 @@ def set_filter(f):
 # --- Header ---
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.title("Levi's ReturnGO Ops")
-    st.markdown(f"**Connected to:** {STORE_URL} | **Last Sync:** :green[{st.session_state.get('last_sync', 'N/A')}]")
+    st.title("Levi's ReturnGO Ops Dashboard")
+    st.markdown(f"**CONNECTED TO:** {STORE_URL.upper()} | **LAST SYNC:** :green[{st.session_state.get('last_sync', 'N/A')}]")
     search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
 with col2:
     if st.button("🔄 Sync All Data", type="primary"): perform_sync()
@@ -441,8 +391,7 @@ with col2:
         if clear_db(): st.success("Cache cleared!"); st.rerun()
 
 # --- Data Processing ---
-raw_data = get_all_active_from_db()
-processed_rows = []
+raw_data = get_all_active_from_db(); processed_rows = []
 counts = {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0}
 for rma in raw_data:
     summary = rma.get('rmaSummary', {}); shipments = rma.get('shipments', []); comments = rma.get('comments', [])
@@ -462,16 +411,11 @@ for rma in raw_data:
         try: d_since = (datetime.now(timezone.utc).date() - datetime.fromisoformat(u_at.replace('Z', '+00:00')).date()).days
         except: pass
     if status in counts: counts[status] += 1
-    is_nt = False
-    if status == "Approved" and not track_str: counts["NoTrack"] += 1; is_nt = True
-    is_fg = False
-    if any("flagged" in c.get('htmlText', '').lower() for c in comments): counts["Flagged"] += 1; is_fg = True
+    is_nt = (status == "Approved" and not track_str); is_fg = any("flagged" in c.get('htmlText', '').lower() for c in comments)
+    if is_nt: counts["NoTrack"] += 1
+    if is_fg: counts["Flagged"] += 1
     
-    add_row = True
-    if search_query:
-        q = search_query.lower()
-        if (q not in str(rma_id).lower() and q not in str(order_name).lower() and q not in str(track_str).lower()): add_row = False
-    if add_row:
+    if not search_query or (search_query.lower() in str(rma_id).lower() or search_query.lower() in str(order_name).lower() or search_query.lower() in str(track_str).lower()):
         processed_rows.append({
             "No": "", "RMA ID": rma_id, "Order": order_name, "Status": status,
             "TrackingNumber": track_link_url, "TrackingStatus": local_status,
@@ -481,11 +425,11 @@ for rma in raw_data:
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
-# --- Metrics ---
+# --- Metrics (ALL CAPS) ---
 b1, b2, b3, b4, b5 = st.columns(5)
 def get_status_time(s):
     ts = get_last_sync(s)
-    return f"<div class='sync-time'>Updated: {ts[11:] if ts else '-'}</div>"
+    return f"<div class='sync-time'>UPDATED: {ts[11:] if ts else '-'}</div>"
 with b1: 
     if st.button(f"PENDING\n{counts['Pending']}"): set_filter("Pending")
     st.markdown(get_status_time("Pending"), unsafe_allow_html=True)
@@ -513,9 +457,7 @@ if not df_view.empty:
 
     if not display_df.empty:
         display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
-        display_df['No'] = range(1, len(display_df) + 1)
-        # FIX: Ensure columns are strings
-        display_df['No'] = display_df['No'].astype(str)
+        display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days'] = display_df['Days'].astype(str)
 
         edited = st.data_editor(
@@ -523,18 +465,22 @@ if not df_view.empty:
             use_container_width=True, height=700, hide_index=True, key="main_table",
             column_config={
                 "No": st.column_config.TextColumn("No", width="small"),
-                "Order": st.column_config.TextColumn("Order", width="medium"),
+                "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
+                "Order": st.column_config.TextColumn("Order", width="small"),
                 "TrackingNumber": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
                 "TrackingStatus": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update TrackingNumber": st.column_config.CheckboxColumn("Edit Tracking Number", width="small"),
-                "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
-                "Days": st.column_config.TextColumn("Days", width="small")
+                "Update TrackingNumber": st.column_config.CheckboxColumn("Update Tracking", width="small"),
+                "View Timeline": st.column_config.CheckboxColumn("Timeline", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days"]
         )
         
         for idx, row in edited.iterrows():
-            if row["Update TrackingNumber"]: show_update_tracking_dialog(display_df.iloc[idx]); break
-            if row["View Timeline"]: show_timeline_dialog(display_df.iloc[idx]); break
+            if row["Update TrackingNumber"]: 
+                show_update_tracking_dialog(display_df.iloc[idx])
+                break
+            if row["View Timeline"]: 
+                show_timeline_dialog(display_df.iloc[idx])
+                break
     else: st.info("No matching records.")
 else: st.warning("Database empty. Click Sync.")
