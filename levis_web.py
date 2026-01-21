@@ -33,6 +33,7 @@ PARCEL_NINJA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjJhMDI4M
 CACHE_EXPIRY_HOURS = 4
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
+# LOCK FOR THREAD-SAFE DB WRITES
 DB_LOCK = threading.Lock()
 
 # --- STYLING ---
@@ -184,6 +185,7 @@ def clear_db():
     with DB_LOCK:
         try:
             if os.path.exists(DB_FILE): os.remove(DB_FILE)
+            init_db()
             return True
         except: return False
 
@@ -213,6 +215,7 @@ def check_courier_status(tracking_number, rma_id=None):
             except: pass 
 
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
+            # Positional Parsing: Look inside tbody for the first tr that is NOT a header
             rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
             found_text = None
             for r_html in rows:
@@ -228,8 +231,7 @@ def check_courier_status(tracking_number, rma_id=None):
             else:
                 for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                     if re.search(re.escape(kw), clean_html, re.IGNORECASE):
-                        final_status = kw
-                        break
+                        final_status = kw; break
         elif res.status_code == 404: final_status = "Tracking Not Found"
         else: final_status = f"Error {res.status_code}"
         if rma_id: update_courier_status_in_db(rma_id, final_status)
@@ -241,8 +243,7 @@ def check_courier_status(tracking_number, rma_id=None):
 # ==========================================
 
 def fetch_all_pages(session, headers, status):
-    all_rmas = []
-    cursor = None
+    all_rmas = []; cursor = None
     while True:
         try:
             base_url = f"https://api.returngo.ai/rmas?status={status}&pagesize=50"
@@ -294,11 +295,7 @@ def perform_sync(statuses=None):
     total = len(active_summaries)
     if total > 0:
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(fetch_rma_detail, rma): rma for rma in active_summaries}
-            completed = 0
-            for future in concurrent.futures.as_completed(futures):
-                completed += 1
-                if total and completed % 5 == 0: status_msg.progress(completed / total, text=f"Syncing: {completed}/{total}")
+            list(executor.map(fetch_rma_detail, active_summaries))
     
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     st.session_state['show_toast'] = True
@@ -342,7 +339,7 @@ def push_comment_update(rma_id, comment_text):
 # ==========================================
 
 if 'filter_status' not in st.session_state: st.session_state.filter_status = "All"
-if st.session_state.get('show_toast'): st.toast("✅ Data Refreshed!", icon="🔄"); st.session_state['show_toast'] = False
+if st.session_state.get('show_toast'): st.toast("✅ API Sync Complete!", icon="🔄"); st.session_state['show_toast'] = False
 
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
@@ -367,7 +364,7 @@ def show_timeline_dialog(record):
                 if ok: st.success("Posted!"); st.rerun()
                 else: st.error(msg)
     full = record['full_data']; timeline = full.get('comments', [])
-    if not timeline: st.info("No timeline events.")
+    if not timeline: st.info("No timeline events found.")
     else:
         for t in timeline:
             d_str = t.get('datetime', '')[:16].replace('T', ' ')
@@ -460,6 +457,8 @@ if not df_view.empty:
         display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days'] = display_df['Days'].astype(str)
 
+        # OPTION 2: State-Flushing Checkboxes
+        # The key logic here is that edited_rows state is cleared immediately after trigger
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days", "Update TrackingNumber", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
@@ -467,20 +466,25 @@ if not df_view.empty:
                 "No": st.column_config.TextColumn("No", width="small"),
                 "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
                 "Order": st.column_config.TextColumn("Order", width="small"),
-                "TrackingNumber": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
+                "TrackingNumber": st.column_config.LinkColumn("Tracking", display_text=r"ref=(.*)", width="medium"),
                 "TrackingStatus": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update TrackingNumber": st.column_config.CheckboxColumn("Update Tracking", width="small"),
-                "View Timeline": st.column_config.CheckboxColumn("Timeline", width="small")
+                "Update TrackingNumber": st.column_config.CheckboxColumn("Edit Tracking", width="small"),
+                "View Timeline": st.column_config.CheckboxColumn("Timeline", width="small"),
+                "Days": st.column_config.TextColumn("Days", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days"]
         )
         
+        # --- Handle Action Logic with immediate state reset ---
         for idx, row in edited.iterrows():
-            if row["Update TrackingNumber"]: 
+            if row["Update TrackingNumber"]:
+                # Manually clear the session state to flush the checkbox
+                st.session_state.main_table["edited_rows"][idx]["Update TrackingNumber"] = False
                 show_update_tracking_dialog(display_df.iloc[idx])
                 break
-            if row["View Timeline"]: 
+            if row["View Timeline"]:
+                st.session_state.main_table["edited_rows"][idx]["View Timeline"] = False
                 show_timeline_dialog(display_df.iloc[idx])
                 break
-    else: st.info("No matching records.")
-else: st.warning("Database empty. Click Sync.")
+    else: st.info("No matching records found.")
+else: st.warning("Database empty. Click Sync All Data to start.")
