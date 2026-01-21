@@ -409,7 +409,7 @@ def check_courier_status(tracking_number, rma_id=None):
         if res.status_code == 200:
             content = res.text
             
-            # 1. Try JSON First (Best case)
+            # 1. Try JSON First
             try:
                 data = res.json()
                 if 'history' in data and len(data['history']) > 0:
@@ -681,8 +681,8 @@ if not df.empty:
         display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
         display_df.insert(0, "No", range(1, len(display_df) + 1))
         
-        df['No'] = df['No'].astype(str)
-        df['Days since updated'] = df['Days since updated'].astype(str)
+        display_df['No'] = display_df['No'].astype(str)
+        display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
         # Use Data Editor for checkbox interactivity
         edited_df = st.data_editor(
