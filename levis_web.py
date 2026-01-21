@@ -1031,7 +1031,7 @@ with b2:
     if st.button(f"APPROVED\n{counts['Approved']}", key="btn_a", use_container_width=True):
         set_filter("Approved")
     st.markdown("<div class='small-btn'>", unsafe_allow_html=True)
-    if st.button("🔄 Sync Approved", key="sync_a", use_container_width=True):
+    if st.button("🔄 Sync Approved", key="sync_a", width='content'):
         perform_sync(["Approved"])
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown(get_status_time_html("Approved"), unsafe_allow_html=True)
@@ -1042,7 +1042,7 @@ with b3:
     if st.button(f"RECEIVED\n{counts['Received']}", key="btn_r", use_container_width=True):
         set_filter("Received")
     st.markdown("<div class='small-btn'>", unsafe_allow_html=True)
-    if st.button("🔄 Sync Received", key="sync_r", use_container_width=True):
+    if st.button("🔄 Sync Received", key="sync_r", width='content'):
         perform_sync(["Received"])
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown(get_status_time_html("Received"), unsafe_allow_html=True)
