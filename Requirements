@@ -1,7 +1,6 @@
-beautifulsoup4
-lxml
+beautifulsoup4==4.12.3
+requests==2.31.0
 pandas
-requests
 streamlit
 
-Force Dependency Update v6
+Force Resolution Refresh v7
