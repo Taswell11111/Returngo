@@ -214,7 +214,11 @@ def check_courier_status(tracking_number, rma_id=None):
             except: pass 
 
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
+            # Find the tracking table and grab the first data row found
+            history_section = re.search(r'<table[^>]*?tracking-history.*?>(.*?)</table>', clean_html, re.DOTALL | re.IGNORECASE)
+            content_to_parse = history_section.group(1) if history_section else clean_html
+            
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', content_to_parse, re.DOTALL | re.IGNORECASE)
             found_text = None
             for r_html in rows:
                 if '<th' in r_html.lower(): continue
@@ -336,7 +340,7 @@ def push_comment_update(rma_id, comment_text):
 # 4. FRONTEND UI
 # ==========================================
 
-# PERSISTENT TRIGGER FIX:
+# Initialize modal states
 if 'modal_rma' not in st.session_state: st.session_state.modal_rma = None
 if 'modal_action' not in st.session_state: st.session_state.modal_action = None
 
@@ -370,13 +374,12 @@ def show_timeline_dialog(record):
             st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
             st.divider()
 
-# HANDLE MODAL TRIGGER (AFTER RERUN)
-# Explicit check 'is not None' for Pandas Series truth value fix
+# HANDLE MODAL TRIGGER AFTER RERUN
 if st.session_state.modal_rma is not None:
     current_rma = st.session_state.modal_rma
     current_act = st.session_state.modal_action
     
-    # CLEAR STATE IMMEDIATELY
+    # CLEAR STATE IMMEDIATELY to stop the loop
     st.session_state.modal_rma = None
     st.session_state.modal_action = None
     
@@ -433,7 +436,7 @@ for rma in raw_data:
             "Tracking Number": track_link_url, "Tracking Status": local_status,
             "Created": str(created_at)[:10] if created_at else "N/A",
             "Updated": str(u_at)[:10] if u_at else "N/A", "Days since updated": str(d_since),
-            "Update Tracking Number": "", "View Timeline": "", 
+            "Update Tracking Number": False, "View Timeline": False,
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
@@ -472,7 +475,8 @@ if not df_view.empty:
         display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-        # RENDER TABLE WITH TEXT TRIGGERS (SELECTBOX)
+        # RENDER TABLE WITH NARROW CHECKBOX TRIGGERS
+        # Checkboxes are chosen for single-click responsiveness on older Streamlit versions
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
@@ -482,28 +486,26 @@ if not df_view.empty:
                 "Order": st.column_config.TextColumn("Order", width="small"),
                 "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
                 "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update Tracking Number": st.column_config.SelectboxColumn("Update Tracking Number", options=["", "Edit"], width="small"),
-                "View Timeline": st.column_config.SelectboxColumn("View Timeline", options=["", "View"], width="small"),
+                "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
+                "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
                 "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated"]
         )
         
-        # CAPTURE SELECTION VIA edited_rows (STRICT ROUTING)
+        # STRICT ROUTING AND AUTO-CLEAR LOGIC:
         if "main_table" in st.session_state:
             edits = st.session_state.main_table.get("edited_rows", {})
             for row_idx, changes in edits.items():
                 idx = int(row_idx)
-                # Check EXACTLY which key changed in the specific row
-                if "Update Tracking Number" in changes and changes["Update Tracking Number"] == "Edit":
+                # IDENTIFY EXACT CLICKED COLUMN
+                if "Update Tracking Number" in changes and changes["Update Tracking Number"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'edit'
-                    st.session_state.main_table["edited_rows"] = {} # Flush state
-                    st.rerun()
-                elif "View Timeline" in changes and changes["View Timeline"] == "View":
+                    st.rerun() # RERUN CLEARS TICKMARK BEFORE DIALOG OPENS
+                elif "View Timeline" in changes and changes["View Timeline"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'view'
-                    st.session_state.main_table["edited_rows"] = {} # Flush state
                     st.rerun()
     else: st.info("No matching records found.")
 else: st.warning("Database empty. Click Sync All Data to start.")
