@@ -1,6 +1,6 @@
-beautifulsoup4==4.9.0
-requests==2.31.0
-pandas
+beautifulsoup4==4.12.3
+requests==2.32.0
+pandas==2.2.0
 streamlit
 
-Force Resolution Refresh v7
+Force UV Cache Reset v9
