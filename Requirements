@@ -1,6 +1,5 @@
-beautifulsoup4==4.12.3
-requests==2.32.0
-pandas==2.2.0
 streamlit
+pandas
+requests
 
-Force UV Cache Reset v9
+beautifulsoup4  <-- Removed to avoid confusion/errors since we use regex now
