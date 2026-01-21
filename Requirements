@@ -1,6 +1,4 @@
-beautifulsoup4>=4.12.0
+beautifulsoup4
 pandas
 requests
 streamlit
-
-Force Clean Install v5
