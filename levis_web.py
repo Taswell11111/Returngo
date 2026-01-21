@@ -1033,7 +1033,30 @@ for rma in raw_data:
         }
     )
 
-df_view = pd.DataFrame(processed_rows)
+BASE_SCHEMA_COLS = [
+    "No",
+    "RMA ID",
+    "RMA URL",
+    "Order",
+    "Current Status",
+    "Tracking Number",
+    "Tracking Status",
+    "Requested date",
+    "Approved date",
+    "Received date",
+    "resolutionType",
+    "Resolution actioned",
+    "Days since updated",
+    "Update Tracking",
+    "View Timeline",
+    "DisplayTrack",
+    "shipment_id",
+    "full_data",
+    "is_nt",
+    "is_fg",
+]
+
+df_view = pd.DataFrame(processed_rows, columns=BASE_SCHEMA_COLS)
 
 # ==========================================
 # 12. METRIC TILES
