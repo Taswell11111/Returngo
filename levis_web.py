@@ -65,6 +65,10 @@ st.markdown("""
         margin-top: -10px;
         margin-bottom: 10px;
     }
+    /* Custom style for the small sync buttons to make them fit better */
+    div[data-testid="column"] button[kind="secondary"] {
+        padding: 12px 10px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -281,10 +285,14 @@ def fetch_rma_detail(args):
 
 def perform_sync(statuses=None):
     session = get_session(); headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
-    status_msg = st.empty(); status_msg.info("⏳ Starting Deep Sync...")
+    status_msg = st.empty(); status_msg.info("⏳ Connecting to API...")
+    
     active_summaries = []
     if statuses is None: statuses = ["Pending", "Approved", "Received"]
-    for s in statuses:
+    
+    # 1. Fetch Lists
+    list_bar = st.progress(0, text="Fetching Lists from ReturnGO...")
+    for i, s in enumerate(statuses):
         api_rmas = fetch_all_pages(session, headers, s)
         local_ids = get_local_ids_for_status(s)
         api_ids = {r.get('rmaId') for r in api_rmas}
@@ -292,11 +300,23 @@ def perform_sync(statuses=None):
         active_summaries.extend(api_rmas)
         for stale_id in stale_ids: active_summaries.append({'rmaId': stale_id})
         update_sync_log(s)
+        list_bar.progress((i + 1) / len(statuses), text=f"Fetched List: {s}")
+    list_bar.empty()
     
+    # 2. Fetch Details with Progress Bar
     total = len(active_summaries)
+    status_msg.info(f"⏳ Syncing {total} records...")
+    
     if total > 0:
+        bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            list(executor.map(fetch_rma_detail, active_summaries))
+            futures = {executor.submit(fetch_rma_detail, s): s for s in active_summaries}
+            completed = 0
+            for future in concurrent.futures.as_completed(futures):
+                completed += 1
+                # Update progress bar
+                bar.progress(completed / total, text=f"Syncing: {completed}/{total}")
+        bar.empty()
     
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     st.session_state['show_toast'] = True
@@ -388,21 +408,23 @@ if st.session_state.get('show_toast'): st.toast("✅ API Sync Complete!", icon="
 
 def set_filter(f):
     st.session_state.filter_status = f
-    if f in ["Pending", "Approved", "Received"]: perform_sync(statuses=[f])
-    else: st.rerun()
+    # NOTE: We no longer trigger sync here. Only separate buttons do that.
+    st.rerun()
 
 # --- Header ---
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title("Levi's ReturnGO Ops Dashboard")
     st.markdown(f"**CONNECTED TO:** {STORE_URL.upper()} | **LAST SYNC:** :green[{st.session_state.get('last_sync', 'N/A')}]")
-    search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
+    # Search Bar removed from here
 with col2:
     if st.button("🔄 Sync All Data", type="primary"): perform_sync()
     if st.button("🗑️ Reset Cache", type="secondary"):
         if clear_db(): st.success("Cache cleared!"); st.rerun()
 
 # --- Data Processing ---
+search_query = st.session_state.get("search_query_input", "") # Get from session state or empty
+
 raw_data = get_all_active_from_db(); processed_rows = []
 counts = {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0}
 for rma in raw_data:
@@ -427,6 +449,7 @@ for rma in raw_data:
     if is_nt: counts["NoTrack"] += 1
     if is_fg: counts["Flagged"] += 1
     
+    # Filter by Search Query
     if not search_query or (search_query.lower() in str(rma_id).lower() or search_query.lower() in str(order_name).lower() or search_query.lower() in str(track_str).lower()):
         processed_rows.append({
             "No": "", "RMA ID": rma_id, "Order": order_name, "Status": status,
@@ -437,26 +460,62 @@ for rma in raw_data:
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
-# --- Metrics (ALL CAPS) ---
+# --- Metrics with Split Buttons (Filter vs Sync) ---
 b1, b2, b3, b4, b5 = st.columns(5)
+
 def get_status_time(s):
     ts = get_last_sync(s)
     return f"<div class='sync-time'>UPDATED: {ts[11:] if ts else '-'}</div>"
+
+# B1: Pending
 with b1: 
-    if st.button(f"PENDING\n{counts['Pending']}"): set_filter("Pending")
+    bc1, bc2 = st.columns([3, 1])
+    with bc1:
+        if st.button(f"PENDING\n{counts['Pending']}", key="btn_p"): set_filter("Pending")
+    with bc2:
+        if st.button("🔄", key="sync_p", help="Sync Pending Only"): perform_sync(["Pending"])
     st.markdown(get_status_time("Pending"), unsafe_allow_html=True)
+
+# B2: Approved
 with b2: 
-    if st.button(f"APPROVED\n{counts['Approved']}"): set_filter("Approved")
+    bc1, bc2 = st.columns([3, 1])
+    with bc1:
+        if st.button(f"APPROVED\n{counts['Approved']}", key="btn_a"): set_filter("Approved")
+    with bc2:
+        if st.button("🔄", key="sync_a", help="Sync Approved Only"): perform_sync(["Approved"])
     st.markdown(get_status_time("Approved"), unsafe_allow_html=True)
+
+# B3: Received
 with b3: 
-    if st.button(f"RECEIVED\n{counts['Received']}"): set_filter("Received")
+    bc1, bc2 = st.columns([3, 1])
+    with bc1:
+        if st.button(f"RECEIVED\n{counts['Received']}", key="btn_r"): set_filter("Received")
+    with bc2:
+        if st.button("🔄", key="sync_r", help="Sync Received Only"): perform_sync(["Received"])
     st.markdown(get_status_time("Received"), unsafe_allow_html=True)
+
+# B4 & B5: Filters (No specific sync needed usually)
 with b4: 
     if st.button(f"NO TRACKING\n{counts['NoTrack']} "): set_filter("NoTrack")
 with b5: 
     if st.button(f"🚩 FLAGGED\n{counts['Flagged']} "): set_filter("Flagged")
 
+# --- Search Bar & Clear Button ---
 st.divider()
+sc1, sc2 = st.columns([9, 1])
+with sc1:
+    search_query = st.text_input("Search", placeholder="🔍 Search Order, RMA, or Tracking...", label_visibility="collapsed", key="search_query_input")
+with sc2:
+    if st.button("❌", help="Clear Search", key="clear_search_btn"):
+        # We don't need complex logic; just rerunning with empty default handled by Streamlit key management usually, 
+        # but to be safe we can use a callback or rely on user clearing.
+        # Streamlit doesn't easily clear 'key' inputs programmatically without session state manipulation.
+        st.session_state.search_query_input = ""
+        st.rerun()
+
+st.write("") # Spacer
+
+# --- Table Display ---
 df_view = pd.DataFrame(processed_rows)
 if not df_view.empty:
     f_stat = st.session_state.filter_status
@@ -490,22 +549,20 @@ if not df_view.empty:
         )
         
         # ONE-CLICK & AUTO-CLEAR LOGIC:
-        # Detect checkbox, save record, increment table key to force clear, then rerun.
         editor_key = f"main_table_{st.session_state.table_key}"
         if editor_key in st.session_state:
             edits = st.session_state[editor_key].get("edited_rows", {})
             for row_idx, changes in edits.items():
                 idx = int(row_idx)
-                # Correct Routing Check
                 if "Update Tracking Number" in changes and changes["Update Tracking Number"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'edit'
-                    st.session_state.table_key += 1 # Forces table reset
+                    st.session_state.table_key += 1 
                     st.rerun()
                 elif "View Timeline" in changes and changes["View Timeline"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'view'
-                    st.session_state.table_key += 1 # Forces table reset
+                    st.session_state.table_key += 1 
                     st.rerun()
-    else: st.info("No matching records found.")
+    else: st.info("No matching records found in cache.")
 else: st.warning("Database empty. Click Sync All Data to start.")
