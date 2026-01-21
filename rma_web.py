@@ -131,6 +131,16 @@ def get_all_active_from_db():
         results.append(data)
     return results
 
+def get_local_ids_for_status(store_url, status):
+    """Helper to find what we CURRENTLY have in DB for a specific status."""
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT rma_id FROM rmas WHERE store_url=? AND status=?", (store_url, status))
+        rows = c.fetchall()
+        conn.close()
+    return {r[0] for r in rows}
+
 def clear_db():
     with DB_LOCK:
         try:
@@ -193,8 +203,18 @@ def fetch_rma_detail(args):
         res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            # 3. Save to DB (Thread Safe)
-            save_rma_to_db(rma_id, store_url, rma_summary.get('status'), rma_summary.get('createdAt'), data)
+            
+            # --- CRITICAL FIX START ---
+            # Don't trust the rma_summary passed in arguments (it might be stale/placeholder).
+            # Extract true status from the fresh response.
+            fresh_summary = data.get('rmaSummary', {})
+            true_status = fresh_summary.get('status', 'Unknown')
+            true_created = fresh_summary.get('createdAt')
+            
+            # 3. Save to DB with TRUE status
+            save_rma_to_db(rma_id, store_url, true_status, true_created, data)
+            # --- CRITICAL FIX END ---
+            
             return data
         else:
             print(f"Error fetching {rma_id}: {res.status_code}")
@@ -212,7 +232,7 @@ def perform_sync(target_store=None, target_status=None):
     
     # Logic to select stores
     if target_store:
-        stores_to_sync = [target_store] # target_store is the full dict object passed from handle_filter_click
+        stores_to_sync = [target_store]
     else:
         stores_to_sync = STORES
     
@@ -231,22 +251,39 @@ def perform_sync(target_store=None, target_status=None):
     if not target_store: 
         list_bar = st.progress(0, text="Fetching Lists from ReturnGO...")
 
-    # 1. Gather all RMA Summaries first
+    # 1. Gather all RMA Summaries
     for i, store in enumerate(stores_to_sync):
         headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
         for s in statuses:
-            rmas = fetch_all_pages(session, headers, s)
-            for r in rmas:
-                # Append task: (rma_summary, store_url, force_refresh=True)
+            # A. Fetch Fresh List from API
+            api_rmas = fetch_all_pages(session, headers, s)
+            
+            # B. Get list of what we THOUGHT was in this status locally
+            local_ids = get_local_ids_for_status(store['url'], s)
+            
+            # C. Identify IDs that are in local DB but NOT in API list (Stale items!)
+            api_ids = {r.get('rmaId') for r in api_rmas}
+            stale_ids = local_ids - api_ids
+            
+            # D. Queue standard updates
+            for r in api_rmas:
                 tasks.append((r, store['url'], True))
-            total_found += len(rmas)
+            
+            # E. Queue STALE items for update (so they get moved to their new status in DB)
+            for stale_id in stale_ids:
+                # Create a placeholder summary just to trigger the fetch
+                # fetch_rma_detail will ignore this status and get the real one from API
+                placeholder = {'rmaId': stale_id, 'status': 'CHECK_UPDATE', 'createdAt': None}
+                tasks.append((placeholder, store['url'], True))
+                
+            total_found += len(api_rmas) + len(stale_ids)
         
         if list_bar: 
             list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
     
     if list_bar: list_bar.empty()
 
-    status_msg.info(f"⏳ Found {total_found} records. Downloading details...")
+    status_msg.info(f"⏳ Found {total_found} records (including updates). Downloading details...")
     
     # 2. Download details in parallel
     if total_found > 0:
@@ -260,7 +297,9 @@ def perform_sync(target_store=None, target_status=None):
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
                 if completed % 5 == 0: # Update progress every 5 items
-                    bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
+                    try:
+                        bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
+                    except: pass
         bar.empty()
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
