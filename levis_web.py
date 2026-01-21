@@ -881,12 +881,14 @@ for rma in raw_data:
 b1, b2, b3, b4, b5 = st.columns(5)
 
 
-def get_status_time(scope_key):
-    dt = get_last_sync(scope_key)
-    if not dt:
+def get_status_time(s):
+    try:
+        ts = get_last_sync(s)
+        if not ts:
+            return "<div class='sync-time'>UPDATED: -</div>"
+        return f"<div class='sync-time'>UPDATED: {ts.strftime('%H:%M')}</div>"
+    except Exception:
         return "<div class='sync-time'>UPDATED: -</div>"
-    return f"<div class='sync-time'>UPDATED: {dt.astimezone().strftime('%H:%M')}</div>"
-
 
 with b1:
     bc1, bc2 = st.columns([3, 1])
