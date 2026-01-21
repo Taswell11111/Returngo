@@ -213,8 +213,9 @@ def check_courier_status(tracking_number, rma_id=None):
             'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
-        res = requests.get(url, headers=headers, timeout=8)
+        res = requests.get(url, headers=headers, timeout=10)
         final_status = "Unknown"
+        
         if res.status_code == 200:
             content = res.text
             # 1. JSON check
@@ -232,31 +233,36 @@ def check_courier_status(tracking_number, rma_id=None):
             # 2. Strict Position-Based Table Row Parsing (No BS4)
             # Remove scripts/styles
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            # Find all table rows
+            
+            # The goal is to find the FIRST <tr> that contains data cells (<td>) and skip <th> rows.
+            # ParcelNinja table rows for status usually look like: <tr> <td>Date</td> <td>Status Text</td> ... </tr>
+            
+            # Find all <tr> tags and their inner content
             rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
             
-            # The tracking history table newest events are usually in the first non-header row.
-            # Row 0 is often headers. We check rows 1, then 0 if 1 fails.
             found_text = None
-            for row_idx in [1, 0]: # Try the second row first (data), then the first row (header fallback)
-                if len(rows) > row_idx:
-                    cols = re.findall(r'<td[^>]*>(.*?)</td>', rows[row_idx], re.DOTALL | re.IGNORECASE)
-                    if cols:
-                        # Clean tags from cells and filter empty strings
-                        row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
-                        row_text = [t for t in row_text if t]
-                        if any("Cancelled" in t for t in row_text) or any("incorrect" in t.lower() for t in row_text):
-                            # Priority for cancellation detection in this row
-                            found_text = " - ".join(row_text)
-                            break
-                        if row_text:
-                            found_text = " - ".join(row_text)
-                            break
+            for r_content in rows:
+                # Check if this row contains table headers. If so, skip it.
+                if '<th' in r_content.lower():
+                    continue
+                
+                # Extract cells <td>...</td>
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', r_content, re.DOTALL | re.IGNORECASE)
+                if cols:
+                    # Clean tags from cells and filter empty strings
+                    row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
+                    row_text = [t for t in row_text if t]
+                    
+                    if row_text:
+                        # This is the first valid data row!
+                        # Typically format: [Date, Time, Status, Location] or similar
+                        found_text = " - ".join(row_text)
+                        break # Stop at first data row found
 
             if found_text:
                 final_status = re.sub(r'\s+', ' ', found_text).strip()
             else:
-                # Last resort keyword search
+                # Last resort keyword search if positional parsing fails
                 kw = ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery", "Collected", "At Delivery Depot"]
                 for k in kw:
                     if re.search(re.escape(k), clean_html, re.IGNORECASE):
@@ -461,8 +467,8 @@ with col1:
     st.title("Bounty Apparel ReturnGo RMAs 🔄️")
     search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
 with col2:
-    if st.button("🔄 Sync All Data", type="primary", use_container_width=True): perform_sync()
-    if st.button("🗑️ Reset Cache", type="secondary", use_container_width=True):
+    if st.button("🔄 Sync All Data", type="primary", width='stretch'): perform_sync()
+    if st.button("🗑️ Reset Cache", type="secondary", width='stretch'):
         if clear_db(): st.success("Cache cleared!"); st.rerun()
         else: st.error("DB might be locked.")
 
@@ -479,7 +485,10 @@ for rma in raw_data:
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get('shipmentId') if shipments else None
     local_status = rma.get('_local_courier_status', '')
-    track_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else None
+    
+    # URL for Tracking Number link
+    track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
+    
     created_at = summary.get('createdAt')
     if not created_at:
         for evt in summary.get('events', []):
@@ -502,10 +511,10 @@ for rma in raw_data:
             processed_rows.append({
                 "No": "", "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
                 "RMA ID": rma_id, "Order": order_name, "Status": status, "Store URL": store_url,
-                "TrackingNumber": track_url if track_url else track_str, "TrackingStatus": local_status,
-                "Fetch Tracking Status": False, "Created": str(created_at)[:10] if created_at else "N/A",
+                "TrackingNumber": track_link_url, "TrackingStatus": local_status,
+                "Fetch Tracking Status": "Fetch", "Created": str(created_at)[:10] if created_at else "N/A",
                 "Updated": str(u_at)[:10] if u_at else "N/A", "Days": str(d_since),
-                "Update TrackingNumber": False, "View Timeline": False,
+                "Update TrackingNumber": "Edit", "View Timeline": "View",
                 "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
             })
 
@@ -544,32 +553,46 @@ if not df_view.empty:
             df_view[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Fetch Tracking Status", "Created", "Updated", "Days", "Update TrackingNumber", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
             column_config={
-                "TrackingNumber": st.column_config.LinkColumn("Tracking Number", width="medium"),
-                "TrackingStatus": st.column_config.TextColumn("Current Status", width="large"),
-                "Fetch Tracking Status": st.column_config.CheckboxColumn("Fetch Status", help="Tick to update courier status"),
-                "Update TrackingNumber": st.column_config.CheckboxColumn("Edit Track", help="Tick to update tracking #"),
-                "View Timeline": st.column_config.CheckboxColumn("Timeline", help="Tick to view comments"),
                 "No": st.column_config.TextColumn("No", width="small"),
+                "TrackingNumber": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
+                "TrackingStatus": st.column_config.TextColumn("Tracking Status", width="large"),
+                "Fetch Tracking Status": st.column_config.ButtonColumn("Fetch Status", width="small"),
+                "Update TrackingNumber": st.column_config.ButtonColumn("Edit Tracking Number", width="small"),
+                "View Timeline": st.column_config.ButtonColumn("View Timeline", width="small"),
                 "Days": st.column_config.TextColumn("Days", width="small")
             },
             disabled=["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days"]
         )
         
-        # --- Handle Momentary Button Logic ---
-        row_idx = None; action = None
-        for idx, row in edited.iterrows():
-            if row["Fetch Tracking Status"]: row_idx = idx; action = "fetch"; break
-            if row["Update TrackingNumber"]: row_idx = idx; action = "edit"; break
-            if row["View Timeline"]: row_idx = idx; action = "time"; break
+        # --- Handle Button Actions ---
+        event = st.session_state.get('main_table', {})
+        # st.data_editor with ButtonColumn provides events in 'column_events' or through row editing triggers
+        # For simplicity in logic, we check for 'last_clicked_button' style triggers in data_editor
         
-        if row_idx is not None:
-            rec = df_view.iloc[row_idx]
-            if action == "fetch":
+        # The data_editor returns a state where the clicked button value changes
+        # We find which row was triggered by checking the 'edited_rows' or specifically the ButtonColumn trigger
+        trigger = st.session_state.main_table.get("callback_triggered", False)
+        # Note: In st.data_editor, ButtonColumn triggers are captured via the returned dataframe's state
+        
+        # Since button columns are momentary, we look for changes in the 'edited' dataframe
+        for idx, row in edited.iterrows():
+            # Check if any button column was clicked (which sets it to True in the edited object)
+            if row["Fetch Tracking Status"] == True:
+                rec = df_view.iloc[idx]
                 if rec['DisplayTrack']:
-                    with st.spinner("Checking status..."): check_courier_status(rec['DisplayTrack'], rec['RMA ID'])
-                    st.rerun()
-                else: st.warning("No tracking #")
-            elif action == "edit": show_update_tracking_dialog(rec)
-            elif action == "time": show_timeline_dialog(rec)
+                    with st.spinner(f"Updating {rec['RMA ID']}..."):
+                        check_courier_status(rec['DisplayTrack'], rec['RMA ID'])
+                        st.rerun()
+                else: st.warning("No tracking ID available.")
+                break
+                
+            if row["Update TrackingNumber"] == True:
+                show_update_tracking_dialog(df_view.iloc[idx])
+                break
+                
+            if row["View Timeline"] == True:
+                show_timeline_dialog(df_view.iloc[idx])
+                break
+                
     else: st.info("No matching records.")
 else: st.info("Database empty. Click 'Sync All Data'.")
