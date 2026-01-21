@@ -1,6 +1,6 @@
 streamlit
-pandas
 requests
 beautifulsoup4
+pandas>=1.0.0
 
-Force reinstall trigger v2
+Force Cache Bust V4 - please reinstall
