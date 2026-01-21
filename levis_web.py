@@ -189,8 +189,8 @@ def init_db():
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
 
-        c.execute(
-            """
+        # --- RMAs table (as you already have it) ---
+        c.execute("""
             CREATE TABLE IF NOT EXISTS rmas (
                 rma_id TEXT PRIMARY KEY,
                 store_url TEXT,
@@ -201,33 +201,48 @@ def init_db():
                 courier_status TEXT,
                 courier_last_checked TIMESTAMP
             )
-            """
-        )
+        """)
 
-        c.execute(
-            """
+        # --- sync_logs: create if missing ---
+        c.execute("""
             CREATE TABLE IF NOT EXISTS sync_logs (
                 scope TEXT PRIMARY KEY,
                 last_sync_iso TEXT
             )
-            """
-        )
+        """)
 
-        # Backward-compatible migrations (in case DB exists already)
-        cols = {row[1] for row in c.execute("PRAGMA table_info(rmas)").fetchall()}
-        if "courier_status" not in cols:
+        # --- MIGRATION: if old sync_logs schema exists, adapt it ---
+        cols = {row[1] for row in c.execute("PRAGMA table_info(sync_logs)").fetchall()}
+
+        # Old column names: status, last_sync
+        has_old = ("status" in cols) or ("last_sync" in cols)
+        has_new = ("scope" in cols) and ("last_sync_iso" in cols)
+
+        if not has_new and has_old:
+            # Create a new table with the new schema
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS sync_logs_new (
+                    scope TEXT PRIMARY KEY,
+                    last_sync_iso TEXT
+                )
+            """)
+            # Copy what we can from old -> new
+            # If old had (status,last_sync), map status->scope and store as text
             try:
-                c.execute("ALTER TABLE rmas ADD COLUMN courier_status TEXT")
+                c.execute("""
+                    INSERT OR REPLACE INTO sync_logs_new (scope, last_sync_iso)
+                    SELECT status, last_sync FROM sync_logs
+                """)
             except Exception:
                 pass
-        if "courier_last_checked" not in cols:
-            try:
-                c.execute("ALTER TABLE rmas ADD COLUMN courier_last_checked TIMESTAMP")
-            except Exception:
-                pass
+
+            # Swap tables
+            c.execute("DROP TABLE sync_logs")
+            c.execute("ALTER TABLE sync_logs_new RENAME TO sync_logs")
 
         conn.commit()
         conn.close()
+
 
 
 def clear_db():
@@ -359,16 +374,35 @@ def get_last_sync(scope: str):
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT last_sync_iso FROM sync_logs WHERE scope=?", (scope,))
-        row = c.fetchone()
-        conn.close()
+        try:
+            # New schema
+            c.execute("SELECT last_sync_iso FROM sync_logs WHERE scope=?", (scope,))
+            row = c.fetchone()
+            if row and row[0]:
+                try:
+                    return datetime.fromisoformat(row[0])
+                except Exception:
+                    return None
+            return None
+        except sqlite3.OperationalError:
+            # Fallback to old schema if still present for any reason
+            try:
+                c.execute("SELECT last_sync FROM sync_logs WHERE status=?", (scope,))
+                row = c.fetchone()
+                if row and row[0]:
+                    # old stored as string like "YYYY-mm-dd HH:MM" most likely
+                    try:
+                        return datetime.fromisoformat(row[0])
+                    except Exception:
+                        return None
+                return None
+            except Exception:
+                return None
+        finally:
+            conn.close()
 
-    if not row or not row[0]:
-        return None
-    try:
-        return datetime.fromisoformat(row[0])
-    except Exception:
-        return None
+
+
 
 
 init_db()
