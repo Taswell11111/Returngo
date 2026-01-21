@@ -114,7 +114,6 @@ def save_rma_to_db(rma_id, store_url, status, created_at, data, courier_status=N
             c = conn.cursor()
             now = datetime.now().isoformat()
             
-            # Preserve existing courier_status if not provided
             if courier_status is None:
                 c.execute("SELECT courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
                 row = c.fetchone()
@@ -208,6 +207,95 @@ def clear_db():
         except: return False
 
 init_db()
+
+# --- COURIER CHECK (Improved First-Row Logic) ---
+def check_courier_status(tracking_number, rma_id=None):
+    try:
+        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        }
+        
+        res = requests.get(url, headers=headers, timeout=8)
+        final_status = "Unknown"
+        
+        if res.status_code == 200:
+            content = res.text
+            
+            # 1. Try JSON First (Always best)
+            try:
+                data = res.json()
+                if 'history' in data and len(data['history']) > 0:
+                    final_status = data['history'][0].get('status') or data['history'][0].get('description')
+                else:
+                    final_status = data.get('status') or data.get('currentStatus')
+                
+                if final_status:
+                     if rma_id: update_courier_status_in_db(rma_id, final_status)
+                     return f"API: {final_status}"
+            except: pass 
+
+            # 2. Strict HTML Table Parsing (Regex)
+            # Find the tracking-history table body or rows.
+            # Strategy: Look for the text immediately following the table headers.
+            
+            # Clean up the HTML to make regex easier
+            clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
+            
+            # Find all table rows
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
+            
+            # Usually:
+            # Row 0: Headers (Date, Time, Status, Location)
+            # Row 1: MOST RECENT EVENT (This is what we want)
+            
+            found_text = None
+            
+            if len(rows) > 1:
+                target_row = rows[1] # The second row (index 1) is the latest event
+                
+                # Extract cells <td>...</td>
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', target_row, re.DOTALL | re.IGNORECASE)
+                
+                if cols:
+                    # Clean tags from cells
+                    row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
+                    row_text = [t for t in row_text if t] # Filter empties
+                    
+                    if row_text:
+                        # e.g. ["Mon, 22 Dec 11:37", "Courier Cancelled", ...]
+                        # We want to join them to give full context
+                        found_text = " - ".join(row_text)
+            
+            if found_text:
+                final_status = re.sub(r'\s+', ' ', found_text).strip()
+            else:
+                # Last Resort: Keyword search if table structure failed
+                prioritized_keywords = [
+                    "Courier Cancelled", "Booked Incorrectly", "Delivered", 
+                    "Out For Delivery", "Collected", "At Delivery Depot", 
+                    "In Transit", "Waybill Printed", "Shipment Created"
+                ]
+                for k in prioritized_keywords:
+                    if re.search(re.escape(k), clean_html, re.IGNORECASE):
+                        final_status = k
+                        break
+
+        elif res.status_code == 404:
+            final_status = "Tracking Not Found"
+        else:
+            final_status = f"Error {res.status_code}"
+            
+        if rma_id:
+            update_courier_status_in_db(rma_id, final_status)
+            
+        return final_status
+
+    except Exception as e:
+        return f"Check Failed: {str(e)[:20]}"
 
 # ==========================================
 # 3. BACKEND LOGIC
@@ -379,16 +467,9 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
 def push_comment_update(rma_id, comment_text, store_url):
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
-    
-    payload = {
-        "text": comment_text,
-        "isPublic": False 
-    }
-    
+    payload = { "text": comment_text, "isPublic": False }
     try:
-        # Note: Endpoint assumption /rma/{id}/note.
         res = session.post(f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, json=payload, timeout=10)
-        
         if res.status_code in [200, 201]:
              fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
              if fresh_res.status_code == 200:
@@ -400,76 +481,6 @@ def push_comment_update(rma_id, comment_text, store_url):
              return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
         return False, str(e)
-
-# --- COURIER CHECK (First-Row Priority Regex Logic) ---
-def check_courier_status(tracking_number, rma_id=None):
-    try:
-        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-        }
-        
-        res = requests.get(url, headers=headers, timeout=8)
-        final_status = "Unknown"
-        
-        if res.status_code == 200:
-            content = res.text
-            
-            # 1. Try JSON First
-            try:
-                data = res.json()
-                if 'history' in data and len(data['history']) > 0:
-                    final_status = data['history'][0].get('status') or data['history'][0].get('description')
-                else:
-                    final_status = data.get('status') or data.get('currentStatus')
-                
-                if final_status:
-                     if rma_id: update_courier_status_in_db(rma_id, final_status)
-                     return f"API: {final_status}"
-            except: pass 
-
-            # 2. Regex "First Row" Logic
-            clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL)
-            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
-            
-            found_text = None
-            if len(rows) > 1:
-                target_row = rows[1] 
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', target_row, re.DOTALL | re.IGNORECASE)
-                if cols:
-                    row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
-                    row_text = [t for t in row_text if t]
-                    if row_text:
-                        found_text = " - ".join(row_text)
-            
-            if found_text:
-                final_status = re.sub(r'\s+', ' ', found_text).strip()
-            else:
-                prioritized_keywords = [
-                    r"courier\s+cancelled", r"booked\s+incorrectly", 
-                    r"delivered", r"out\s+for\s+delivery", r"collected", 
-                    r"at\s+delivery\s+depot", r"in\s+transit", r"created"
-                ]
-                for k in prioritized_keywords:
-                    if re.search(k, clean_html, re.IGNORECASE):
-                        final_status = k.replace(r"\s+", " ").title()
-                        break
-            
-        elif res.status_code == 404:
-            final_status = "Tracking Not Found"
-        else:
-            final_status = f"Error {res.status_code}"
-            
-        if rma_id:
-            update_courier_status_in_db(rma_id, final_status)
-            
-        return final_status
-
-    except Exception as e:
-        return f"Check Failed: {str(e)[:20]}"
 
 # ==========================================
 # 4. FRONTEND UI LOGIC
@@ -496,11 +507,9 @@ def handle_filter_click(store_url, status):
 def show_update_tracking_dialog(record):
     st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
     raw_track = record['DisplayTrack']
-    
     with st.form("update_track_form"):
         new_track = st.text_input("New Tracking Number", value=raw_track)
         submitted = st.form_submit_button("Save Changes")
-        
         if submitted:
             if not record['shipment_id']:
                 st.error("No Shipment ID associated with this RMA.")
@@ -516,7 +525,6 @@ def show_update_tracking_dialog(record):
 @st.dialog("View Timeline")
 def show_timeline_dialog(record):
     st.markdown(f"### Timeline for `{record['RMA ID']}`")
-    
     with st.expander("➕ Add Comment", expanded=False):
         with st.form("add_comment_form"):
             comment_text = st.text_area("New Note")
@@ -527,7 +535,6 @@ def show_timeline_dialog(record):
                     st.rerun()
                 else:
                     st.error(msg)
-
     full = record['full_data']
     timeline = full.get('comments', [])
     if not timeline:
@@ -685,6 +692,7 @@ if not df.empty:
     elif f_stat == "Flagged": df = df[df['IsFlagged'] == True]
 
     if not df.empty:
+        # sort and add row numbers
         df = df.sort_values(by="Created", ascending=False).reset_index(drop=True)
         df.insert(0, "No", range(1, len(df) + 1))
         
