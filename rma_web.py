@@ -350,7 +350,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
         
         if res.status_code == 200:
             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
-            if fresh_res.status_code == 200:
+            if res.status_code == 200:
                 fresh_data = fresh_res.json()
                 summary = fresh_data.get('rmaSummary', {})
                 save_rma_to_db(rma_id, store_url, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
@@ -398,6 +398,7 @@ def check_courier_status(tracking_number, rma_id):
             found = False
             for k in prioritized_keywords:
                 if re.search(k, content, re.IGNORECASE):
+                    # Found a match! Clean up the regex pattern to nice text
                     status_text = k.replace(r"\s+", " ").title()
                     # Fix specific casings
                     if "At Delivery Depot" in status_text: status_text = "At Delivery Depot"
