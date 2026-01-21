@@ -922,9 +922,6 @@ with col2:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     if st.button("🔄 Sync All Data", key="btn_sync_all", use_container_width=True):
         perform_sync()
-    if st.button("🧾 Full Rebuild (Slow)", key="btn_full_rebuild", use_container_width=True,
-                 help="Ignores incremental sync and rebuilds cache (more API calls)"):
-        perform_sync(full=True)
     if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
         if clear_db():
             st.success("Cache cleared!")
