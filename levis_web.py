@@ -214,7 +214,6 @@ def check_courier_status(tracking_number, rma_id=None):
             except: pass 
 
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            # Find the tracking table and grab the first data row found
             history_section = re.search(r'<table[^>]*?tracking-history.*?>(.*?)</table>', clean_html, re.DOTALL | re.IGNORECASE)
             content_to_parse = history_section.group(1) if history_section else clean_html
             
@@ -343,6 +342,7 @@ def push_comment_update(rma_id, comment_text):
 # Initialize modal states
 if 'modal_rma' not in st.session_state: st.session_state.modal_rma = None
 if 'modal_action' not in st.session_state: st.session_state.modal_action = None
+if 'table_key' not in st.session_state: st.session_state.table_key = 0
 
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
@@ -378,11 +378,8 @@ def show_timeline_dialog(record):
 if st.session_state.modal_rma is not None:
     current_rma = st.session_state.modal_rma
     current_act = st.session_state.modal_action
-    
-    # CLEAR STATE IMMEDIATELY to stop the loop
     st.session_state.modal_rma = None
     st.session_state.modal_action = None
-    
     if current_act == 'edit': show_update_tracking_dialog(current_rma)
     elif current_act == 'view': show_timeline_dialog(current_rma)
 
@@ -475,11 +472,10 @@ if not df_view.empty:
         display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-        # RENDER TABLE WITH NARROW CHECKBOX TRIGGERS
-        # Checkboxes are chosen for single-click responsiveness on older Streamlit versions
+        # KEY CYCLING: Forces table to clear checkboxes after one is clicked
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
-            use_container_width=True, height=700, hide_index=True, key="main_table",
+            use_container_width=True, height=700, hide_index=True, key=f"main_table_{st.session_state.table_key}",
             column_config={
                 "No": st.column_config.TextColumn("No", width="small"),
                 "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
@@ -493,19 +489,23 @@ if not df_view.empty:
             disabled=["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated"]
         )
         
-        # STRICT ROUTING AND AUTO-CLEAR LOGIC:
-        if "main_table" in st.session_state:
-            edits = st.session_state.main_table.get("edited_rows", {})
+        # ONE-CLICK & AUTO-CLEAR LOGIC:
+        # Detect checkbox, save record, increment table key to force clear, then rerun.
+        editor_key = f"main_table_{st.session_state.table_key}"
+        if editor_key in st.session_state:
+            edits = st.session_state[editor_key].get("edited_rows", {})
             for row_idx, changes in edits.items():
                 idx = int(row_idx)
-                # IDENTIFY EXACT CLICKED COLUMN
+                # Correct Routing Check
                 if "Update Tracking Number" in changes and changes["Update Tracking Number"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'edit'
-                    st.rerun() # RERUN CLEARS TICKMARK BEFORE DIALOG OPENS
+                    st.session_state.table_key += 1 # Forces table reset
+                    st.rerun()
                 elif "View Timeline" in changes and changes["View Timeline"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'view'
+                    st.session_state.table_key += 1 # Forces table reset
                     st.rerun()
     else: st.info("No matching records found.")
 else: st.warning("Database empty. Click Sync All Data to start.")
