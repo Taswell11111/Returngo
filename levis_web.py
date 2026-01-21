@@ -33,7 +33,6 @@ PARCEL_NINJA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjJhMDI4M
 CACHE_EXPIRY_HOURS = 4
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
-# LOCK FOR THREAD-SAFE DB WRITES
 DB_LOCK = threading.Lock()
 
 # --- STYLING ---
@@ -215,7 +214,6 @@ def check_courier_status(tracking_number, rma_id=None):
             except: pass 
 
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            # Positional Parsing: Look inside tbody for the first tr that is NOT a header
             rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
             found_text = None
             for r_html in rows:
@@ -299,7 +297,6 @@ def perform_sync(statuses=None):
     
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     st.session_state['show_toast'] = True
-    status_msg.success(f"✅ Sync Complete!")
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number):
@@ -454,11 +451,9 @@ if not df_view.empty:
 
     if not display_df.empty:
         display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
-        display_df['No'] = (display_df.index + 1).astype(str)
-        display_df['Days'] = display_df['Days'].astype(str)
+        display_df['No'] = (display_df.index + 1).astype(str); display_df['Days'] = display_df['Days'].astype(str)
 
-        # OPTION 2: State-Flushing Checkboxes
-        # The key logic here is that edited_rows state is cleared immediately after trigger
+        # UI Update: Icons in Headers and narrow columns for Action triggers
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days", "Update TrackingNumber", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
@@ -468,17 +463,17 @@ if not df_view.empty:
                 "Order": st.column_config.TextColumn("Order", width="small"),
                 "TrackingNumber": st.column_config.LinkColumn("Tracking", display_text=r"ref=(.*)", width="medium"),
                 "TrackingStatus": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update TrackingNumber": st.column_config.CheckboxColumn("Edit Tracking", width="small"),
-                "View Timeline": st.column_config.CheckboxColumn("Timeline", width="small"),
+                "Update TrackingNumber": st.column_config.CheckboxColumn("✏️", help="Edit Tracking Number", width="small"),
+                "View Timeline": st.column_config.CheckboxColumn("📋", help="View Timeline", width="small"),
                 "Days": st.column_config.TextColumn("Days", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days"]
         )
         
-        # --- Handle Action Logic with immediate state reset ---
+        # Action Logic with state resetting to clear icons
         for idx, row in edited.iterrows():
             if row["Update TrackingNumber"]:
-                # Manually clear the session state to flush the checkbox
+                # Reset state in background before dialog so it doesn't loop
                 st.session_state.main_table["edited_rows"][idx]["Update TrackingNumber"] = False
                 show_update_tracking_dialog(display_df.iloc[idx])
                 break
