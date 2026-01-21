@@ -1020,7 +1020,7 @@ with b1:
     if st.button(f"PENDING\n{counts['Pending']}", key="btn_p", use_container_width=True):
         set_filter("Pending")
     st.markdown("<div class='small-btn'>", unsafe_allow_html=True)
-    if st.button("🔄 Sync Pending", key="sync_p", use_container_width=True):
+    if st.button("🔄 Sync Pending", key="sync_p", width='content'):
         perform_sync(["Pending"])
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown(get_status_time_html("Pending"), unsafe_allow_html=True)
