@@ -370,13 +370,13 @@ def show_timeline_dialog(record):
             st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
             st.divider()
 
-# TRIGGER DIALOG FROM SESSION STATE (Fixes loops and ambiguous truth value)
+# TRIGGER DIALOG FROM SESSION STATE
+# Explicit check 'is not None' for Pandas Series truth value fix
 if st.session_state.modal_rma is not None:
-    # Make a local copy
     current_rma = st.session_state.modal_rma
     current_act = st.session_state.modal_action
     
-    # CLEAR STATE IMMEDIATELY so rerun (on close or internal actions) doesn't loop
+    # CLEAR STATE IMMEDIATELY so rerun doesn't loop
     st.session_state.modal_rma = None
     st.session_state.modal_action = None
     
@@ -433,7 +433,7 @@ for rma in raw_data:
             "Tracking Number": track_link_url, "Tracking Status": local_status,
             "Created": str(created_at)[:10] if created_at else "N/A",
             "Updated": str(u_at)[:10] if u_at else "N/A", "Days since updated": str(d_since),
-            "Update Tracking Number": "", "View Timeline": "", 
+            "Update Tracking Number": "Edit", "View Timeline": "View", 
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
@@ -472,7 +472,8 @@ if not df_view.empty:
         display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-        # RENDER TABLE
+        # RENDER TABLE WITH SINGLE-CLICK BUTTONS
+        # Using ButtonColumn ensures one click trigger and consistent text labeling
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
@@ -482,27 +483,25 @@ if not df_view.empty:
                 "Order": st.column_config.TextColumn("Order", width="small"),
                 "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
                 "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update Tracking Number": st.column_config.SelectboxColumn("Update Tracking Number", options=["", "Edit"], width="small"),
-                "View Timeline": st.column_config.SelectboxColumn("View Timeline", options=["", "View"], width="small"),
+                "Update Tracking Number": st.column_config.ButtonColumn("Edit", width="small"),
+                "View Timeline": st.column_config.ButtonColumn("View", width="small"),
                 "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated"]
         )
         
-        # CAPTURE SELECTION AND RERUN IMMEDIATELY
-        for idx, row in edited.iterrows():
-            if row["Update Tracking Number"] == "Edit":
-                st.session_state.modal_rma = display_df.iloc[idx]
-                st.session_state.modal_action = 'edit'
-                # Clear state manually to reset the selectbox on the next pass
-                if "main_table" in st.session_state and "edited_rows" in st.session_state.main_table:
-                    st.session_state.main_table["edited_rows"] = {}
-                st.rerun()
-            if row["View Timeline"] == "View":
-                st.session_state.modal_rma = display_df.iloc[idx]
-                st.session_state.modal_action = 'view'
-                if "main_table" in st.session_state and "edited_rows" in st.session_state.main_table:
-                    st.session_state.main_table["edited_rows"] = {}
-                st.rerun()
+        # HANDLE BUTTON CLICKS via edited_rows state (STRICT ROUTING)
+        if "main_table" in st.session_state:
+            edits = st.session_state.main_table.get("edited_rows", {})
+            for row_idx, changes in edits.items():
+                idx = int(row_idx)
+                if "Update Tracking Number" in changes:
+                    st.session_state.modal_rma = display_df.iloc[idx]
+                    st.session_state.modal_action = 'edit'
+                    st.rerun()
+                elif "View Timeline" in changes:
+                    st.session_state.modal_rma = display_df.iloc[idx]
+                    st.session_state.modal_action = 'view'
+                    st.rerun()
     else: st.info("No matching records found.")
 else: st.warning("Database empty. Click Sync All Data to start.")
