@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
+from bs4 import BeautifulSoup
 
 # ==========================================
 # 1. CONFIGURATION
@@ -27,7 +28,6 @@ if not MY_API_KEY:
     st.stop()
 
 # PARCEL NINJA TOKEN (TASWELL)
-# Ideally store this in secrets, but hardcoded here for your specific test request
 PARCEL_NINJA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjJhMDI4MWNhNTBmNDEwOTRiZTkyNzdhNTQ0MDZhZGRkODMyOGExODhhYmNiZGViMiIsIm5iZiI6MTc2ODk1ODUwMSwiZXhwIjoxODYzNjUyOTAxLCJpYXQiOjE3Njg5NTg1MDEsImlzcyI6Imh0dHBzOi8vb3B0aW1pc2UucGFyY2VsbmluamEuY29tIiwiYXVkIjoiaHR0cHM6Ly9vcHRpbWlzZS5wYXJjZWxuaW5qYS5jb20ifQ.lgAi9s2INGKrzGYb3Qn_PY6N1ekh3fSBP7JBgMhX0Pk"
 
 CACHE_EXPIRY_HOURS = 4
@@ -328,32 +328,47 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     except Exception as e:
         return False, str(e)
 
-# Updated Courier Guy Check using Parcel Ninja URL
+# Updated Courier Guy Check using Parcel Ninja URL + Basic Scraping
 def check_courier_status(tracking_number):
     try:
-        # Use the optimize.parcelninja.com URL structure as requested
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         
-        # Add the provided JWT Token to Authorization header
         headers = {
-            'User-Agent': 'Mozilla/5.0',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
-            'Accept': 'application/json'  # Try asking for JSON first
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
         
         res = requests.get(url, headers=headers, timeout=8)
         
         if res.status_code == 200:
-            # 1. Try to parse as JSON (if API endpoint)
+            # 1. Try JSON (if they return it despite loading HTML)
             try:
                 data = res.json()
-                # Assuming standard ParcelNinja structure, look for 'status' or 'events'
-                # This is a guess based on standard APIs; adjustments might be needed based on actual response
-                status = data.get('status') or data.get('currentStatus') or "Active (JSON Found)"
-                return f"API Status: {status}"
-            except:
-                # 2. Fallback: Parse HTML if it returns a webpage
-                return "Connection OK (HTML Page Loaded)"
+                status = data.get('status') or data.get('currentStatus')
+                if status: return f"API Status: {status}"
+            except: pass # Not JSON, move on to scraping
+
+            # 2. Scrape HTML using BeautifulSoup
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # Common patterns in tracking portals:
+            # Look for elements with class names like 'status', 'tracking-status', 'current-status'
+            # Or headers like h1, h2, h3
+            
+            # Attempt 1: Look for common semantic headers
+            headers = soup.find_all(['h1', 'h2', 'h3', 'h4'])
+            for h in headers:
+                text = h.get_text(strip=True).lower()
+                if any(x in text for x in ['delivered', 'in transit', 'out for delivery', 'collected', 'created']):
+                    return f"Found Status: {h.get_text(strip=True)}"
+            
+            # Attempt 2: Fallback to just returning title
+            if soup.title:
+                return f"Page Title: {soup.title.get_text(strip=True)}"
+                
+            return "Loaded Page (Status Text Not Found)"
+            
         elif res.status_code == 401:
             return "Auth Error (401) - Token might be invalid for this endpoint"
         elif res.status_code == 404:
@@ -412,7 +427,7 @@ def show_rma_modal(record):
                 if st.form_submit_button("🔍 Check Courier Status"):
                     with st.spinner("Checking Parcel Ninja..."):
                         status_info = check_courier_status(raw_track)
-                    if "API Status" in status_info or "OK" in status_info:
+                    if "API Status" in status_info or "Found Status" in status_info:
                         st.success(status_info)
                     else:
                         st.warning(status_info)
