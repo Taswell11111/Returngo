@@ -15,7 +15,7 @@ import concurrent.futures
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="👖")
+st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="📤")
 
 # ACCESS SECRETS
 try:
