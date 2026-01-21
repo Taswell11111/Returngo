@@ -6,11 +6,19 @@ import pandas as pd
 import os
 import threading
 import time
-import re  # Built-in Regex module
+import re
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
+
+# --- SAFE IMPORT FOR BS4 ---
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+    BeautifulSoup = None
 
 # ==========================================
 # 1. CONFIGURATION
@@ -91,51 +99,82 @@ def init_db():
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
+        
+        # Check if column exists, if not migrate
+        try:
+            c.execute("SELECT courier_status FROM rmas LIMIT 1")
+        except sqlite3.OperationalError:
+            try:
+                c.execute("ALTER TABLE rmas ADD COLUMN courier_status TEXT")
+            except: pass
+
         c.execute('''CREATE TABLE IF NOT EXISTS rmas
                      (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
-                      created_at TEXT, json_data TEXT, last_fetched TIMESTAMP)''')
+                      created_at TEXT, json_data TEXT, last_fetched TIMESTAMP, courier_status TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS sync_logs
                      (store_url TEXT, status TEXT, last_sync TIMESTAMP, PRIMARY KEY (store_url, status))''')
         conn.commit()
         conn.close()
 
-def save_rma_to_db(rma_id, store_url, status, created_at, data):
+def save_rma_to_db(rma_id, store_url, status, created_at, data, courier_status=None):
     with DB_LOCK:
         try:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             now = datetime.now().isoformat()
-            c.execute('''INSERT OR REPLACE INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched)
-                         VALUES (?, ?, ?, ?, ?, ?)''', 
-                         (str(rma_id), store_url, status, created_at, json.dumps(data), now))
+            
+            # Preserve existing courier_status if not provided
+            if courier_status is None:
+                c.execute("SELECT courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
+                row = c.fetchone()
+                if row:
+                    courier_status = row[0]
+            
+            c.execute('''INSERT OR REPLACE INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)''', 
+                         (str(rma_id), store_url, status, created_at, json.dumps(data), now, courier_status))
             conn.commit()
             conn.close()
         except Exception as e:
             print(f"DB Error saving {rma_id}: {e}")
 
+def update_courier_status_in_db(rma_id, status_text):
+    with DB_LOCK:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("UPDATE rmas SET courier_status=? WHERE rma_id=?", (status_text, str(rma_id)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"DB Error updating status {rma_id}: {e}")
+
 def get_rma_from_db(rma_id):
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT json_data, last_fetched FROM rmas WHERE rma_id=?", (str(rma_id),))
+        c.execute("SELECT json_data, last_fetched, courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
         row = c.fetchone()
         conn.close()
     if row:
-        return json.loads(row[0]), datetime.fromisoformat(row[1])
+        data = json.loads(row[0])
+        data['_local_courier_status'] = row[2] 
+        return data, datetime.fromisoformat(row[1])
     return None, None
 
 def get_all_active_from_db():
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT json_data, store_url FROM rmas WHERE status IN ('Pending', 'Approved', 'Received')")
+        c.execute("SELECT json_data, store_url, courier_status FROM rmas WHERE status IN ('Pending', 'Approved', 'Received')")
         rows = c.fetchall()
         conn.close()
     
     results = []
     for r in rows:
         data = json.loads(r[0])
-        data['store_url'] = r[1] 
+        data['store_url'] = r[1]
+        data['_local_courier_status'] = r[2]
         results.append(data)
     return results
 
@@ -230,6 +269,7 @@ def fetch_rma_detail(args):
             fresh_summary = data.get('rmaSummary', {})
             true_status = fresh_summary.get('status', 'Unknown')
             true_created = fresh_summary.get('createdAt')
+            # Pass None for courier_status so it preserves existing value
             save_rma_to_db(rma_id, store_url, true_status, true_created, data)
             return data
     except: pass
@@ -328,9 +368,12 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     except Exception as e:
         return False, str(e)
 
-# Updated Courier Guy Check using Regex (Zero Dependency)
-def check_courier_status(tracking_number):
+def check_courier_status(tracking_number, rma_id):
+    if not BS4_AVAILABLE:
+        return "Install 'beautifulsoup4' to enable this feature."
+        
     try:
+        # Use the optimize.parcelninja.com URL structure as requested
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         
         headers = {
@@ -341,49 +384,58 @@ def check_courier_status(tracking_number):
         
         res = requests.get(url, headers=headers, timeout=8)
         
+        final_status = "Unknown"
+        
         if res.status_code == 200:
             content = res.text
             
-            # 1. Try JSON
-            try:
-                data = res.json()
-                status = data.get('status') or data.get('currentStatus')
-                if status: return f"API Status: {status}"
-            except: pass 
-
-            # 2. Regex Search for common statuses in HTML text
-            # We look for whole words to avoid false positives
-            keywords = [
-                r"delivered", 
-                r"in\s+transit", 
-                r"out\s+for\s+delivery", 
-                r"collected", 
-                r"created",
-                r"at\s+delivery\s+depot"
+            # 2. Scrape HTML using BeautifulSoup
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Use specific header tags which usually contain the status in bold/headers
+            headers = soup.find_all(['h1', 'h2', 'h3', 'h4'])
+            
+            # Priority Search for most recent status
+            prioritized_keywords = [
+                r"delivered",            # Priority 1: Delivered is final
+                r"out\s+for\s+delivery", # Priority 2: Almost there
+                r"collected",            # Priority 3: Picked up
+                r"at\s+delivery\s+depot",# Priority 4: At depot
+                r"in\s+transit",         # Priority 5: Moving
+                r"created"               # Priority 6: Just started
             ]
             
-            found_status = []
-            for k in keywords:
-                if re.search(k, content, re.IGNORECASE):
-                    found_status.append(k.replace(r"\s+", " ").title())
-            
-            if found_status:
-                # Return the most relevant status (usually the last one added to list if chronological, but here just first found)
-                return f"Found Status: {', '.join(set(found_status))}"
+            found = False
+            for k in prioritized_keywords:
+                for h in headers:
+                    text = h.get_text(strip=True).lower()
+                    if re.search(k, text, re.IGNORECASE):
+                        status_text = k.replace(r"\s+", " ").title()
+                        if "At Delivery Depot" in status_text: status_text = "At Delivery Depot"
+                        final_status = status_text
+                        found = True
+                        break
+                if found: break
 
-            # Fallback: Look for specific HTML class if we know it (e.g., <div class="status">)
-            # This is harder with regex but simple searches work
+            if not found:
+                # If headers didn't have it, search body text broadly
+                for k in prioritized_keywords:
+                    if re.search(k, content, re.IGNORECASE):
+                         status_text = k.replace(r"\s+", " ").title()
+                         final_status = status_text
+                         break
             
-            return "Page Loaded (Status Keyword Not Found)"
-            
-        elif res.status_code == 401:
-            return "Auth Error (401)"
         elif res.status_code == 404:
-            return "Tracking ID Not Found"
+            final_status = "Tracking Not Found"
         else:
-            return f"Error {res.status_code}"
+            final_status = f"Error {res.status_code}"
+            
+        # Update Database with result
+        update_courier_status_in_db(rma_id, final_status)
+        return final_status
+
     except Exception as e:
-        return f"Check Failed: {str(e)[:30]}..."
+        return f"Check Failed: {str(e)[:20]}"
 
 # ==========================================
 # 4. FRONTEND UI LOGIC
@@ -433,13 +485,10 @@ def show_rma_modal(record):
             if raw_track:
                 if st.form_submit_button("🔍 Check Courier Status"):
                     with st.spinner("Checking Parcel Ninja..."):
-                        status_info = check_courier_status(raw_track)
-                    if "API Status" in status_info or "Found Status" in status_info:
-                        st.success(status_info)
-                    elif "Missing" in status_info:
-                        st.error(status_info)
-                    else:
-                        st.warning(status_info)
+                        status_info = check_courier_status(raw_track, record['RMA ID'])
+                    st.success(f"Status: {status_info}")
+                    time.sleep(1) # Short delay to let user see
+                    st.rerun() # Rerun to update table
             
             if st.form_submit_button("Save"):
                 if not record['shipment_id']:
@@ -488,6 +537,9 @@ for rma in raw_data:
     track_nums = [s.get('trackingNumber') for s in shipments if s.get('trackingNumber')]
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get('shipmentId') if shipments else None
+    
+    # Tracking Status (from local DB)
+    local_status = rma.get('_local_courier_status', '')
     
     track_url = None
     if track_str:
@@ -539,6 +591,7 @@ for rma in raw_data:
                 "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
                 "Status": status,
                 "TrackingNumber": track_url if track_url else track_str,
+                "TrackingStatus": local_status, # NEW COLUMN
                 "DisplayTrack": track_str,
                 "Created": str(created_at)[:10] if created_at else "N/A",
                 "Updated": str(updated_at)[:10] if updated_at else "N/A",
@@ -607,7 +660,7 @@ if not df.empty:
         df['Days since updated'] = df['Days since updated'].astype(str)
 
         event = st.dataframe(
-            df[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "Created", "Updated", "Days since updated"]],
+            df[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", "TrackingStatus", "Created", "Updated", "Days since updated"]],
             use_container_width=True,
             height=700, 
             hide_index=True,
@@ -620,7 +673,8 @@ if not df.empty:
                     display_text=r"ref=(.*)"
                 ),
                 "No": st.column_config.TextColumn("No", width="small"),
-                "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
+                "Days since updated": st.column_config.TextColumn("Days since updated", width="small"),
+                "TrackingStatus": st.column_config.TextColumn("TrackingStatus", width="medium")
             }
         )
 
