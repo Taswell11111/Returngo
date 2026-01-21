@@ -26,6 +26,10 @@ if not MY_API_KEY:
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
 
+# PARCEL NINJA TOKEN (TASWELL)
+# Ideally store this in secrets, but hardcoded here for your specific test request
+PARCEL_NINJA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjJhMDI4MWNhNTBmNDEwOTRiZTkyNzdhNTQ0MDZhZGRkODMyOGExODhhYmNiZGViMiIsIm5iZiI6MTc2ODk1ODUwMSwiZXhwIjoxODYzNjUyOTAxLCJpYXQiOjE3Njg5NTg1MDEsImlzcyI6Imh0dHBzOi8vb3B0aW1pc2UucGFyY2VsbmluamEuY29tIiwiYXVkIjoiaHR0cHM6Ly9vcHRpbWlzZS5wYXJjZWxuaW5qYS5jb20ifQ.lgAi9s2INGKrzGYb3Qn_PY6N1ekh3fSBP7JBgMhX0Pk"
+
 CACHE_EXPIRY_HOURS = 4
 DB_FILE = "rma_cache.db"
 # LOCK FOR THREAD-SAFE DB WRITES
@@ -90,7 +94,6 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS rmas
                      (rma_id TEXT PRIMARY KEY, store_url TEXT, status TEXT, 
                       created_at TEXT, json_data TEXT, last_fetched TIMESTAMP)''')
-        # Table for sync timestamps
         c.execute('''CREATE TABLE IF NOT EXISTS sync_logs
                      (store_url TEXT, status TEXT, last_sync TIMESTAMP, PRIMARY KEY (store_url, status))''')
         conn.commit()
@@ -260,29 +263,18 @@ def perform_sync(target_store=None, target_status=None):
     for i, store in enumerate(stores_to_sync):
         headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
         for s in statuses:
-            # 1. Fetch Fresh List
             api_rmas = fetch_all_pages(session, headers, s)
-            
-            # 2. Compare with Local DB (One-Call Check Logic)
             local_ids = get_local_ids_for_status(store['url'], s)
             api_ids = {r.get('rmaId') for r in api_rmas}
-            
-            # Stale IDs: In DB but not in API (moved status or deleted)
             stale_ids = local_ids - api_ids
             
-            # Queue Updates
             for r in api_rmas:
-                # We fetch all active to ensure timeline/comments are up to date
                 tasks.append((r, store['url'], True))
-                
             for stale_id in stale_ids:
-                # Force fetch stale items to update their status in DB
                 placeholder = {'rmaId': stale_id, 'status': 'CHECK_UPDATE', 'createdAt': None}
                 tasks.append((placeholder, store['url'], True))
                 
             total_found += len(api_rmas) + len(stale_ids)
-            
-            # Update Timestamp for this specific box
             update_sync_log(store['url'], s)
         
         if list_bar: 
@@ -336,18 +328,40 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
     except Exception as e:
         return False, str(e)
 
-# Lightweight Scraper for Courier Guy (Experimental)
+# Updated Courier Guy Check using Parcel Ninja URL
 def check_courier_status(tracking_number):
     try:
-        url = f"https://portal.thecourierguy.co.za/track?ref={tracking_number}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        # Note: This is a best-effort.
-        res = requests.get(url, headers=headers, timeout=5)
+        # Use the optimize.parcelninja.com URL structure as requested
+        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
+        
+        # Add the provided JWT Token to Authorization header
+        headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Authorization': f'Bearer {PARCEL_NINJA_TOKEN}',
+            'Accept': 'application/json'  # Try asking for JSON first
+        }
+        
+        res = requests.get(url, headers=headers, timeout=8)
+        
         if res.status_code == 200:
-            return "Check Portal (Scraping Restricted)" 
-        return "Connection OK"
-    except:
-        return "Error checking status"
+            # 1. Try to parse as JSON (if API endpoint)
+            try:
+                data = res.json()
+                # Assuming standard ParcelNinja structure, look for 'status' or 'events'
+                # This is a guess based on standard APIs; adjustments might be needed based on actual response
+                status = data.get('status') or data.get('currentStatus') or "Active (JSON Found)"
+                return f"API Status: {status}"
+            except:
+                # 2. Fallback: Parse HTML if it returns a webpage
+                return "Connection OK (HTML Page Loaded)"
+        elif res.status_code == 401:
+            return "Auth Error (401) - Token might be invalid for this endpoint"
+        elif res.status_code == 404:
+            return "Tracking ID Not Found"
+        else:
+            return f"Error {res.status_code}"
+    except Exception as e:
+        return f"Check Failed: {str(e)[:30]}..."
 
 # ==========================================
 # 4. FRONTEND UI LOGIC
@@ -393,11 +407,15 @@ def show_rma_modal(record):
         with st.form("track_upd_modal"):
             new_track = st.text_input("New Tracking", value=raw_track)
             
-            # Simple Status Check Button inside Modal
+            # Updated Status Check Button
             if raw_track:
-                if st.form_submit_button("🔍 Check Courier Status (Experimental)"):
-                    status_info = check_courier_status(raw_track)
-                    st.info(f"Courier Status: {status_info}")
+                if st.form_submit_button("🔍 Check Courier Status"):
+                    with st.spinner("Checking Parcel Ninja..."):
+                        status_info = check_courier_status(raw_track)
+                    if "API Status" in status_info or "OK" in status_info:
+                        st.success(status_info)
+                    else:
+                        st.warning(status_info)
             
             if st.form_submit_button("Save"):
                 if not record['shipment_id']:
@@ -450,6 +468,7 @@ for rma in raw_data:
     track_url = None
     if track_str:
         primary_track = track_nums[0] if track_nums else ""
+        # Keep hyperlink to portal for user click
         track_url = f"https://portal.thecourierguy.co.za/track?ref={primary_track}"
 
     created_at = summary.get('createdAt')
@@ -515,11 +534,9 @@ for i, store in enumerate(STORES):
     with cols[i]:
         st.markdown(f"**{store['name']}**")
         
-        # Helper to show timestamp
         def show_btn_and_time(label, status, key):
             if st.button(f"{label}\n{c[status]}", key=key): 
                 handle_filter_click(store['url'], status)
-            # Show sync time if exists
             ts = get_last_sync(store['url'], status)
             if ts:
                 st.markdown(f"<div class='sync-time'>Updated: {ts[11:]}</div>", unsafe_allow_html=True)
@@ -530,7 +547,6 @@ for i, store in enumerate(STORES):
         show_btn_and_time("Approved", "Approved", f"a_{i}")
         show_btn_and_time("Received", "Received", f"r_{i}")
         
-        # No Track / Flagged are derived, so they don't have their own sync timestamp (they use Approved/Pending)
         if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}"): 
              handle_filter_click(store['url'], "NoTrack")
         if st.button(f"🚩 Flagged\n{c['Flagged']}", key=f"f_{i}"): 
