@@ -223,6 +223,7 @@ def check_courier_status(tracking_number, rma_id=None):
                     cleaned_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
                     cleaned_cells = [c for c in cleaned_cells if c]
                     if cleaned_cells:
+                        # Extracting strictly the first data row found
                         found_text = " - ".join(cleaned_cells)
                         break
             if found_text: final_status = re.sub(r'\s+', ' ', found_text).strip()
@@ -336,7 +337,8 @@ def push_comment_update(rma_id, comment_text):
 # 4. FRONTEND UI
 # ==========================================
 
-# Initialize persistent session state triggers
+# PERSISTENT TRIGGER FIX:
+# These variables track which dialog should open AFTER a rerun (rerun clears checkboxes)
 if 'modal_rma' not in st.session_state: st.session_state.modal_rma = None
 if 'modal_action' not in st.session_state: st.session_state.modal_action = None
 
@@ -370,13 +372,11 @@ def show_timeline_dialog(record):
             st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
             st.divider()
 
-# TRIGGER DIALOG FROM SESSION STATE
-# Explicit check 'is not None' for Pandas Series truth value fix
+# HANDLE MODAL TRIGGER (AFTER RERUN)
 if st.session_state.modal_rma is not None:
+    # Save values locally and CLEAR state so the loop stops
     current_rma = st.session_state.modal_rma
     current_act = st.session_state.modal_action
-    
-    # CLEAR STATE IMMEDIATELY so rerun doesn't loop
     st.session_state.modal_rma = None
     st.session_state.modal_action = None
     
@@ -384,7 +384,7 @@ if st.session_state.modal_rma is not None:
     elif current_act == 'view': show_timeline_dialog(current_rma)
 
 if 'filter_status' not in st.session_state: st.session_state.filter_status = "All"
-if st.session_state.get('show_toast'): st.toast("✅ API Sync Complete!", icon="🔄"); st.session_state['show_toast'] = False
+if st.session_state.get('show_toast'): st.toast("✅ Sync Complete!", icon="🔄"); st.session_state['show_toast'] = False
 
 def set_filter(f):
     st.session_state.filter_status = f
@@ -433,11 +433,11 @@ for rma in raw_data:
             "Tracking Number": track_link_url, "Tracking Status": local_status,
             "Created": str(created_at)[:10] if created_at else "N/A",
             "Updated": str(u_at)[:10] if u_at else "N/A", "Days since updated": str(d_since),
-            "Update Tracking Number": "Edit", "View Timeline": "View", 
+            "Update Tracking Number": False, "View Timeline": False,
             "DisplayTrack": track_str, "shipment_id": shipment_id, "full_data": rma, "is_nt": is_nt, "is_fg": is_fg
         })
 
-# --- Metrics ---
+# --- Metrics (ALL CAPS) ---
 b1, b2, b3, b4, b5 = st.columns(5)
 def get_status_time(s):
     ts = get_last_sync(s)
@@ -472,8 +472,7 @@ if not df_view.empty:
         display_df['No'] = (display_df.index + 1).astype(str)
         display_df['Days since updated'] = display_df['Days since updated'].astype(str)
 
-        # RENDER TABLE WITH SINGLE-CLICK BUTTONS
-        # Using ButtonColumn ensures one click trigger and consistent text labeling
+        # RENDER TABLE WITH CHECKBOX TRIGGERS (Replaced ButtonColumn to fix AttributeError)
         edited = st.data_editor(
             display_df[["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated", "Update Tracking Number", "View Timeline"]],
             use_container_width=True, height=700, hide_index=True, key="main_table",
@@ -483,23 +482,25 @@ if not df_view.empty:
                 "Order": st.column_config.TextColumn("Order", width="small"),
                 "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
                 "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
-                "Update Tracking Number": st.column_config.ButtonColumn("Edit", width="small"),
-                "View Timeline": st.column_config.ButtonColumn("View", width="small"),
+                "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
+                "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
                 "Days since updated": st.column_config.TextColumn("Days since updated", width="small")
             },
             disabled=["No", "RMA ID", "Order", "Status", "Tracking Number", "Tracking Status", "Created", "Updated", "Days since updated"]
         )
         
-        # HANDLE BUTTON CLICKS via edited_rows state (STRICT ROUTING)
+        # ONE-CLICK & AUTO-CLEAR LOGIC:
+        # Detect if a checkbox was clicked, save the intent, then RERUN to clear the tick mark
         if "main_table" in st.session_state:
             edits = st.session_state.main_table.get("edited_rows", {})
             for row_idx, changes in edits.items():
                 idx = int(row_idx)
-                if "Update Tracking Number" in changes:
+                # Check EXACTLY which column was clicked
+                if "Update Tracking Number" in changes and changes["Update Tracking Number"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'edit'
-                    st.rerun()
-                elif "View Timeline" in changes:
+                    st.rerun() # Rerun clears the checkbox state immediately
+                elif "View Timeline" in changes and changes["View Timeline"]:
                     st.session_state.modal_rma = display_df.iloc[idx]
                     st.session_state.modal_action = 'view'
                     st.rerun()
