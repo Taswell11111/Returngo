@@ -27,11 +27,12 @@ if not MY_API_KEY:
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
 
-# PARCEL NINJA TOKEN
+# PARCEL NINJA TOKEN (TASWELL)
 PARCEL_NINJA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6IjJhMDI4MWNhNTBmNDEwOTRiZTkyNzdhNTQ0MDZhZGRkODMyOGExODhhYmNiZGViMiIsIm5iZiI6MTc2ODk1ODUwMSwiZXhwIjoxODYzNjUyOTAxLCJpYXQiOjE3Njg5NTg1MDEsImlzcyI6Imh0dHBzOi8vb3B0aW1pc2UucGFyY2VsbmluamEuY29tIiwiYXVkIjoiaHR0cHM6Ly9vcHRpbWlzZS5wYXJjZWxuaW5qYS5jb20ifQ.lgAi9s2INGKrzGYb3Qn_PY6N1ekh3fSBP7JBgMhX0Pk"
 
 CACHE_EXPIRY_HOURS = 4
 DB_FILE = "rma_cache.db"
+# LOCK FOR THREAD-SAFE DB WRITES
 DB_LOCK = threading.Lock()
 
 STORES = [
@@ -91,6 +92,7 @@ def init_db():
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
+        # Check if column exists, if not migrate
         try:
             c.execute("SELECT courier_status FROM rmas LIMIT 1")
         except sqlite3.OperationalError:
@@ -113,6 +115,7 @@ def save_rma_to_db(rma_id, store_url, status, created_at, data, courier_status=N
             c = conn.cursor()
             now = datetime.now().isoformat()
             
+            # Preserve existing courier_status if not provided
             if courier_status is None:
                 c.execute("SELECT courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
                 row = c.fetchone()
@@ -207,7 +210,7 @@ def clear_db():
 
 init_db()
 
-# --- COURIER CHECK (Top-Down Greedy Regex) ---
+# --- COURIER CHECK (First-Row Priority Logic) ---
 def check_courier_status(tracking_number, rma_id=None):
     try:
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
@@ -218,51 +221,66 @@ def check_courier_status(tracking_number, rma_id=None):
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
         
+        # 8s timeout to prevent hanging the sync
         res = requests.get(url, headers=headers, timeout=8)
         final_status = "Unknown"
         
         if res.status_code == 200:
             content = res.text
             
-            # 1. Try JSON First
+            # 1. Try JSON First (Best case)
             try:
                 data = res.json()
-                status = data.get('status') or data.get('currentStatus')
-                if status: return f"API Status: {status}"
+                if 'history' in data and len(data['history']) > 0:
+                    final_status = data['history'][0].get('status') or data['history'][0].get('description')
+                else:
+                    final_status = data.get('status') or data.get('currentStatus')
+                
+                if final_status:
+                     if rma_id: update_courier_status_in_db(rma_id, final_status)
+                     return f"API: {final_status}"
             except: pass 
 
-            # 2. Strict "Top-Down" Regex Logic
-            # We want the VERY FIRST occurance of any status keyword.
-            # This relies on the page listing history newest-first (which is standard).
+            # 2. Regex "First Row" Logic
+            # Goal: Find the first <tr> that is NOT the header, and grab its text.
             
-            # Known statuses to look for
-            keywords = [
-                "Courier Cancelled", "Booked Incorrectly", "Delivered", 
-                "Out For Delivery", "Collected", "At Delivery Depot", 
-                "In Transit", "Waybill Printed", "Shipment Created"
-            ]
+            # Remove scripts/styles
+            clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL)
             
-            # Remove scripts/style tags to avoid matching code
-            clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
-            # Remove all other tags
-            clean_text = re.sub(r'<[^>]+>', ' ', clean_html)
+            # Find all <tr> tags
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', clean_html, re.DOTALL | re.IGNORECASE)
             
-            # Find the lowest index (earliest appearance) of ANY keyword
-            best_match = None
-            lowest_index = float('inf')
+            found_text = None
             
-            for k in keywords:
-                # Use regex search to find whole phrases, ignoring case
-                match = re.search(re.escape(k), clean_text, re.IGNORECASE)
-                if match:
-                    if match.start() < lowest_index:
-                        lowest_index = match.start()
-                        best_match = k # Keep the clean casing from our list
+            # Usually row 0 is header, row 1 is latest data
+            if len(rows) > 1:
+                target_row = rows[1] 
+                
+                # Extract columns <td>...</td>
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', target_row, re.DOTALL | re.IGNORECASE)
+                
+                if cols:
+                    # Clean up HTML tags inside cells
+                    row_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cols]
+                    row_text = [t for t in row_text if t] # Remove empty strings
+                    
+                    if row_text:
+                        # Join them: "2024-01-01 - Delivered"
+                        found_text = " - ".join(row_text)
             
-            if best_match:
-                final_status = f"Found: {best_match}"
+            if found_text:
+                final_status = re.sub(r'\s+', ' ', found_text).strip()
             else:
-                final_status = "Page Loaded (No Status Found)"
+                # Fallback to priority keyword search if table parse failed
+                prioritized_keywords = [
+                    r"courier\s+cancelled", r"booked\s+incorrectly", 
+                    r"delivered", r"out\s+for\s+delivery", r"collected", 
+                    r"at\s+delivery\s+depot", r"in\s+transit", r"created"
+                ]
+                for k in prioritized_keywords:
+                    if re.search(k, clean_html, re.IGNORECASE):
+                        final_status = k.replace(r"\s+", " ").title()
+                        break
             
         elif res.status_code == 404:
             final_status = "Tracking Not Found"
@@ -489,6 +507,7 @@ def show_rma_modal(record):
         with st.form("track_upd_modal"):
             new_track = st.text_input("New Tracking", value=raw_track)
             
+            # Updated Status Check Button
             if raw_track:
                 if st.form_submit_button("🔍 Check Courier Status"):
                     with st.spinner("Checking Parcel Ninja..."):
@@ -598,7 +617,7 @@ for rma in raw_data:
                 "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
                 "Status": status,
                 "TrackingNumber": track_url if track_url else track_str,
-                "TrackingStatus": local_status,
+                "TrackingStatus": local_status, # NEW COLUMN
                 "DisplayTrack": track_str,
                 "Created": str(created_at)[:10] if created_at else "N/A",
                 "Updated": str(updated_at)[:10] if updated_at else "N/A",
