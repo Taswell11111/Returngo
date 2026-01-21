@@ -7,7 +7,6 @@ import os
 import threading
 import time
 import re
-from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -16,291 +15,224 @@ import concurrent.futures
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
+st.set_page_config(page_title="Levi's RMA Ops", layout="wide", page_icon="📤")
 
-# --- ACCESS SECRETS ---
+# ACCESS SECRETS
 try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-except (FileNotFoundError, KeyError):
+except (FileNotFoundError, KeyError, Exception):
     MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
 
 if not MY_API_KEY:
-    st.error("API Key not found! Please set 'RETURNGO_API_KEY' in Streamlit secrets or env vars.")
+    st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
 
-# IMPORTANT: move this token into secrets/env if you can.
+# PARCEL NINJA TOKEN (move to secrets/env; do NOT hardcode)
 try:
     PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
 except Exception:
     PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
 
+CACHE_EXPIRY_HOURS = 4
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
 
-# Efficiency controls
-CACHE_EXPIRY_HOURS = 4
-COURIER_REFRESH_HOURS = 12
-MAX_WORKERS = 3            # keep concurrency low to avoid 429
-RG_RPS = 2                 # soft pacing
-SYNC_OVERLAP_MINUTES = 5
+# Keep concurrency low to avoid 429 rate limits
+MAX_WORKERS = 3
 
-ACTIVE_STATUSES = ["Pending", "Approved", "Received"]  # "Open RMAs"
-
-# ==========================================
-# 1b. STYLING
-# ==========================================
+# --- STYLING ---
 st.markdown(
     """
     <style>
-      :root{
-        --bg:#0b0f16;
-        --panel:#111827;
-        --panel2:#0f172a;
-        --border:#273244;
-        --text:#e5e7eb;
-        --muted:#9ca3af;
-        --accent:#c41230;
-        --accent2:#ef4444;
-        --ok:#22c55e;
-      }
+    .stApp { background-color: #0e1117; color: white; }
 
-      .stApp { background: radial-gradient(1200px 600px at 20% 0%, #111827 0%, var(--bg) 55%); color: var(--text); }
-
-      /* Top header */
-      .hdr-title { font-size: 44px; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 6px 0; }
-      .hdr-sub { color: var(--muted); font-weight: 600; margin-top: 0; }
-
-      /* Action buttons (right side) */
-      div.stButton > button {
+    div.stButton > button {
         width: 100%;
-        border: 1px solid var(--border);
-        background: linear-gradient(180deg, #111827 0%, #0b1220 100%);
-        color: var(--text);
-        border-radius: 12px;
-        padding: 12px 14px;
-        font-size: 15px;
-        font-weight: 800;
-      }
-      div.stButton > button:hover {
-        border-color: var(--accent);
-        color: var(--accent);
-      }
-
-      /* Metric tile buttons */
-      .tile-time {
-        display:flex;
-        justify-content:center;
-        font-size: 12px;
-        font-weight: 800;
-        color: var(--muted);
-        margin: 2px 0 6px 0;
-      }
-
-      /* Reduce the tiny sync buttons by ~50% */
-      button[kind="secondary"]{
-        padding: 6px 8px !important;
-        font-size: 12px !important;
-        border-radius: 10px !important;
-      }
-
-      /* Make the small sync button sit tight under the tile button */
-      .tight-under { margin-top: -6px; }
-
-      /* Filters row chips */
-      .chip-row {
-        display:flex; gap:10px; align-items:center; margin: 8px 0 0 0;
-      }
-      .chip-hint { color: var(--muted); font-weight: 700; font-size: 13px; margin-bottom: 6px; }
-
-      /* Data editor tweaks */
-      [data-testid="stDataEditor"]{
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        overflow: hidden;
-        background: rgba(17,24,39,0.65);
-      }
-
-      /* Dialog styling */
-      div[data-testid="stDialog"] {
-        background: linear-gradient(180deg, #0b1220 0%, #0b0f16 100%);
-        border: 1px solid var(--accent);
-        border-radius: 14px;
-      }
+        border: 1px solid #4b5563;
+        background-color: #1f2937;
+        color: white;
+        border-radius: 8px;
+        padding: 12px 24px;
+        font-size: 16px;
+        font-weight: bold;
+    }
+    div.stButton > button:hover {
+        border-color: #c41230;
+        color: #c41230;
+    }
+    div[data-testid="stDialog"] {
+        background-color: #1a1a1a;
+        border: 1px solid #c41230;
+    }
+    .sync-time {
+        font-size: 0.8em;
+        color: #888;
+        text-align: center;
+        margin-top: -10px;
+        margin-bottom: 10px;
+    }
     </style>
-    """,
+""",
     unsafe_allow_html=True,
 )
 
-# ==========================================
-# 2. HTTP SESSIONS + RATE LIMITING
-# ==========================================
-_thread_local = threading.local()
-_rate_lock = threading.Lock()
-_last_req_ts = 0.0
-
-
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso_utc(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat()
-
-
-def _sleep_for_rate_limit():
-    global _last_req_ts
-    if RG_RPS <= 0:
-        return
-    min_interval = 1.0 / float(RG_RPS)
-    with _rate_lock:
-        now = time.time()
-        wait = (_last_req_ts + min_interval) - now
-        if wait > 0:
-            time.sleep(wait)
-        _last_req_ts = time.time()
-
-
-def get_thread_session() -> requests.Session:
-    s = getattr(_thread_local, "session", None)
-    if s is not None:
-        return s
-
-    s = requests.Session()
-    retries = Retry(
-        total=5,
-        connect=5,
-        read=5,
-        status=5,
-        backoff_factor=1,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "PUT", "POST"]),
-        respect_retry_after_header=True,
-        raise_on_status=False,
-    )
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    _thread_local.session = s
-    return s
-
-
-def rg_headers() -> dict:
-    return {"x-api-key": MY_API_KEY, "x-shop-name": STORE_URL}
-
-
-def _extract_rate_headers(headers: dict) -> dict:
-    """Try to surface any rate-limit headers if ReturnGO provides them."""
-    keep = {}
-    for k, v in headers.items():
-        lk = k.lower()
-        if "rate" in lk or "retry-after" in lk:
-            keep[k] = v
-    return keep
-
-
-def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
-    """ReturnGO request wrapper with pacing + 429 backoff."""
-    session = get_thread_session()
-    headers = headers or rg_headers()
-
-    backoff = 1
-    last_rate_hdrs = None
-
-    for attempt in range(1, 6):
-        _sleep_for_rate_limit()
-        res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
-        last_rate_hdrs = _extract_rate_headers(res.headers)
-
-        if res.status_code != 429:
-            return res, last_rate_hdrs
-
-        # 429
-        ra = res.headers.get("Retry-After")
-        if ra and ra.isdigit():
-            sleep_s = int(ra)
-        else:
-            sleep_s = backoff
-            backoff = min(backoff * 2, 30)
-
-        if attempt == 1:
-            st.warning(
-                "ReturnGO rate limit reached (429). Slowing down and retrying. "
-                "Consider fewer sync clicks (or ask ReturnGO to increase quota)."
-            )
-            if last_rate_hdrs:
-                st.caption(f"Rate headers: {last_rate_hdrs}")
-
-        time.sleep(sleep_s)
-
-    return res, last_rate_hdrs
+@st.cache_resource
+def get_session():
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    return session
 
 
 # ==========================================
-# 3. DATABASE
+# 2. DATABASE MANAGER
 # ==========================================
-
 def init_db():
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
 
+        # Create tables if needed
         c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rmas (
-                rma_id TEXT PRIMARY KEY,
+            """CREATE TABLE IF NOT EXISTS rmas
+               (rma_id TEXT PRIMARY KEY,
                 store_url TEXT,
                 status TEXT,
                 created_at TEXT,
                 json_data TEXT,
-                last_fetched TEXT,
-                courier_status TEXT,
-                courier_last_checked TEXT
-            )
-            """
+                last_fetched TIMESTAMP,
+                courier_status TEXT)"""
         )
-
         c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sync_logs (
-                scope TEXT PRIMARY KEY,
-                last_sync_iso TEXT
-            )
-            """
+            """CREATE TABLE IF NOT EXISTS sync_logs
+               (status TEXT,
+                last_sync TIMESTAMP,
+                PRIMARY KEY (status))"""
         )
 
-        # Migrations (if DB existed)
-        cols_rmas = {row[1] for row in c.execute("PRAGMA table_info(rmas)").fetchall()}
-        for col, coldef in [
-            ("courier_status", "TEXT"),
-            ("courier_last_checked", "TEXT"),
-            ("last_fetched", "TEXT"),
-        ]:
-            if col not in cols_rmas:
-                try:
-                    c.execute(f"ALTER TABLE rmas ADD COLUMN {col} {coldef}")
-                except Exception:
-                    pass
-
-        # Handle old sync_logs schemas if they exist
-        cols_sync = {row[1] for row in c.execute("PRAGMA table_info(sync_logs)").fetchall()}
-        if ("status" in cols_sync) or ("last_sync" in cols_sync):
-            # rebuild to new schema
-            c.execute("CREATE TABLE IF NOT EXISTS sync_logs_new (scope TEXT PRIMARY KEY, last_sync_iso TEXT)")
+        # Best-effort migration for courier_status column
+        try:
+            c.execute("SELECT courier_status FROM rmas LIMIT 1")
+        except sqlite3.OperationalError:
             try:
-                c.execute(
-                    "INSERT OR REPLACE INTO sync_logs_new (scope, last_sync_iso) SELECT status, last_sync FROM sync_logs"
-                )
-            except Exception:
-                pass
-            try:
-                c.execute("DROP TABLE sync_logs")
-                c.execute("ALTER TABLE sync_logs_new RENAME TO sync_logs")
+                c.execute("ALTER TABLE rmas ADD COLUMN courier_status TEXT")
             except Exception:
                 pass
 
         conn.commit()
         conn.close()
+
+
+def save_rma_to_db(rma_id, status, created_at, data, courier_status=None):
+    with DB_LOCK:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            now = datetime.now().isoformat()
+
+            if courier_status is None:
+                c.execute("SELECT courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
+                row = c.fetchone()
+                if row:
+                    courier_status = row[0]
+
+            c.execute(
+                """INSERT OR REPLACE INTO rmas
+                   (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (str(rma_id), STORE_URL, status, created_at, json.dumps(data), now, courier_status),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+
+def update_courier_status_in_db(rma_id, status_text):
+    with DB_LOCK:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("UPDATE rmas SET courier_status=? WHERE rma_id=?", (status_text, str(rma_id)))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_rma_from_db(rma_id):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT json_data, last_fetched, courier_status FROM rmas WHERE rma_id=?", (str(rma_id),))
+        row = c.fetchone()
+        conn.close()
+
+    if row:
+        data = json.loads(row[0])
+        data["_local_courier_status"] = row[2]
+        try:
+            return data, datetime.fromisoformat(row[1])
+        except Exception:
+            return data, None
+
+    return None, None
+
+
+def get_all_active_from_db():
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute(
+            "SELECT json_data, store_url, courier_status FROM rmas "
+            "WHERE store_url=? AND status IN ('Pending', 'Approved', 'Received')",
+            (STORE_URL,),
+        )
+        rows = c.fetchall()
+        conn.close()
+
+    results = []
+    for r in rows:
+        data = json.loads(r[0])
+        data["store_url"] = r[1]
+        data["_local_courier_status"] = r[2]
+        results.append(data)
+    return results
+
+
+def get_local_ids_for_status(status):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT rma_id FROM rmas WHERE store_url=? AND status=?", (STORE_URL, status))
+        rows = c.fetchall()
+        conn.close()
+    return {r[0] for r in rows}
+
+
+def update_sync_log(status):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        c.execute("INSERT OR REPLACE INTO sync_logs (status, last_sync) VALUES (?, ?)", (status, now))
+        conn.commit()
+        conn.close()
+
+
+def get_last_sync(status):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        try:
+            c.execute("SELECT last_sync FROM sync_logs WHERE status=?", (status,))
+            row = c.fetchone()
+            return row[0] if row else None
+        except Exception:
+            return None
+        finally:
+            conn.close()
 
 
 def clear_db():
@@ -314,356 +246,199 @@ def clear_db():
             return False
 
 
-def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict, courier_status=None, courier_checked_iso=None):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        now_iso = _iso_utc(_now_utc())
-
-        if courier_status is None or courier_checked_iso is None:
-            c.execute("SELECT courier_status, courier_last_checked FROM rmas WHERE rma_id=?", (str(rma_id),))
-            row = c.fetchone()
-            if row:
-                if courier_status is None:
-                    courier_status = row[0]
-                if courier_checked_iso is None:
-                    courier_checked_iso = row[1]
-
-        c.execute(
-            """
-            INSERT OR REPLACE INTO rmas
-            (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status, courier_last_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(rma_id),
-                STORE_URL,
-                status,
-                created_at,
-                json.dumps(payload),
-                now_iso,
-                courier_status,
-                courier_checked_iso,
-            ),
-        )
-        conn.commit()
-        conn.close()
-
-
-def delete_rmas(rma_ids):
-    if not rma_ids:
-        return
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.executemany(
-            "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
-            [(str(i), STORE_URL) for i in rma_ids],
-        )
-        conn.commit()
-        conn.close()
-
-
-def get_rma(rma_id: str):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute(
-            "SELECT json_data, last_fetched, courier_status, courier_last_checked FROM rmas WHERE rma_id=?",
-            (str(rma_id),),
-        )
-        row = c.fetchone()
-        conn.close()
-
-    if not row:
-        return None
-
-    payload = json.loads(row[0])
-    payload["_local_courier_status"] = row[2]
-    payload["_local_courier_checked"] = row[3]
-    return payload, row[1]
-
-
-def get_all_open_from_db():
-    """Open = Pending/Approved/Received (what you want)."""
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        placeholders = ",".join(["?"] * len(ACTIVE_STATUSES))
-        sql = f"""
-            SELECT json_data, courier_status, courier_last_checked
-            FROM rmas
-            WHERE store_url=?
-              AND status IN ({placeholders})
-        """
-        c.execute(sql, (STORE_URL, *ACTIVE_STATUSES))
-        rows = c.fetchall()
-        conn.close()
-
-    results = []
-    for js, cstat, cchk in rows:
-        data = json.loads(js)
-        data["_local_courier_status"] = cstat
-        data["_local_courier_checked"] = cchk
-        results.append(data)
-    return results
-
-
-def get_local_ids_for_status(status: str):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT rma_id FROM rmas WHERE store_url=? AND status=?", (STORE_URL, status))
-        rows = c.fetchall()
-        conn.close()
-    return {r[0] for r in rows}
-
-
-def set_last_sync(scope: str, dt: datetime):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO sync_logs (scope, last_sync_iso) VALUES (?, ?)",
-            (scope, _iso_utc(dt)),
-        )
-        conn.commit()
-        conn.close()
-
-
-def get_last_sync(scope: str):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        try:
-            c.execute("SELECT last_sync_iso FROM sync_logs WHERE scope=?", (scope,))
-            row = c.fetchone()
-        except Exception:
-            row = None
-        conn.close()
-
-    if not row or not row[0]:
-        return None
-    try:
-        return datetime.fromisoformat(row[0])
-    except Exception:
-        return None
-
-
 init_db()
 
-# ==========================================
-# 4. PARCEL NINJA COURIER STATUS (cached)
-# ==========================================
 
-def check_courier_status(tracking_number: str) -> str:
+# --- COURIER CHECK (Strict Top-Row Extraction) ---
+def check_courier_status(tracking_number, rma_id=None):
     if not tracking_number or not PARCEL_NINJA_TOKEN:
-        return "Unknown"
+        final_status = "Unknown"
+        if rma_id:
+            update_courier_status_in_db(rma_id, final_status)
+        return final_status
 
     try:
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
-        headers = {"User-Agent": "Mozilla/5.0", "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}"}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/91.0.4472.124 Safari/537.36"
+            ),
+            "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}",
+        }
         res = requests.get(url, headers=headers, timeout=10)
+        final_status = "Unknown"
 
         if res.status_code == 200:
+            content = res.text
+            # JSON-first
             try:
                 data = res.json()
-                if isinstance(data, dict) and data.get("history"):
-                    top = data["history"][0]
-                    return top.get("status") or top.get("description") or "Unknown"
-                return data.get("status") or data.get("currentStatus") or "Unknown"
+                if isinstance(data, dict) and "history" in data and len(data["history"]) > 0:
+                    final_status = data["history"][0].get("status") or data["history"][0].get("description") or "Unknown"
+                else:
+                    final_status = data.get("status") or data.get("currentStatus") or "Unknown"
+
+                if final_status:
+                    if rma_id:
+                        update_courier_status_in_db(rma_id, final_status)
+                    return final_status
             except Exception:
                 pass
 
-            # fallback HTML parse (best-effort)
-            content = res.text
+            # HTML fallback
             clean_html = re.sub(r"<(script|style).*?</\1>", "", content, flags=re.DOTALL | re.IGNORECASE)
+            history_section = re.search(
+                r"<table[^>]*?tracking-history.*?>(.*?)</table>", clean_html, re.DOTALL | re.IGNORECASE
+            )
+            content_to_parse = history_section.group(1) if history_section else clean_html
 
-            for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
-                if re.search(re.escape(kw), clean_html, re.IGNORECASE):
-                    return kw
+            rows = re.findall(r"<tr[^>]*>(.*?)</tr>", content_to_parse, re.DOTALL | re.IGNORECASE)
+            found_text = None
+            for r_html in rows:
+                if "<th" in r_html.lower():
+                    continue
+                cells = re.findall(r"<td[^>]*>(.*?)</td>", r_html, re.DOTALL | re.IGNORECASE)
+                if cells:
+                    cleaned_cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+                    cleaned_cells = [c for c in cleaned_cells if c]
+                    if cleaned_cells:
+                        found_text = " - ".join(cleaned_cells)
+                        break
 
-            return "Unknown"
+            if found_text:
+                final_status = re.sub(r"\s+", " ", found_text).strip()
+            else:
+                for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
+                    if re.search(re.escape(kw), clean_html, re.IGNORECASE):
+                        final_status = kw
+                        break
 
-        if res.status_code == 404:
-            return "Tracking Not Found"
+        elif res.status_code == 404:
+            final_status = "Tracking Not Found"
+        else:
+            final_status = f"Error {res.status_code}"
 
-        return f"Error {res.status_code}"
-    except Exception:
-        return "Check Failed"
+        if rma_id:
+            update_courier_status_in_db(rma_id, final_status)
+        return final_status
+
+    except Exception as e:
+        msg = f"Check Failed: {str(e)[:20]}"
+        if rma_id:
+            update_courier_status_in_db(rma_id, msg)
+        return msg
 
 
 # ==========================================
-# 5. RETURNGO FETCHING (incremental + cached)
+# 3. BACKEND LOGIC
 # ==========================================
-
-def fetch_rma_list(statuses, since_dt: datetime | None):
-    all_summaries = []
+def fetch_all_pages(session, headers, status):
+    all_rmas = []
     cursor = None
-    status_param = ",".join(statuses)
-
-    updated_filter = ""
-    if since_dt is not None:
-        since_dt = since_dt - timedelta(minutes=SYNC_OVERLAP_MINUTES)
-        updated_filter = f"&rma_updated_at=gte:{_iso_utc(since_dt)}"
-
     while True:
-        base_url = f"https://api.returngo.ai/rmas?pagesize=500&status={status_param}{updated_filter}"
-        url = f"{base_url}&cursor={cursor}" if cursor else base_url
-
-        res, _rate = rg_request("GET", url, timeout=20)
-        if res.status_code != 200:
-            break
-
-        data = res.json() if res.content else {}
-        rmas = data.get("rmas", []) or []
-        if not rmas:
-            break
-
-        all_summaries.extend(rmas)
-        cursor = data.get("next_cursor")
-        if not cursor:
-            break
-
-    return all_summaries
-
-
-def should_refresh_detail(rma_id: str) -> bool:
-    cached = get_rma(rma_id)
-    if not cached:
-        return True
-
-    _, last_fetched_iso = cached
-    try:
-        last_dt = datetime.fromisoformat(last_fetched_iso)
-        if last_dt.tzinfo is None:
-            last_dt = last_dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return True
-
-    return (_now_utc() - last_dt) > timedelta(hours=CACHE_EXPIRY_HOURS)
-
-
-def maybe_refresh_courier(rma_payload: dict) -> tuple[str | None, str | None]:
-    shipments = rma_payload.get("shipments", []) or []
-    track_no = None
-    for s in shipments:
-        if s.get("trackingNumber"):
-            track_no = s.get("trackingNumber")
-            break
-    if not track_no:
-        return None, None
-
-    cached_status = rma_payload.get("_local_courier_status")
-    cached_checked = rma_payload.get("_local_courier_checked")
-
-    if cached_checked:
         try:
-            last_chk = datetime.fromisoformat(cached_checked)
-            if last_chk.tzinfo is None:
-                last_chk = last_chk.replace(tzinfo=timezone.utc)
-            if (_now_utc() - last_chk) <= timedelta(hours=COURIER_REFRESH_HOURS):
-                return cached_status, cached_checked
+            base_url = f"https://api.returngo.ai/rmas?status={status}&pagesize=50"
+            url = f"{base_url}&cursor={cursor}" if cursor else base_url
+            res = session.get(url, headers=headers, timeout=15)
+            if res.status_code != 200:
+                break
+            data = res.json()
+            rmas = data.get("rmas", [])
+            if not rmas:
+                break
+            all_rmas.extend(rmas)
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
         except Exception:
-            pass
-
-    status = check_courier_status(track_no)
-    checked_iso = _iso_utc(_now_utc())
-    return status, checked_iso
+            break
+    return all_rmas
 
 
-def fetch_rma_detail(rma_id: str):
-    cached = get_rma(rma_id)
-    if cached and not should_refresh_detail(rma_id):
-        return cached[0]
+def fetch_rma_detail(rma_summary):
+    rma_id = rma_summary.get("rmaId")
+    if not rma_id:
+        return None
 
-    url = f"https://api.returngo.ai/rma/{rma_id}"
-    res, _rate = rg_request("GET", url, timeout=20)
-    if res.status_code != 200:
-        return cached[0] if cached else None
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
 
-    data = res.json() if res.content else {}
-    summary = data.get("rmaSummary", {}) or {}
+    try:
+        res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            sum_data = data.get("rmaSummary", {})
+            shipments = data.get("shipments", [])
+            track_no = None
+            for s in shipments:
+                if s.get("trackingNumber"):
+                    track_no = s.get("trackingNumber")
+                    break
 
-    if cached:
-        data["_local_courier_status"] = cached[0].get("_local_courier_status")
-        data["_local_courier_checked"] = cached[0].get("_local_courier_checked")
+            c_status = None
+            if track_no:
+                try:
+                    c_status = check_courier_status(track_no, rma_id=rma_id)
+                except Exception:
+                    pass
 
-    courier_status, courier_checked = maybe_refresh_courier(data)
+            save_rma_to_db(
+                rma_id,
+                sum_data.get("status", "Unknown"),
+                sum_data.get("createdAt"),
+                data,
+                c_status,
+            )
+            data["_local_courier_status"] = c_status
+            return data
+    except Exception:
+        pass
 
-    upsert_rma(
-        rma_id=str(rma_id),
-        status=summary.get("status", "Unknown"),
-        created_at=summary.get("createdAt") or data.get("createdAt") or "",
-        payload=data,
-        courier_status=courier_status,
-        courier_checked_iso=courier_checked,
-    )
-
-    data["_local_courier_status"] = courier_status
-    data["_local_courier_checked"] = courier_checked
-    return data
+    return None
 
 
 def perform_sync(statuses=None):
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
+
     status_msg = st.empty()
-    status_msg.info("⏳ Connecting to ReturnGO...")
+    status_msg.info("⏳ Starting Deep Sync...")
 
+    active_summaries = []
     if statuses is None:
-        statuses = ACTIVE_STATUSES
+        statuses = ["Pending", "Approved", "Received"]
 
-    scope = ",".join(statuses)
-    since_dt = get_last_sync(scope)
+    for s in statuses:
+        api_rmas = fetch_all_pages(session, headers, s)
+        local_ids = get_local_ids_for_status(s)
+        api_ids = {r.get("rmaId") for r in api_rmas if r.get("rmaId")}
+        stale_ids = local_ids - api_ids
 
-    list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
-    summaries = fetch_rma_list(statuses, since_dt)
-    list_bar.progress(1.0, text=f"Fetched {len(summaries)} RMAs")
-    time.sleep(0.15)
-    list_bar.empty()
+        active_summaries.extend(api_rmas)
 
-    api_ids = {s.get("rmaId") for s in summaries if s.get("rmaId")}
+        # Note: original logic appended stale IDs as "summaries" to refetch.
+        # If an ID no longer exists upstream, detail fetch will just fail and do nothing.
+        for stale_id in stale_ids:
+            active_summaries.append({"rmaId": stale_id})
 
-    # tidy locally cached open RMAs if we synced all open
-    if set(statuses) == set(ACTIVE_STATUSES):
-        local_open_ids = set()
-        for stt in ACTIVE_STATUSES:
-            local_open_ids |= get_local_ids_for_status(stt)
-        stale = local_open_ids - api_ids
-        delete_rmas(stale)
+        update_sync_log(s)
 
-    # fetch details only if stale
-    to_fetch = [rid for rid in api_ids if should_refresh_detail(rid)]
-    total = len(to_fetch)
-    status_msg.info(f"⏳ Syncing {total} records...")
-
+    total = len(active_summaries)
     if total > 0:
-        bar = st.progress(0, text="Downloading Details...")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [ex.submit(fetch_rma_detail, rid) for rid in to_fetch]
-            done = 0
-            for _ in concurrent.futures.as_completed(futures):
-                done += 1
-                bar.progress(done / total, text=f"Syncing: {done}/{total}")
-        bar.empty()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            list(executor.map(fetch_rma_detail, active_summaries))
 
-    now = _now_utc()
-    set_last_sync(scope, now)
-
-    # Set "last full sync" only when syncing all open statuses
-    if set(statuses) == set(ACTIVE_STATUSES):
-        st.session_state["last_full_sync"] = now.strftime("%Y-%m-%d %H:%M")
-
+    st.session_state["last_sync"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     st.session_state["show_toast"] = True
     status_msg.success("✅ Sync Complete!")
     st.rerun()
 
 
-# ==========================================
-# 6. MUTATIONS (Tracking + Notes)
-# ==========================================
-
 def push_tracking_update(rma_id, shipment_id, tracking_number):
-    headers = {**rg_headers(), "Content-Type": "application/json"}
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
     payload = {
         "status": "LabelCreated",
         "carrierName": "CourierGuy",
@@ -671,207 +446,75 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         "trackingURL": f"https://optimise.parcelninja.com/shipment/track/{tracking_number}",
         "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
     }
-
-    res, _rate = rg_request("PUT", f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, timeout=15, json_body=payload)
-    if res.status_code == 200:
-        fetch_rma_detail(rma_id)  # refresh this one
-        return True, "Success"
-    return False, f"API Error {res.status_code}: {res.text}"
+    try:
+        res = session.put(
+            f"https://api.returngo.ai/shipment/{shipment_id}",
+            headers=headers,
+            json=payload,
+            timeout=10,
+        )
+        if res.status_code == 200:
+            fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
+            if fresh_res.status_code == 200:
+                fresh_data = fresh_res.json()
+                summary = fresh_data.get("rmaSummary", {})
+                save_rma_to_db(rma_id, summary.get("status", "Approved"), summary.get("createdAt"), fresh_data)
+            return True, "Success"
+        return False, f"API Error {res.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 
 def push_comment_update(rma_id, comment_text):
-    headers = {**rg_headers(), "Content-Type": "application/json"}
+    session = get_session()
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL, "Content-Type": "application/json"}
     payload = {"text": comment_text, "isPublic": False}
 
-    res, _rate = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, timeout=15, json_body=payload)
-    if res.status_code in (200, 201):
-        fetch_rma_detail(rma_id)
-        return True, "Success"
-    return False, f"API Error {res.status_code}: {res.text}"
-
-
-# ==========================================
-# 7. EXTRACTION HELPERS (dates + resolution)
-# ==========================================
-
-def _try_parse_dt(val) -> datetime | None:
-    if not val:
-        return None
+    # IMPORTANT: Use /comment (not /note) as per your earlier working version
     try:
-        s = str(val)
-        s = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _find_event_date(payload: dict, want: list[str]) -> datetime | None:
-    """
-    Best-effort: scan common places for event/status timelines.
-    want: list of keywords (any match)
-    """
-    want_l = [w.lower() for w in want]
-
-    def match_name(x: str) -> bool:
-        xl = (x or "").lower()
-        return any(w in xl for w in want_l)
-
-    # Common containers
-    candidates = []
-    summary = payload.get("rmaSummary") or {}
-    for key in ["events", "statusHistory", "timeline", "history"]:
-        v = summary.get(key)
-        if isinstance(v, list):
-            candidates.extend(v)
-
-    for key in ["events", "statusHistory", "timeline", "history"]:
-        v = payload.get(key)
-        if isinstance(v, list):
-            candidates.extend(v)
-
-    # Sometimes shipment-level events exist
-    shipments = payload.get("shipments") or []
-    for sh in shipments:
-        for key in ["events", "statusHistory", "history", "timeline"]:
-            v = sh.get(key)
-            if isinstance(v, list):
-                candidates.extend(v)
-
-    # comments might contain datetime + text
-    comments = payload.get("comments") or []
-    for c in comments:
-        candidates.append(c)
-
-    found = []
-    for e in candidates:
-        if not isinstance(e, dict):
-            continue
-        name = (
-            e.get("eventName")
-            or e.get("name")
-            or e.get("type")
-            or e.get("status")
-            or e.get("event")
-            or ""
+        res = session.post(
+            f"https://api.returngo.ai/rma/{rma_id}/comment",
+            headers=headers,
+            json=payload,
+            timeout=10,
         )
-        if not match_name(str(name)):
-            continue
-
-        for dkey in ["eventDate", "datetime", "createdAt", "date", "timestamp", "time"]:
-            dt = _try_parse_dt(e.get(dkey))
-            if dt:
-                found.append(dt)
-                break
-
-    if not found:
-        return None
-    # earliest is usually the moment it happened
-    return sorted(found)[0]
-
-
-def _resolution_types(payload: dict) -> str:
-    """
-    Best-effort: find resolutionType per item. If multiple distinct -> Mix.
-    """
-    types = set()
-
-    # Try common item arrays
-    for key in ["items", "rmaItems", "returnedItems", "products", "lineItems"]:
-        arr = payload.get(key)
-        if isinstance(arr, list):
-            for it in arr:
-                if not isinstance(it, dict):
-                    continue
-                for rk in ["resolutionType", "resolution", "resolution_type", "refundType", "refundMethod"]:
-                    v = it.get(rk)
-                    if v:
-                        types.add(str(v).strip())
-                # Sometimes nested
-                reso = it.get("resolution") if isinstance(it.get("resolution"), dict) else None
-                if reso:
-                    for rk in ["type", "resolutionType", "method", "name"]:
-                        v = reso.get(rk)
-                        if v:
-                            types.add(str(v).strip())
-
-    # also check summary-level
-    summ = payload.get("rmaSummary") or {}
-    for rk in ["resolutionType", "resolution", "resolution_type"]:
-        v = summ.get(rk)
-        if v:
-            types.add(str(v).strip())
-
-    if not types:
-        return "Unknown"
-    if len(types) == 1:
-        return next(iter(types))
-    return "Mix"
-
-
-def _resolution_actioned(payload: dict) -> str:
-    """
-    Best-effort indicator:
-    - Looks for transaction/refund completed, or exchange/replacement created.
-    """
-    text = json.dumps(payload).lower()
-
-    # Refund indicators
-    if any(x in text for x in ["refundstatus", "refunded", "refund paid", "refund completed", "refund_complete", "refund succeeded"]):
-        return "Yes"
-    if any(x in text for x in ["paymentstatus", "paid", "settled"]) and "refund" in text:
-        return "Yes"
-
-    # Exchange indicators
-    if any(x in text for x in ["exchangeorder", "replacementorder", "new order", "exchange created", "replacement created"]):
-        return "Yes"
-
-    # If resolution exists but no clear indicator
-    if "resolution" in text or "refund" in text or "exchange" in text:
-        return "Unknown"
-
-    return "No"
+        if res.status_code in (200, 201):
+            fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
+            if fresh_res.status_code == 200:
+                fresh_data = fresh_res.json()
+                summary = fresh_data.get("rmaSummary", {})
+                save_rma_to_db(rma_id, summary.get("status", "Approved"), summary.get("createdAt"), fresh_data)
+            return True, "Success"
+        return False, f"API Error {res.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 
 # ==========================================
-# 8. UI STATE
+# 4. FRONTEND UI
 # ==========================================
 
-if "filter_mode" not in st.session_state:
-    st.session_state.filter_mode = "OPEN"   # default view
-if "filter_status" not in st.session_state:
-    st.session_state.filter_status = "OPEN" # OPEN / Pending / Approved / Received
-if "search_query_input" not in st.session_state:
-    st.session_state.search_query_input = ""
-if "show_toast" not in st.session_state:
-    st.session_state.show_toast = False
-
-# Modal state
+# Initialize modal states
+if "modal_rma" not in st.session_state:
+    st.session_state.modal_rma = None
 if "modal_action" not in st.session_state:
     st.session_state.modal_action = None
-if "modal_record" not in st.session_state:
-    st.session_state.modal_record = None
-
-# ==========================================
-# 9. DIALOGS (NO FORCED RERUN ON OPEN)
-# ==========================================
+if "table_key" not in st.session_state:
+    st.session_state.table_key = 0
 
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
     st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
     with st.form("upd_track"):
-        new_track = st.text_input("New Tracking Number", value=record.get("DisplayTrack",""))
-        submitted = st.form_submit_button("Save Changes")
-        if submitted:
+        new_track = st.text_input("New Tracking Number", value=record.get("DisplayTrack", ""))
+        if st.form_submit_button("Save Changes"):
             if not record.get("shipment_id"):
                 st.error("No Shipment ID.")
             else:
                 ok, msg = push_tracking_update(record["RMA ID"], record["shipment_id"], new_track)
                 if ok:
                     st.success("Updated!")
-                    time.sleep(0.4)
+                    time.sleep(1)
                     st.rerun()
                 else:
                     st.error(msg)
@@ -879,7 +522,6 @@ def show_update_tracking_dialog(record):
 @st.dialog("View Timeline")
 def show_timeline_dialog(record):
     st.markdown(f"### Timeline for `{record['RMA ID']}`")
-
     with st.expander("➕ Add Comment", expanded=False):
         with st.form("add_comm"):
             comment_text = st.text_area("New Note")
@@ -887,7 +529,6 @@ def show_timeline_dialog(record):
                 ok, msg = push_comment_update(record["RMA ID"], comment_text)
                 if ok:
                     st.success("Posted!")
-                    time.sleep(0.2)
                     st.rerun()
                 else:
                     st.error(msg)
@@ -902,339 +543,243 @@ def show_timeline_dialog(record):
             st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
             st.divider()
 
-# ==========================================
-# 10. HEADER
-# ==========================================
+# HANDLE MODAL TRIGGER AFTER RERUN
+if st.session_state.modal_rma is not None:
+    current_rma = st.session_state.modal_rma
+    current_act = st.session_state.modal_action
+    st.session_state.modal_rma = None
+    st.session_state.modal_action = None
+    if current_act == "edit":
+        show_update_tracking_dialog(current_rma)
+    elif current_act == "view":
+        show_timeline_dialog(current_rma)
 
-col1, col2 = st.columns([3.2, 1.1])
+if "filter_status" not in st.session_state:
+    st.session_state.filter_status = "All"
 
+if st.session_state.get("show_toast"):
+    st.toast("✅ API Sync Complete!", icon="🔄")
+    st.session_state["show_toast"] = False
+
+def set_filter(f):
+    st.session_state.filter_status = f
+    # Only sync for actual ReturnGO statuses
+    if f in ["Pending", "Approved", "Received"]:
+        perform_sync(statuses=[f])
+    else:
+        st.rerun()
+
+# --- Header ---
+col1, col2 = st.columns([3, 1])
 with col1:
-    st.markdown('<div class="hdr-title">Levi\'s ReturnGO Ops Dashboard</div>', unsafe_allow_html=True)
-    last_full = st.session_state.get("last_full_sync", "N/A")
-    st.markdown(
-        f'<div class="hdr-sub">CONNECTED TO: {STORE_URL.upper()} | LAST FULL SYNC: <span style="color:var(--ok)">{last_full}</span></div>',
-        unsafe_allow_html=True
-    )
-
+    st.title("Levi's ReturnGO Ops Dashboard")
+    st.markdown(f"**CONNECTED TO:** {STORE_URL.upper()} | **LAST SYNC:** :green[{st.session_state.get('last_sync', 'N/A')}]")
+    search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
 with col2:
-    if st.button("🔄 Sync Open RMAs", type="primary"):
-        perform_sync(ACTIVE_STATUSES)
-
+    if st.button("🔄 Sync All Data", type="primary"):
+        perform_sync()
     if st.button("🗑️ Reset Cache", type="secondary"):
         if clear_db():
             st.success("Cache cleared!")
             st.rerun()
 
-# Toast
-if st.session_state.get("show_toast"):
-    st.toast("✅ Sync Complete!", icon="🔄")
-    st.session_state["show_toast"] = False
-
-# ==========================================
-# 11. LOAD + PROCESS DATA
-# ==========================================
-
-raw_data = get_all_open_from_db()
+# --- Data Processing ---
+raw_data = get_all_active_from_db()
 processed_rows = []
+counts = {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0}
 
-counts = {"Pending": 0, "Approved": 0, "Received": 0}
 for rma in raw_data:
     summary = rma.get("rmaSummary", {}) or {}
     shipments = rma.get("shipments", []) or []
     comments = rma.get("comments", []) or []
 
     status = summary.get("status", "Unknown")
-    if status in counts:
-        counts[status] += 1
-
     rma_id = summary.get("rmaId", "N/A")
-    order_name = summary.get("order_name", summary.get("orderName", "N/A"))
+    order_name = summary.get("order_name", "N/A")
 
-    # Tracking
     track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
     track_str = ", ".join(track_nums) if track_nums else ""
     shipment_id = shipments[0].get("shipmentId") if shipments else None
+    local_status = rma.get("_local_courier_status", "")
 
-    local_status = rma.get("_local_courier_status", "") or ""
     track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
-    # Dates (best-effort)
-    req_dt = _find_event_date(rma, ["rma_created", "created", "rma created"]) or _try_parse_dt(summary.get("createdAt"))
-    appr_dt = _find_event_date(rma, ["rma_approved", "approved"]) or _try_parse_dt(summary.get("approvedAt"))
-    recv_dt = _find_event_date(rma, ["shipment_received", "received", "shipment received", "rma_received"])
+    created_at = summary.get("createdAt")
+    if not created_at:
+        for evt in summary.get("events", []) or []:
+            if evt.get("eventName") == "RMA_CREATED":
+                created_at = evt.get("eventDate")
+                break
 
-    # resolutionType + actioned
-    res_type = _resolution_types(rma)
-    res_actioned = _resolution_actioned(rma)
+    u_at = rma.get("lastUpdated")
+    d_since = 0
+    if u_at:
+        try:
+            d_since = (
+                datetime.now(timezone.utc).date()
+                - datetime.fromisoformat(u_at.replace("Z", "+00:00")).date()
+            ).days
+        except Exception:
+            pass
 
-    # Flags
+    if status in counts:
+        counts[status] += 1
+
     is_nt = (status == "Approved" and not track_str)
-    is_fg = any("flagged" in (c.get("htmlText", "").lower()) for c in comments)
+    is_fg = any("flagged" in (c.get("htmlText", "") or "").lower() for c in comments)
 
-    processed_rows.append(
-        {
-            "No": "",
-            "RMA ID": rma_id,
-            "RMA URL": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
-            "Order": order_name,
-            "Current Status": status,
-            "Tracking Number": track_link_url,
-            "Tracking Status": local_status,
-            "Requested date": req_dt.date().isoformat() if req_dt else "N/A",
-            "Approved date": appr_dt.date().isoformat() if appr_dt else "N/A",
-            "Received date": recv_dt.date().isoformat() if recv_dt else "N/A",
-            "resolutionType": res_type,
-            "Resolution actioned": res_actioned,
-            "Days since updated": "",  # optional placeholder
-            "Update Tracking": False,
-            "View Timeline": False,
-            "DisplayTrack": track_str,
-            "shipment_id": shipment_id,
-            "full_data": rma,
-            "is_nt": is_nt,
-            "is_fg": is_fg,
-        }
-    )
+    if is_nt:
+        counts["NoTrack"] += 1
+    if is_fg:
+        counts["Flagged"] += 1
 
-df_view = pd.DataFrame(processed_rows)
+    q = (search_query or "").strip().lower()
+    if (not q) or (q in str(rma_id).lower() or q in str(order_name).lower() or q in str(track_str).lower()):
+        processed_rows.append(
+            {
+                "No": "",
+                "RMA ID": rma_id,
+                "Order": order_name,
+                "Status": status,
+                "Tracking Number": track_link_url,
+                "Tracking Status": local_status,
+                "Created": str(created_at)[:10] if created_at else "N/A",
+                "Updated": str(u_at)[:10] if u_at else "N/A",
+                "Days since updated": str(d_since),
+                "Update Tracking Number": False,
+                "View Timeline": False,
+                "DisplayTrack": track_str,
+                "shipment_id": shipment_id,
+                "full_data": rma,
+                "is_nt": is_nt,
+                "is_fg": is_fg,
+            }
+        )
 
-# ==========================================
-# 12. METRIC TILES (with sync buttons under)
-# ==========================================
+# --- Metrics (ALL CAPS) ---
+b1, b2, b3, b4, b5 = st.columns(5)
 
-def _tile_time(scope_key: str) -> str:
-    dt = get_last_sync(scope_key)
-    if not dt:
-        return "UPDATED: -"
-    return f"UPDATED: {dt.astimezone().strftime('%H:%M')}"
-
-b1, b2, b3, b4 = st.columns([1, 1, 1, 2.1])
-
-def set_status_filter(v):
-    st.session_state.filter_status = v
-    st.session_state.filter_mode = "OPEN"
-    st.rerun()
+def get_status_time(s):
+    ts = get_last_sync(s)
+    return f"<div class='sync-time'>UPDATED: {ts[11:] if ts else '-'}</div>"
 
 with b1:
-    st.markdown(f'<div class="tile-time">{_tile_time("Pending")}</div>', unsafe_allow_html=True)
-    if st.button(f"PENDING  {counts['Pending']}", key="tile_pending"):
-        set_status_filter("Pending")
-    st.markdown('<div class="tight-under"></div>', unsafe_allow_html=True)
-    if st.button("🔄 Sync Pending", key="sync_pending", type="secondary"):
-        perform_sync(["Pending"])
+    if st.button(f"PENDING\n{counts['Pending']}"):
+        set_filter("Pending")
+    st.markdown(get_status_time("Pending"), unsafe_allow_html=True)
 
 with b2:
-    st.markdown(f'<div class="tile-time">{_tile_time("Approved")}</div>', unsafe_allow_html=True)
-    if st.button(f"APPROVED  {counts['Approved']}", key="tile_approved"):
-        set_status_filter("Approved")
-    st.markdown('<div class="tight-under"></div>', unsafe_allow_html=True)
-    if st.button("🔄 Sync Approved", key="sync_approved", type="secondary"):
-        perform_sync(["Approved"])
+    if st.button(f"APPROVED\n{counts['Approved']}"):
+        set_filter("Approved")
+    st.markdown(get_status_time("Approved"), unsafe_allow_html=True)
 
 with b3:
-    st.markdown(f'<div class="tile-time">{_tile_time("Received")}</div>', unsafe_allow_html=True)
-    if st.button(f"RECEIVED  {counts['Received']}", key="tile_received"):
-        set_status_filter("Received")
-    st.markdown('<div class="tight-under"></div>', unsafe_allow_html=True)
-    if st.button("🔄 Sync Received", key="sync_received", type="secondary"):
-        perform_sync(["Received"])
+    if st.button(f"RECEIVED\n{counts['Received']}"):
+        set_filter("Received")
+    st.markdown(get_status_time("Received"), unsafe_allow_html=True)
 
 with b4:
-    st.markdown("&nbsp;", unsafe_allow_html=True)
-    if st.button("📋 List all Open RMAs", key="list_open"):
-        set_status_filter("OPEN")
+    if st.button(f"NO TRACKING\n{counts['NoTrack']}"):
+        set_filter("NoTrack")
+
+with b5:
+    if st.button(f"🚩 FLAGGED\n{counts['Flagged']}"):
+        set_filter("Flagged")
 
 st.divider()
 
-# ==========================================
-# 13. PRE-FILTERS + SEARCH + EXPORT
-# ==========================================
+df_view = pd.DataFrame(processed_rows)
 
-if "prefilter" not in st.session_state:
-    st.session_state.prefilter = "None"
+if df_view.empty:
+    st.warning("Database empty. Click Sync All Data to start.")
+    st.stop()
 
-pf1, pf2, pf3, pf4 = st.columns([1.2, 1.5, 2.8, 1.5])
-
-with pf1:
-    if st.button("Courier Cancelled", key="pf_cancelled"):
-        st.session_state.prefilter = "Courier Cancelled"
-        st.rerun()
-
-with pf2:
-    if st.button("Approved > Delivered", key="pf_appr_deliv"):
-        st.session_state.prefilter = "Approved > Delivered"
-        st.rerun()
-
-with pf3:
-    search_query = st.text_input(
-        "Search",
-        placeholder="🔍 Search Order, RMA, Tracking, Status...",
-        label_visibility="collapsed",
-        key="search_query_input",
-    )
-
-with pf4:
-    # Export button (Excel)
-    def _to_excel_bytes(df: pd.DataFrame) -> bytes:
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Open RMAs")
-        return output.getvalue()
-
-    st.download_button(
-        "⬇️ Export Excel",
-        data=_to_excel_bytes(df_view.drop(columns=["full_data", "DisplayTrack", "shipment_id"], errors="ignore")),
-        file_name=f"levis_open_rmas_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-# Column filter controls (Streamlit doesn't support true header filters in st.data_editor)
-with st.expander("Filters", expanded=False):
-    c1, c2, c3, c4 = st.columns(4)
-
-    statuses_sel = []
-    if not df_view.empty:
-        statuses_sel = sorted(df_view["Current Status"].dropna().unique().tolist())
-
-    with c1:
-        f_status = st.multiselect("Current Status", options=statuses_sel, default=[])
-    with c2:
-        f_track_contains = st.text_input("Tracking Status contains", value="")
-    with c3:
-        f_res_type = st.multiselect("resolutionType", options=sorted(df_view["resolutionType"].dropna().unique().tolist()) if not df_view.empty else [], default=[])
-    with c4:
-        f_actioned = st.multiselect("Resolution actioned", options=sorted(df_view["Resolution actioned"].dropna().unique().tolist()) if not df_view.empty else [], default=[])
-
-# ==========================================
-# 14. APPLY FILTERS
-# ==========================================
-
-display_df = df_view.copy()
-
-# Base view: OPEN means all three statuses
-if st.session_state.filter_status in ("Pending", "Approved", "Received"):
-    display_df = display_df[display_df["Current Status"] == st.session_state.filter_status]
+f_stat = st.session_state.filter_status
+if f_stat == "Pending":
+    display_df = df_view[df_view["Status"] == "Pending"]
+elif f_stat == "Approved":
+    display_df = df_view[df_view["Status"] == "Approved"]
+elif f_stat == "Received":
+    display_df = df_view[df_view["Status"] == "Received"]
+elif f_stat == "NoTrack":
+    display_df = df_view[df_view["is_nt"] == True]
+elif f_stat == "Flagged":
+    display_df = df_view[df_view["is_fg"] == True]
 else:
-    display_df = display_df[display_df["Current Status"].isin(ACTIVE_STATUSES)]
-
-# Prefilters
-pf = st.session_state.get("prefilter", "None")
-if pf == "Courier Cancelled":
-    display_df = display_df[display_df["Tracking Status"].astype(str).str.contains("Courier Cancelled", case=False, na=False)]
-elif pf == "Approved > Delivered":
-    display_df = display_df[
-        (display_df["Current Status"] == "Approved")
-        & (display_df["Tracking Status"].astype(str).str.contains("Delivered", case=False, na=False))
-    ]
-
-# Search filter
-sq = (search_query or "").strip().lower()
-if sq:
-    display_df = display_df[
-        display_df.apply(
-            lambda r: sq in str(r.get("RMA ID","")).lower()
-                      or sq in str(r.get("Order","")).lower()
-                      or sq in str(r.get("Tracking Number","")).lower()
-                      or sq in str(r.get("Tracking Status","")).lower()
-                      or sq in str(r.get("resolutionType","")).lower(),
-            axis=1
-        )
-    ]
-
-# Column filters
-if f_status:
-    display_df = display_df[display_df["Current Status"].isin(f_status)]
-if f_track_contains:
-    display_df = display_df[display_df["Tracking Status"].astype(str).str.contains(f_track_contains, case=False, na=False)]
-if f_res_type:
-    display_df = display_df[display_df["resolutionType"].isin(f_res_type)]
-if f_actioned:
-    display_df = display_df[display_df["Resolution actioned"].isin(f_actioned)]
-
-# Sort
-if not display_df.empty:
-    display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
-    display_df["No"] = (display_df.index + 1).astype(str)
-
-# ==========================================
-# 15. TABLE (RMA ID is hyperlink + actions)
-# ==========================================
+    display_df = df_view
 
 if display_df.empty:
     st.info("No matching records found.")
     st.stop()
 
+display_df = display_df.sort_values(by="Created", ascending=False).reset_index(drop=True)
+display_df["No"] = (display_df.index + 1).astype(str)
+display_df["Days since updated"] = display_df["Days since updated"].astype(str)
+
+# KEY CYCLING: Forces table to clear checkboxes after one is clicked
 edited = st.data_editor(
     display_df[
         [
             "No",
-            "RMA URL",
+            "RMA ID",
             "Order",
-            "Current Status",
+            "Status",
             "Tracking Number",
             "Tracking Status",
-            "Requested date",
-            "Approved date",
-            "Received date",
-            "resolutionType",
-            "Resolution actioned",
-            "Update Tracking",
+            "Created",
+            "Updated",
+            "Days since updated",
+            "Update Tracking Number",
             "View Timeline",
         ]
     ],
-    width="stretch",
+    use_container_width=True,
     height=700,
     hide_index=True,
-    key="main_table",
+    key=f"main_table_{st.session_state.table_key}",
     column_config={
         "No": st.column_config.TextColumn("No", width="small"),
-        "RMA URL": st.column_config.LinkColumn(
-            "RMA ID",
-            display_text=r"rmaid=(\d+)",
-            width="small"
-        ),
-        "Order": st.column_config.TextColumn("Order", width="medium"),
-        "Current Status": st.column_config.TextColumn("Current Status", width="small"),
+        "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
+        "Order": st.column_config.TextColumn("Order", width="small"),
         "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
-        "Requested date": st.column_config.TextColumn("Requested date", width="small"),
-        "Approved date": st.column_config.TextColumn("Approved date", width="small"),
-        "Received date": st.column_config.TextColumn("Received date", width="small"),
-        "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
-        "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="small"),
-        "Update Tracking": st.column_config.CheckboxColumn("Update Tracking", width="small"),
+        "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
         "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
+        "Days since updated": st.column_config.TextColumn("Days since updated", width="small"),
     },
     disabled=[
         "No",
-        "RMA URL",
+        "RMA ID",
         "Order",
-        "Current Status",
+        "Status",
         "Tracking Number",
         "Tracking Status",
-        "Requested date",
-        "Approved date",
-        "Received date",
-        "resolutionType",
-        "Resolution actioned",
+        "Created",
+        "Updated",
+        "Days since updated",
     ],
 )
 
-# IMPORTANT:
-# We do NOT st.rerun() to open dialogs (prevents jumping back to the top / row 1).
-# The checkbox may stay ticked until the next rerun; that's the trade-off to preserve position.
-state = st.session_state.get("main_table", {})
-edits = state.get("edited_rows", {}) if isinstance(state, dict) else {}
+# ONE-CLICK & AUTO-CLEAR LOGIC:
+# Detect checkbox, save record, increment table key to force clear, then rerun.
+editor_key = f"main_table_{st.session_state.table_key}"
+if editor_key in st.session_state:
+    edits = st.session_state[editor_key].get("edited_rows", {})
+    for row_idx, changes in edits.items():
+        idx = int(row_idx)
+        if idx < 0 or idx >= len(display_df):
+            continue
 
-for row_idx, changes in edits.items():
-    idx = int(row_idx)
-    record = display_df.iloc[idx].to_dict()
+        record = display_df.iloc[idx].to_dict()
 
-    if changes.get("Update Tracking"):
-        # open dialog without forcing a rerun
-        record["RMA ID"] = record.get("RMA URL","").split("rmaid=")[-1]
-        # rehydrate full_data etc from original df_view row
-        full_row = df_view[df_view["RMA ID"] == record["RMA ID"]]
-        if not full_row.empty:
-            record["full_data"] = full
+        if ("Update Tracking Number" in changes) and changes.get("Update Tracking Number"):
+            st.session_state.modal_rma = record
+            st.session_state.modal_action = "edit"
+            st.session_state.table_key += 1
+            st.rerun()
+
+        if ("View Timeline" in changes) and changes.get("View Timeline"):
+            st.session_state.modal_rma = record
+            st.session_state.modal_action = "view"
+            st.session_state.table_key += 1
+            st.rerun()
