@@ -8,7 +8,6 @@ import os
 import threading
 import time
 import re
-from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -20,7 +19,7 @@ from typing import Optional, Tuple, Dict, Callable, Set
 # ==========================================
 st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
 
-# --- Preserve scroll position across reruns ---
+# --- Preserve scroll position across reruns (page scroll) ---
 components.html(
     """
     <script>
@@ -54,15 +53,14 @@ DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
 
 # Efficiency controls
-CACHE_EXPIRY_HOURS = 24          # cache detail freshness window
-COURIER_REFRESH_HOURS = 12       # don't re-check courier tracking too often
-MAX_WORKERS = 3                  # ReturnGO docs recommend minimising concurrency
-RG_RPS = 2                       # soft rate-limit to reduce 429
-SYNC_OVERLAP_MINUTES = 5         # overlap window for incremental sync
+CACHE_EXPIRY_HOURS = 24
+COURIER_REFRESH_HOURS = 12
+MAX_WORKERS = 3
+RG_RPS = 2
+SYNC_OVERLAP_MINUTES = 5
 
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 
-# Thread-safe UI signal for 429s (never call st.* from worker threads)
 RATE_LIMIT_HIT = threading.Event()
 
 # ==========================================
@@ -71,7 +69,6 @@ RATE_LIMIT_HIT = threading.Event()
 st.markdown(
     """
     <style>
-      /* App background */
       .stApp {
         background: radial-gradient(1200px 600px at 20% 0%, rgba(196,18,48,0.08), transparent 60%),
                     radial-gradient(900px 500px at 90% 10%, rgba(59,130,246,0.08), transparent 55%),
@@ -79,34 +76,37 @@ st.markdown(
         color: #e5e7eb;
       }
 
-      /* Header typography */
+      /* Title */
       .title-wrap h1 {
-        font-size: 3.0rem;
-        margin-bottom: 0.2rem;
+        font-size: 3.1rem;
+        margin-bottom: 0.15rem;
         letter-spacing: 0.2px;
+        background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
       }
 
       .subtitle-bar {
         display: inline-flex;
         gap: 10px;
         align-items: center;
-        padding: 8px 12px;
+        padding: 8px 14px;
         border-radius: 999px;
         border: 1px solid rgba(148, 163, 184, 0.22);
         background: rgba(17, 24, 39, 0.55);
         box-shadow: 0 8px 20px rgba(0,0,0,0.20);
-        font-size: 1.02rem;
+        font-size: 1.05rem;
         color: #cbd5e1;
       }
       .subtitle-bar b { color: #e5e7eb; }
       .subtitle-dot {
-        width: 6px; height: 6px;
+        width: 7px; height: 7px;
         border-radius: 50%;
         background: rgba(196,18,48,0.9);
         display: inline-block;
       }
 
-      /* Card containers */
+      /* Cards */
       .card {
         background: rgba(17, 24, 39, 0.70);
         border: 1px solid rgba(148, 163, 184, 0.18);
@@ -115,7 +115,31 @@ st.markdown(
         box-shadow: 0 8px 20px rgba(0,0,0,0.25);
       }
 
-      /* "Updated" pill inside card */
+      .card.selected {
+        border: 1px solid rgba(34,197,94,0.55);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.34);
+      }
+
+      .card.selected .left-accent {
+        background: rgba(34,197,94,0.95);
+      }
+
+      .tile-inner {
+        position: relative;
+      }
+
+      /* Left accent strip (selection indicator) */
+      .left-accent {
+        position: absolute;
+        left: -12px;
+        top: -12px;
+        bottom: -10px;
+        width: 6px;
+        border-radius: 14px 0 0 14px;
+        background: rgba(148,163,184,0.18);
+      }
+
+      /* Updated pill */
       .updated-pill {
         display: inline-block;
         font-size: 0.80rem;
@@ -127,7 +151,7 @@ st.markdown(
         margin-bottom: 10px;
       }
 
-      /* Streamlit buttons */
+      /* Buttons */
       div.stButton > button {
         width: 100%;
         border: 1px solid rgba(148, 163, 184, 0.25) !important;
@@ -136,7 +160,7 @@ st.markdown(
         border-radius: 10px !important;
         padding: 12px 14px !important;
         font-size: 15px !important;
-        font-weight: 800 !important;
+        font-weight: 850 !important;
         transition: 0.15s ease-in-out;
       }
       div.stButton > button:hover {
@@ -145,29 +169,27 @@ st.markdown(
         transform: translateY(-1px);
       }
 
-      /* Smaller mini refresh buttons */
-      .mini-refresh div.stButton > button {
-        padding: 7px 10px !important;
+      /* Refresh box under each tile: lighter + touches main button */
+      .refresh-box {
+        margin-top: -2px;           /* touch main button border */
+        padding-top: 8px;
+        padding-bottom: 6px;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(148,163,184,0.14);
+        border-top: 0;
+        border-radius: 0 0 12px 12px;
+        display: flex;
+        justify-content: center;
+      }
+
+      .refresh-box div.stButton > button {
+        width: auto !important;     /* shrink-to-fit */
+        padding: 6px 12px !important;
         font-size: 13px !important;
-        font-weight: 800 !important;
         border-radius: 10px !important;
       }
 
-      /* Data editor tweaks */
-      [data-testid="stDataFrame"] {
-        border-radius: 14px;
-        overflow: hidden;
-        border: 1px solid rgba(148,163,184,0.18);
-      }
-
-      /* Dialog box styling */
-      div[data-testid="stDialog"] {
-        background-color: rgba(17, 24, 39, 0.95);
-        border: 1px solid rgba(196,18,48,0.55);
-        border-radius: 16px;
-      }
-
-      /* Sticky container class applied by JS */
+      /* Sticky container */
       .sticky-top {
         position: sticky !important;
         top: 0 !important;
@@ -179,16 +201,37 @@ st.markdown(
         margin-bottom: 8px;
       }
 
-      /* Reduce default vertical gaps a bit */
-      [data-testid="stVerticalBlock"] > div:has(.card) {
-        margin-top: 6px;
+      /* Data editor: attempt “fit content” */
+      [data-testid="stDataFrame"] {
+        border-radius: 14px;
+        overflow-x: auto;
+        border: 1px solid rgba(148,163,184,0.18);
       }
+      [data-testid="stDataFrame"] table {
+        table-layout: auto !important;
+      }
+
+      /* Dialog */
+      div[data-testid="stDialog"] {
+        background-color: rgba(17, 24, 39, 0.95);
+        border: 1px solid rgba(196,18,48,0.55);
+        border-radius: 16px;
+      }
+
+      /* Smaller Reset Cache button look (lighter) */
+      .reset-wrap div.stButton > button {
+        background: rgba(148,163,184,0.18) !important;
+        border-color: rgba(148,163,184,0.25) !important;
+        padding: 9px 12px !important;
+        font-size: 14px !important;
+      }
+
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Anchor + JS to “stick” the whole header block
+# Sticky anchor + JS
 st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True)
 components.html(
     """
@@ -197,7 +240,6 @@ components.html(
         const anchor = window.parent.document.querySelector('.sticky-anchor');
         if (!anchor) return;
 
-        // climb parents until we find a vertical block (Streamlit container)
         let el = anchor;
         for (let i = 0; i < 12; i++) {
           if (!el) break;
@@ -207,11 +249,9 @@ components.html(
           }
           el = el.parentElement;
         }
-        // fallback: just stick parent
         if (anchor.parentElement) anchor.parentElement.classList.add("sticky-top");
       }
 
-      // run now + after short delay (Streamlit DOM can hydrate)
       applySticky();
       setTimeout(applySticky, 250);
       setTimeout(applySticky, 800);
@@ -520,7 +560,7 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 init_db()
 
 # ==========================================
-# 4. PARCEL NINJA COURIER STATUS (cached)
+# 4. COURIER STATUS
 # ==========================================
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number or not PARCEL_NINJA_TOKEN:
@@ -540,13 +580,10 @@ def check_courier_status(tracking_number: str) -> str:
             except Exception:
                 pass
 
-            content = res.text
-            clean_html = re.sub(r"<(script|style).*?</\1>", "", content, flags=re.DOTALL | re.IGNORECASE)
-
+            clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
             for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                 if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                     return kw
-
             return "Unknown"
 
         if res.status_code == 404:
@@ -559,7 +596,7 @@ def check_courier_status(tracking_number: str) -> str:
 
 
 # ==========================================
-# 5. RETURNGO FETCHING (incremental + cached)
+# 5. RETURNGO FETCHING
 # ==========================================
 def fetch_rma_list(statuses, since_dt: Optional[datetime]):
     all_summaries = []
@@ -596,16 +633,13 @@ def should_refresh_detail(rma_id: str) -> bool:
     cached = get_rma(rma_id)
     if not cached:
         return True
-
     _, last_fetched_iso = cached
     try:
         last_dt = datetime.fromisoformat(last_fetched_iso)
     except Exception:
         return True
-
     if last_dt.tzinfo is None:
         last_dt = last_dt.replace(tzinfo=timezone.utc)
-
     return (_now_utc() - last_dt) > timedelta(hours=CACHE_EXPIRY_HOURS)
 
 
@@ -616,7 +650,6 @@ def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[st
         if s.get("trackingNumber"):
             track_no = s.get("trackingNumber")
             break
-
     if not track_no:
         return None, None
 
@@ -672,7 +705,6 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
         data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
     data["_local_courier_status"] = courier_status
     data["_local_courier_checked"] = courier_checked
-
     return data
 
 
@@ -696,27 +728,26 @@ def perform_sync(statuses=None, *, full=False):
     list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
     summaries = fetch_rma_list(statuses, since_dt)
     list_bar.progress(1.0, text=f"Fetched {len(summaries)} RMAs")
-    time.sleep(0.10)
+    time.sleep(0.08)
     list_bar.empty()
 
     api_ids = {s.get("rmaId") for s in summaries if s.get("rmaId")}
 
-    # tidy cache for open RMAs (only for the “all open” scope)
-    if set(statuses) == set(ACTIVE_STATUSES) and not full:
+    # tidy cache only for open statuses scope
+    if set(statuses) == set(ACTIVE_STATUSES) and not full and since_dt is not None:
         local_active_ids = set()
         for stt in ACTIVE_STATUSES:
             local_active_ids |= get_local_ids_for_status(stt)
         stale = local_active_ids - api_ids
         delete_rmas(stale)
 
-    # KEY BEHAVIOUR:
-    # - If we’re doing incremental (since_dt is not None), then EVERY rmaId returned by that list changed recently,
-    #   so refresh details regardless of cache freshness.
-    # - If full (since_dt is None), then respect cache expiry for efficiency.
+    # If incremental, force-refresh details for returned IDs (they changed)
     if since_dt is not None:
         to_fetch = list(api_ids)
+        force = True
     else:
         to_fetch = [rid for rid in api_ids if should_refresh_detail(rid)]
+        force = False
 
     total = len(to_fetch)
     status_msg.info(f"⏳ Syncing {total} records...")
@@ -724,7 +755,7 @@ def perform_sync(statuses=None, *, full=False):
     if total > 0:
         bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [ex.submit(fetch_rma_detail, rid, force=(since_dt is not None)) for rid in to_fetch]
+            futures = [ex.submit(fetch_rma_detail, rid, force=force) for rid in to_fetch]
             done = 0
             for _ in concurrent.futures.as_completed(futures):
                 done += 1
@@ -743,7 +774,6 @@ def perform_sync(statuses=None, *, full=False):
 
 
 def force_refresh_rma_ids(rma_ids, scope_label: str):
-    """Force-refresh details for specific RMAs (ignores cache window)."""
     ids = [str(i) for i in set(rma_ids) if i]
     if not ids:
         set_last_sync(scope_label, _now_utc())
@@ -770,7 +800,7 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
 
 
 # ==========================================
-# 6. MUTATIONS (Tracking + Comments)
+# 6. MUTATIONS
 # ==========================================
 def push_tracking_update(rma_id, shipment_id, tracking_number):
     headers = {**rg_headers(), "Content-Type": "application/json"}
@@ -807,7 +837,7 @@ def push_comment_update(rma_id, comment_text):
 
 
 # ==========================================
-# 7. Helpers (dates, resolution, actioned)
+# 7. Helpers
 # ==========================================
 def get_event_date_iso(rma_payload: dict, event_name: str) -> str:
     summary = rma_payload.get("rmaSummary", {}) or {}
@@ -818,13 +848,11 @@ def get_event_date_iso(rma_payload: dict, event_name: str) -> str:
 
 
 def get_received_date_iso(rma_payload: dict) -> str:
-    # Try common event names + shipment received hints
     for name in ("SHIPMENT_RECEIVED", "RMA_RECEIVED", "RMA_STATUS_RECEIVED"):
         dt = get_event_date_iso(rma_payload, name)
         if dt:
             return dt
 
-    # Try comments for "Shipment RECEIVED"
     for c in (rma_payload.get("comments") or []):
         txt = (c.get("htmlText", "") or "").lower()
         if "shipment" in txt and "received" in txt and c.get("datetime"):
@@ -855,17 +883,12 @@ def get_resolution_type(rma_payload: dict) -> str:
 
 
 def is_resolution_actioned(rma_payload: dict) -> bool:
-    # 1) Transactions with Success
     for t in (rma_payload.get("transactions") or []):
         if (t.get("status") or "").lower() == "success":
             return True
-
-    # 2) Exchange released (exchangeOrders present)
     ex_orders = rma_payload.get("exchangeOrders") or []
     if isinstance(ex_orders, list) and len(ex_orders) > 0:
         return True
-
-    # 3) Fallback: comments containing credit/refund/exchange release hints
     for c in (rma_payload.get("comments") or []):
         txt = (c.get("htmlText", "") or "").lower()
         if "transaction id" in txt and ("refund" in txt or "credited" in txt):
@@ -874,50 +897,49 @@ def is_resolution_actioned(rma_payload: dict) -> bool:
             return True
         if "total refund amount" in txt:
             return True
-
     return False
 
 
 def resolution_actioned_label(rma_payload: dict) -> str:
-    # give a human label where possible
     for t in (rma_payload.get("transactions") or []):
         if (t.get("status") or "").lower() == "success":
             typ = (t.get("type") or "").strip()
-            if typ:
-                return pretty_resolution(typ)
-            return "Yes"
+            return pretty_resolution(typ) if typ else "Yes"
     ex_orders = rma_payload.get("exchangeOrders") or []
     if isinstance(ex_orders, list) and len(ex_orders) > 0:
         return "Exchange released"
-    if is_resolution_actioned(rma_payload):
-        return "Yes"
     return "No"
 
 
-# ==========================================
-# 8. FRONTEND STATE
-# ==========================================
-if "modal_rma" not in st.session_state:
-    st.session_state.modal_rma = None
-if "modal_action" not in st.session_state:
-    st.session_state.modal_action = None
-if "table_key" not in st.session_state:
-    st.session_state.table_key = 0
+def parse_yyyy_mm_dd(s: str) -> Optional[datetime]:
+    try:
+        if not s or s == "N/A":
+            return None
+        return datetime.fromisoformat(s[:10])
+    except Exception:
+        return None
 
-# Multi-select filters
+
+def days_since(dt_str: str) -> str:
+    d = parse_yyyy_mm_dd(dt_str)
+    if not d:
+        return "N/A"
+    today = datetime.now().date()
+    return str((today - d.date()).days)
+
+
+# ==========================================
+# 8. STATE
+# ==========================================
 if "active_filters" not in st.session_state:
     st.session_state.active_filters = set()  # type: ignore
-
-# Search state
 if "search_query_input" not in st.session_state:
     st.session_state.search_query_input = ""
 
-# Global toast
 if st.session_state.get("show_toast"):
     st.toast("✅ Updated!", icon="🔄")
     st.session_state["show_toast"] = False
 
-# Show 429 warning
 if RATE_LIMIT_HIT.is_set():
     st.warning(
         "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
@@ -963,7 +985,7 @@ def show_update_tracking_dialog(record):
                 ok, msg = push_tracking_update(record["RMA ID"], record["shipment_id"], new_track)
                 if ok:
                     st.success("Updated!")
-                    time.sleep(0.25)
+                    time.sleep(0.2)
                     st.rerun()
                 else:
                     st.error(msg)
@@ -995,18 +1017,6 @@ def show_timeline_dialog(record):
             st.divider()
 
 
-# modal trigger after rerun
-if st.session_state.modal_rma is not None:
-    current_rma = st.session_state.modal_rma
-    current_act = st.session_state.modal_action
-    st.session_state.modal_rma = None
-    st.session_state.modal_action = None
-    if current_act == "edit":
-        show_update_tracking_dialog(current_rma)
-    elif current_act == "view":
-        show_timeline_dialog(current_rma)
-
-
 # ==========================================
 # 10. HEADER (STICKY)
 # ==========================================
@@ -1032,10 +1042,15 @@ with h2:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
         perform_sync()
-    if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
-        if clear_db():
-            st.success("Cache cleared!")
-            st.rerun()
+    # smaller reset centred under sync
+    cA, cB, cC = st.columns([1, 2, 1])
+    with cB:
+        st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
+        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
+            if clear_db():
+                st.success("Cache cleared!")
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.write("")
@@ -1046,7 +1061,6 @@ st.write("")
 raw_data = get_all_open_from_db()
 processed_rows = []
 
-# Base counts (statuses)
 counts = {
     "Pending": 0,
     "Approved": 0,
@@ -1085,7 +1099,6 @@ for rma in raw_data:
     actioned = is_resolution_actioned(rma)
     actioned_label = resolution_actioned_label(rma)
 
-    # Flags
     is_nt = (status == "Approved" and not track_str)
     is_fg = any("flagged" in (c.get("htmlText", "").lower()) for c in comments)
     is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status.lower())
@@ -1093,7 +1106,6 @@ for rma in raw_data:
     is_ra = actioned
     is_nra = (status == "Received") and (not actioned)
 
-    # Counts
     if status in ("Pending", "Approved", "Received"):
         counts[status] += 1
     if is_nt:
@@ -1109,7 +1121,6 @@ for rma in raw_data:
     if is_nra:
         counts["NoResolutionActioned"] += 1
 
-    # Search filter at row-build stage (faster)
     if not search_query or (
         search_query.lower() in str(rma_id).lower()
         or search_query.lower() in str(order_name).lower()
@@ -1118,8 +1129,8 @@ for rma in raw_data:
         processed_rows.append(
             {
                 "No": "",
-                "RMA ID": rma_id,
                 "RMA Link": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
+                "RMA ID": rma_id,
                 "Order": order_name,
                 "Current Status": status,
                 "Tracking Number": track_link_url,
@@ -1127,6 +1138,7 @@ for rma in raw_data:
                 "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
                 "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
                 "Received date": str(received_iso)[:10] if received_iso else "N/A",
+                "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A"),
                 "resolutionType": resolution_type if resolution_type else "N/A",
                 "Resolution actioned": actioned_label,
                 "Update Tracking Number": False,
@@ -1146,7 +1158,7 @@ for rma in raw_data:
 df_view = pd.DataFrame(processed_rows)
 
 # ==========================================
-# 12. FILTER DEFINITIONS (for multi-select)
+# 12. FILTER DEFINITIONS (multi-select)
 # ==========================================
 FilterFn = Callable[[pd.DataFrame], pd.Series]
 
@@ -1156,7 +1168,6 @@ FILTERS: Dict[str, Dict[str, object]] = {
     "Received": {"icon": "📦", "count_key": "Received", "scope": "Received", "fn": lambda d: d["Current Status"] == "Received"},
     "No Tracking": {"icon": "🚫", "count_key": "NoTracking", "scope": "FILTER_NoTracking", "fn": lambda d: d["is_nt"] == True},
     "Flagged": {"icon": "🚩", "count_key": "Flagged", "scope": "FILTER_Flagged", "fn": lambda d: d["is_fg"] == True},
-
     "Courier Cancelled": {"icon": "🛑", "count_key": "CourierCancelled", "scope": "FILTER_CourierCancelled", "fn": lambda d: d["is_cc"] == True},
     "Approved > Delivered": {"icon": "📬", "count_key": "ApprovedDelivered", "scope": "FILTER_ApprovedDelivered", "fn": lambda d: d["is_ad"] == True},
     "Resolution Actioned": {"icon": "💳", "count_key": "ResolutionActioned", "scope": "FILTER_ResolutionActioned", "fn": lambda d: d["is_ra"] == True},
@@ -1169,6 +1180,7 @@ def current_filter_mask(df: pd.DataFrame) -> pd.Series:
         return pd.Series([], dtype=bool)
     if not active:
         return pd.Series([True] * len(df), index=df.index)
+
     masks = []
     for name in active:
         cfg = FILTERS.get(name)
@@ -1176,43 +1188,14 @@ def current_filter_mask(df: pd.DataFrame) -> pd.Series:
             continue
         fn: FilterFn = cfg["fn"]  # type: ignore
         masks.append(fn(df))
+
     if not masks:
         return pd.Series([True] * len(df), index=df.index)
+
     out = masks[0].copy()
     for m in masks[1:]:
         out = out | m
     return out
-
-
-# ==========================================
-# 13. FILTER TILE UI (with mini refresh)
-# ==========================================
-def render_filter_tile(col, name: str, *, refresh_ids_provider: Callable[[], list], refresh_scope: str):
-    cfg = FILTERS[name]
-    icon = cfg["icon"]  # type: ignore
-    count_key = cfg["count_key"]  # type: ignore
-    scope = cfg["scope"]  # type: ignore
-
-    active: Set[str] = st.session_state.active_filters  # type: ignore
-    selected = (name in active)
-
-    count_val = counts.get(count_key, 0)
-    sel_mark = "✅ " if selected else ""
-    label = f"{sel_mark}{icon} {name.upper()} [{count_val}]"
-
-    with col:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
-
-        if st.button(label, key=f"flt_{name}", use_container_width=True):
-            toggle_filter(name)
-
-        st.markdown("<div class='mini-refresh'>", unsafe_allow_html=True)
-        if st.button("🔄 Refresh", key=f"ref_{name}", use_container_width=True):
-            ids = refresh_ids_provider()
-            force_refresh_rma_ids(ids, refresh_scope)
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def ids_for_filter(name: str) -> list:
@@ -1228,29 +1211,63 @@ def ids_for_filter(name: str) -> list:
     return df_view.loc[mask, "RMA ID"].astype(str).tolist()
 
 
-# Row 1 (5 tiles)
+# ==========================================
+# 13. FILTER TILE UI (selected border highlight)
+# ==========================================
+def render_filter_tile(col, name: str, refresh_scope: str):
+    cfg = FILTERS[name]
+    icon = cfg["icon"]  # type: ignore
+    count_key = cfg["count_key"]  # type: ignore
+    scope = cfg["scope"]  # type: ignore
+
+    active: Set[str] = st.session_state.active_filters  # type: ignore
+    selected = (name in active)
+
+    count_val = counts.get(count_key, 0)
+
+    # Selection indicator: card border highlight + left strip + optional 🟢
+    green_dot = "🟢 " if selected else "   "
+    label = f"{green_dot}{icon} {name.upper()} [**{count_val}**]"
+
+    with col:
+        card_class = "card selected" if selected else "card"
+        st.markdown(f"<div class='{card_class}'><div class='tile-inner'><div class='left-accent'></div>", unsafe_allow_html=True)
+        st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
+
+        if st.button(label, key=f"flt_{name}", use_container_width=True):
+            toggle_filter(name)
+
+        st.markdown("<div class='refresh-box'>", unsafe_allow_html=True)
+        if st.button("🔄 Refresh", key=f"ref_{name}", use_container_width=False):
+            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+# Row 1
 r1 = st.columns(5)
-render_filter_tile(r1[0], "Pending", refresh_ids_provider=lambda: ids_for_filter("Pending"), refresh_scope="Pending")
-render_filter_tile(r1[1], "Approved", refresh_ids_provider=lambda: ids_for_filter("Approved"), refresh_scope="Approved")
-render_filter_tile(r1[2], "Received", refresh_ids_provider=lambda: ids_for_filter("Received"), refresh_scope="Received")
-render_filter_tile(r1[3], "No Tracking", refresh_ids_provider=lambda: ids_for_filter("No Tracking"), refresh_scope="FILTER_NoTracking")
-render_filter_tile(r1[4], "Flagged", refresh_ids_provider=lambda: ids_for_filter("Flagged"), refresh_scope="FILTER_Flagged")
+render_filter_tile(r1[0], "Pending", "Pending")
+render_filter_tile(r1[1], "Approved", "Approved")
+render_filter_tile(r1[2], "Received", "Received")
+render_filter_tile(r1[3], "No Tracking", "FILTER_NoTracking")
+render_filter_tile(r1[4], "Flagged", "FILTER_Flagged")
 
 st.write("")
 
-# Row 2 (4 tiles)
+# Row 2
 r2 = st.columns(4)
-render_filter_tile(r2[0], "Courier Cancelled", refresh_ids_provider=lambda: ids_for_filter("Courier Cancelled"), refresh_scope="FILTER_CourierCancelled")
-render_filter_tile(r2[1], "Approved > Delivered", refresh_ids_provider=lambda: ids_for_filter("Approved > Delivered"), refresh_scope="FILTER_ApprovedDelivered")
-render_filter_tile(r2[2], "Resolution Actioned", refresh_ids_provider=lambda: ids_for_filter("Resolution Actioned"), refresh_scope="FILTER_ResolutionActioned")
-render_filter_tile(r2[3], "No Resolution Actioned", refresh_ids_provider=lambda: ids_for_filter("No Resolution Actioned"), refresh_scope="FILTER_NoResolutionActioned")
+render_filter_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled")
+render_filter_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered")
+render_filter_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned")
+render_filter_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned")
 
 st.write("")
 
 # ==========================================
-# 14. SEARCH + VIEW ALL (still inside sticky header)
+# 14. SEARCH + VIEW ALL + FILTER BAR
 # ==========================================
-fc1, fc2 = st.columns([1.4, 8.6], vertical_alignment="center")
+fc1, fc2 = st.columns([1.6, 8.4], vertical_alignment="center")
 
 with fc1:
     if st.button("📋 View All Open RMAs", key="btn_view_all_open", use_container_width=True):
@@ -1270,6 +1287,42 @@ with fc2:
             st.session_state.search_query_input = ""
         st.button("❌", help="Clear Search", key="clear_search_btn", on_click=clear_search_cb, use_container_width=True)
 
+# Extra filter bar/drop (under search)
+with st.expander("Additional filters", expanded=False):
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 4])
+    with c1:
+        status_filter = st.multiselect(
+            "Status",
+            options=sorted(df_view["Current Status"].unique().tolist()) if not df_view.empty else [],
+            default=[],
+        )
+    with c2:
+        res_filter = st.multiselect(
+            "Resolution type",
+            options=sorted(df_view["resolutionType"].unique().tolist()) if not df_view.empty else [],
+            default=[],
+        )
+    with c3:
+        actioned_filter = st.selectbox(
+            "Resolution actioned",
+            options=["All", "Yes (actioned)", "No (not actioned)"],
+            index=0,
+        )
+    with c4:
+        # Requested date range (YYYY-MM-DD)
+        min_d = None
+        max_d = None
+        if not df_view.empty:
+            dt_vals = df_view["Requested date"].apply(parse_yyyy_mm_dd).dropna()
+            if len(dt_vals) > 0:
+                min_d = dt_vals.min().date()
+                max_d = dt_vals.max().date()
+
+        if min_d and max_d and min_d <= max_d:
+            date_range = st.date_input("Requested date range", value=(min_d, max_d))
+        else:
+            date_range = None
+
 st.divider()
 
 # ==========================================
@@ -1281,12 +1334,34 @@ if df_view.empty:
 
 display_df = df_view[current_filter_mask(df_view)].copy()
 
+# Apply extra filters
+if status_filter:
+    display_df = display_df[display_df["Current Status"].isin(status_filter)]
+if res_filter:
+    display_df = display_df[display_df["resolutionType"].isin(res_filter)]
+if actioned_filter == "Yes (actioned)":
+    display_df = display_df[display_df["Resolution actioned"] != "No"]
+elif actioned_filter == "No (not actioned)":
+    display_df = display_df[display_df["Resolution actioned"] == "No"]
+
+if date_range and isinstance(date_range, tuple) and len(date_range) == 2:
+    start_d, end_d = date_range
+    def in_range(s):
+        d = parse_yyyy_mm_dd(s)
+        if not d:
+            return False
+        return start_d <= d.date() <= end_d
+    display_df = display_df[display_df["Requested date"].apply(in_range)]
+
 if display_df.empty:
     st.info("No matching records found.")
     st.stop()
 
 display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
 display_df["No"] = (display_df.index + 1).astype(str)
+
+# Keep the table key stable so widths don't reset on dialog close
+TABLE_KEY = "main_table"
 
 edited = st.data_editor(
     display_df[
@@ -1301,6 +1376,7 @@ edited = st.data_editor(
             "Requested date",
             "Approved date",
             "Received date",
+            "Days since requested",
             "resolutionType",
             "Resolution actioned",
             "Update Tracking Number",
@@ -1310,7 +1386,7 @@ edited = st.data_editor(
     use_container_width=True,
     height=700,
     hide_index=True,
-    key=f"main_table_{st.session_state.table_key}",
+    key=TABLE_KEY,
     column_config={
         "No": st.column_config.TextColumn("No", width="small"),
         "RMA Link": st.column_config.LinkColumn("RMA", display_text="Open", width="small"),
@@ -1322,6 +1398,7 @@ edited = st.data_editor(
         "Requested date": st.column_config.TextColumn("Requested date", width="small"),
         "Approved date": st.column_config.TextColumn("Approved date", width="small"),
         "Received date": st.column_config.TextColumn("Received date", width="small"),
+        "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
         "resolutionType": st.column_config.TextColumn("resolutionType", width="small"),
         "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="small"),
         "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
@@ -1338,24 +1415,43 @@ edited = st.data_editor(
         "Requested date",
         "Approved date",
         "Received date",
+        "Days since requested",
         "resolutionType",
         "Resolution actioned",
     ],
 )
 
-# ONE-CLICK & AUTO-CLEAR LOGIC:
-editor_key = f"main_table_{st.session_state.table_key}"
-if editor_key in st.session_state:
-    edits = st.session_state[editor_key].get("edited_rows", {})
+# ==========================================
+# 16. ACTION HANDLING WITHOUT RESETTING TABLE
+# - We clear the checkbox in session_state instead of changing the table key.
+# - This prevents column width reset and reduces scroll jump.
+# ==========================================
+def _clear_edited_checkbox(row_idx: str, field: str):
+    try:
+        ss = st.session_state.get(TABLE_KEY, {})
+        if "edited_rows" in ss and row_idx in ss["edited_rows"]:
+            if field in ss["edited_rows"][row_idx]:
+                ss["edited_rows"][row_idx][field] = False
+                st.session_state[TABLE_KEY] = ss
+    except Exception:
+        pass
+
+if TABLE_KEY in st.session_state:
+    edits = st.session_state[TABLE_KEY].get("edited_rows", {})
+    # Only handle first action found to avoid double pop-ups
+    handled = False
+
     for row_idx, changes in edits.items():
+        if handled:
+            break
         idx = int(row_idx)
+
         if "Update Tracking Number" in changes and changes["Update Tracking Number"]:
-            st.session_state.modal_rma = display_df.iloc[idx]
-            st.session_state.modal_action = "edit"
-            st.session_state.table_key += 1
-            st.rerun()
+            _clear_edited_checkbox(row_idx, "Update Tracking Number")
+            show_update_tracking_dialog(display_df.iloc[idx])
+            handled = True
+
         elif "View Timeline" in changes and changes["View Timeline"]:
-            st.session_state.modal_rma = display_df.iloc[idx]
-            st.session_state.modal_action = "view"
-            st.session_state.table_key += 1
-            st.rerun()
+            _clear_edited_checkbox(row_idx, "View Timeline")
+            show_timeline_dialog(display_df.iloc[idx])
+            handled = True
