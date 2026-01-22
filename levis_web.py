@@ -1126,13 +1126,18 @@ for rma in raw_data:
         or search_query.lower() in str(order_name).lower()
         or search_query.lower() in str(track_str).lower()
     ):
-        processed_rows.append(
-            {
-                "No": "",
-                "RMA Link": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
-                "RMA ID": rma_id,
-                "Order": order_name,
-                "Current Status": status,
+       rma_url = f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}"
+
+processed_rows.append(
+    {
+        "No": "",
+        # Store the URL in "RMA ID" so LinkColumn can use it as the href
+        "RMA ID": rma_url,
+        # Store the plain ID in a hidden helper column for display text
+        "RMA ID Text": str(rma_id),
+
+        "Order": order_name,
+        "Current Status": status,
                 "Tracking Number": track_link_url,
                 "Tracking Status": local_tracking_status,
                 "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
@@ -1367,8 +1372,7 @@ edited = st.data_editor(
     display_df[
         [
             "No",
-            "RMA Link",
-            "RMA ID",
+            "RMA ID",  # clickable link (URL stored here)
             "Order",
             "Current Status",
             "Tracking Number",
@@ -1389,8 +1393,14 @@ edited = st.data_editor(
     key=TABLE_KEY,
     column_config={
         "No": st.column_config.TextColumn("No", width="small"),
-        "RMA Link": st.column_config.LinkColumn("RMA", display_text="Open", width="small"),
-        "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
+
+        # RMA ID now clickable (shows RMA ID Text, links to URL stored in RMA ID)
+        "RMA ID": st.column_config.LinkColumn(
+            "RMA ID",
+            display_text="RMA ID Text",
+            width="small",
+        ),
+
         "Order": st.column_config.TextColumn("Order", width="small"),
         "Current Status": st.column_config.TextColumn("Current Status", width="small"),
         "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
@@ -1406,8 +1416,7 @@ edited = st.data_editor(
     },
     disabled=[
         "No",
-        "RMA Link",
-        "RMA ID",
+        "RMA ID",  # keep disabled so user can’t edit the URL
         "Order",
         "Current Status",
         "Tracking Number",
@@ -1420,6 +1429,7 @@ edited = st.data_editor(
         "Resolution actioned",
     ],
 )
+
 
 # ==========================================
 # 16. ACTION HANDLING WITHOUT RESETTING TABLE
