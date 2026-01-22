@@ -111,6 +111,8 @@ SYNC_OVERLAP_MINUTES = 5
 
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 RATE_LIMIT_HIT = threading.Event()
+RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
+RATE_LIMIT_LOCK = threading.Lock()
 
 # ==========================================
 # 1b. STYLING (sticky header + modern UI)
@@ -200,19 +202,39 @@ st.markdown(
         border: 1px solid rgba(148,163,184,0.12);
       }
       .rg-tile.selected::before {
-        background: rgba(34,197,94,0.18);
-        border-color: rgba(34,197,94,0.45);
+        background: rgba(34,197,94,0.7);
+        border-color: rgba(34,197,94,0.95);
+        box-shadow: 0 0 12px rgba(34,197,94,0.7);
       }
       .rg-updated-pill {
         position: absolute;
         left: 14px;
-        top: 14px;
+        top: 2px;
         padding: 4px 9px;
         border-radius: 999px;
         background: rgba(15, 23, 42, 0.72);
         border: 1px solid rgba(148,163,184,0.18);
         color: rgba(148,163,184,0.95);
         font-size: 0.78rem;
+      }
+      .rg-api-box {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        align-items: flex-start;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid rgba(148,163,184,0.22);
+        color: rgba(226,232,240,0.95);
+        font-size: 0.85rem;
+        font-weight: 700;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+      }
+      .rg-api-sub {
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: rgba(148,163,184,0.9);
       }
 
       /* Streamlit button */
@@ -244,8 +266,11 @@ st.markdown(
         background: rgba(51, 65, 85, 0.55) !important;
         border: 1px solid rgba(148,163,184,0.18) !important;
       }
+      .rg-tile div.stButton {
+        margin-bottom: 0 !important;
+      }
       .rg-mini {
-        margin-top: -6px;
+        margin-top: -2px;
         display: flex;
         justify-content: center;
       }
@@ -338,6 +363,42 @@ def rg_headers() -> dict:
     return {"x-api-key": MY_API_KEY, "x-shop-name": STORE_URL}
 
 
+def update_rate_limit_info(headers: dict):
+    if not headers:
+        return
+    lower = {str(k).lower(): v for k, v in headers.items()}
+    remaining = (
+        lower.get("x-ratelimit-remaining")
+        or lower.get("x-rate-limit-remaining")
+        or lower.get("ratelimit-remaining")
+    )
+    limit = (
+        lower.get("x-ratelimit-limit")
+        or lower.get("x-rate-limit-limit")
+        or lower.get("ratelimit-limit")
+    )
+    reset = (
+        lower.get("x-ratelimit-reset")
+        or lower.get("x-rate-limit-reset")
+        or lower.get("ratelimit-reset")
+    )
+
+    if remaining is None and limit is None and reset is None:
+        return
+
+    def to_int(val):
+        if val is None:
+            return None
+        sval = str(val).strip()
+        return int(sval) if sval.isdigit() else sval
+
+    with RATE_LIMIT_LOCK:
+        RATE_LIMIT_INFO["remaining"] = to_int(remaining)
+        RATE_LIMIT_INFO["limit"] = to_int(limit)
+        RATE_LIMIT_INFO["reset"] = to_int(reset)
+        RATE_LIMIT_INFO["updated_at"] = _now_utc()
+
+
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
     session = get_thread_session()
     headers = headers or rg_headers()
@@ -347,6 +408,7 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
         _sleep_for_rate_limit()
         res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
 
+        update_rate_limit_info(res.headers)
         if res.status_code != 429:
             return res
 
@@ -913,7 +975,7 @@ def get_received_date_iso(rma_payload: dict) -> str:
 def pretty_resolution(rt: str) -> str:
     if not rt:
         return ""
-    out = re.sub(r"([a-z])([A-Z])", r"\\1 \\2", rt).strip()
+    out = re.sub(r"([a-z])([A-Z])", r"\1 \2", rt).strip()
     return out.replace("To ", "to ")
 
 
@@ -961,6 +1023,45 @@ def days_since(date_str: str) -> str:
             return "N/A"
 
 
+def get_status_time_html(s: str) -> str:
+    try:
+        ts = get_last_sync(s)
+        if not ts:
+            return "UPDATED: -"
+        return f"UPDATED: {ts.strftime('%H:%M')}"
+    except Exception:
+        return "UPDATED: -"
+
+
+def format_api_limit_display() -> Tuple[str, str]:
+    with RATE_LIMIT_LOCK:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        reset = RATE_LIMIT_INFO.get("reset")
+        updated_at = RATE_LIMIT_INFO.get("updated_at")
+
+    if remaining is None and limit is None:
+        main = "API Limit: --"
+    elif remaining is not None and limit is not None:
+        main = f"API Left: {remaining}/{limit}"
+    else:
+        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
+
+    sub = "Updated: --"
+    if isinstance(reset, int):
+        try:
+            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
+            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
+        except Exception:
+            sub = f"Reset: {reset}"
+    elif reset:
+        sub = f"Reset: {reset}"
+    elif updated_at:
+        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
+
+    return main, sub
+
+
 # ==========================================
 # 8. UI STATE
 # ==========================================
@@ -1003,8 +1104,21 @@ with top_left:
 
 with top_right:
     st.markdown("<div class='rg-right-card'>", unsafe_allow_html=True)
-    if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-        perform_sync()
+    api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
+    with api_col:
+        api_main, api_sub = format_api_limit_display()
+        st.markdown(
+            f"""
+            <div class="rg-api-box">
+              <div>{api_main}</div>
+              <div class="rg-api-sub">{api_sub}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with sync_col:
+        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+            perform_sync()
     if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
         if clear_db():
             st.success("Cache cleared!")
@@ -1116,16 +1230,6 @@ for rma in raw_data:
     )
 
 df_view = pd.DataFrame(processed_rows)
-
-
-def get_status_time_html(s: str) -> str:
-    try:
-        ts = get_last_sync(s)
-        if not ts:
-            return "UPDATED: -"
-        return f"UPDATED: {ts.strftime('%H:%M')}"
-    except Exception:
-        return "UPDATED: -"
 
 
 def toggle_filter(key: str):
@@ -1410,7 +1514,7 @@ column_config = {
     "No": st.column_config.TextColumn("No", width="small"),
     "RMA ID": st.column_config.LinkColumn(
         "RMA ID",
-        display_text="_rma_id_text",
+        display_text=r"rmaid=([^&]+)",
         width="small",
     ),
     "Order": st.column_config.TextColumn("Order", width="medium"),
@@ -1441,98 +1545,3 @@ sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "select
 if sel_rows:
     idx = int(sel_rows[0])
     show_rma_actions_dialog(display_df.iloc[idx])
-
-# ==========================================
-# 14. AG GRID VERSION (for review)
-# ==========================================
-st.markdown("---")
-st.markdown("## AG Grid version (review)")
-st.caption("If you want perfect auto-fit columns + smoother row click actions, install: streamlit-aggrid")
-
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
-
-    ag_df = display_df.copy()
-    # Add explicit ID + URL columns for AG Grid link rendering
-    ag_df["RMA URL"] = ag_df["RMA ID"]
-    ag_df["RMA ID"] = ag_df["_rma_id_text"]
-
-    ag_cols = [
-        "No",
-        "RMA ID",
-        "Order",
-        "Current Status",
-        "Tracking Number",
-        "Tracking Status",
-        "Requested date",
-        "Approved date",
-        "Received date",
-        "Days since requested",
-        "resolutionType",
-        "Resolution actioned",
-    ]
-
-    gb = GridOptionsBuilder.from_dataframe(ag_df[ag_cols + ["RMA URL"]])
-    gb.configure_default_column(filter=True, sortable=True, resizable=True)
-
-    # Auto-size columns to fit content
-    gb.configure_grid_options(domLayout="normal")
-
-    # Render RMA as clickable link (cellRenderer)
-    gb.configure_column(
-        "RMA ID",
-        header_name="RMA ID",
-        cellRenderer="""
-        function(params) {
-            const url = params.data['RMA URL'];
-            const text = params.value;
-            if (!url) return text;
-            return `<a href='${url}' target='_blank' style='color:#93c5fd; text-decoration: none; font-weight: 800;'>${text}</a>`;
-        }
-        """,
-        width=120,
-    )
-
-    # Tracking link column too
-    gb.configure_column(
-        "Tracking Number",
-        header_name="Tracking",
-        cellRenderer="""
-        function(params) {
-            const url = params.value;
-            if (!url) return '';
-            const txt = url.split('ref=')[1] || 'Open';
-            return `<a href='${url}' target='_blank' style='color:#93c5fd; text-decoration: none; font-weight: 800;'>${txt}</a>`;
-        }
-        """,
-        width=160,
-    )
-
-    gb.configure_selection(selection_mode="single", use_checkbox=True)
-
-    grid_options = gb.build()
-
-    grid_response = AgGrid(
-        ag_df[ag_cols + ["RMA URL"]],
-        gridOptions=grid_options,
-        update_mode=GridUpdateMode.SELECTION_CHANGED,
-        allow_unsafe_jscode=True,
-        fit_columns_on_grid_load=True,  # ✅ autosize on load
-        height=520,
-        theme="alpine",
-    )
-
-    selected = grid_response.get("selected_rows", [])
-    if selected:
-        # Find matching row in display_df by RMA id
-        chosen_id = str(selected[0].get("RMA ID", ""))
-        match = display_df[display_df["_rma_id_text"].astype(str) == chosen_id]
-        if not match.empty:
-            if st.button("Open actions for selected row"):
-                show_rma_actions_dialog(match.iloc[0])
-
-except ModuleNotFoundError:
-    st.info(
-        "AG Grid is not installed. Add this to requirements.txt for the AG Grid version:\n\n"
-        "streamlit-aggrid\n"
-    )
