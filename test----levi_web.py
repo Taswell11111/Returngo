@@ -156,7 +156,7 @@ st.markdown(
         font-size: 2.6rem;
         font-weight: 900;
         letter-spacing: -0.02em;
-        margin-top: -22px;
+        margin-top: 0;
         margin-bottom: 8px;
         text-shadow: 0 8px 22px rgba(0,0,0,0.35);
       }
@@ -979,6 +979,8 @@ with top_right:
             st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
+st.markdown("</div>", unsafe_allow_html=True)  # close sticky
+
 # ==========================================
 # 10. LOAD + PROCESS CACHED OPEN RMAs
 # ==========================================
@@ -1236,8 +1238,6 @@ with st.expander("Additional filters", expanded=True):
     with c5:
         if st.button("🧼 Clear filters", use_container_width=True):
             clear_all_filters()
-
-st.markdown("</div>", unsafe_allow_html=True)  # close sticky
 
 st.divider()
 
