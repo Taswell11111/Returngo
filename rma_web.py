@@ -177,11 +177,11 @@ def delete_rmas_from_db(rma_ids):
     if not rma_ids:
         return
     with DB_LOCK:
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.executemany(
-                "DELETE FROM rmas WHERE rma_id=?",
-                [(str(rma_id),) for rma_id in rma_ids],
-            )
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.executemany("DELETE FROM rmas WHERE rma_id=?", [(str(rma_id),) for rma_id in rma_ids])
+        conn.commit()
+        conn.close()
 
 def update_sync_log(store_url, status):
     with DB_LOCK:
