@@ -174,6 +174,12 @@ st.markdown(
         z-index: 2;
       }
 
+      .card.selected .updated-pill {
+        background: rgba(34,197,94,0.22);
+        border-color: rgba(34,197,94,0.6);
+        color: rgba(240,253,244,0.98);
+      }
+
       /* Buttons */
       div.stButton > button {
         width: 100%;
