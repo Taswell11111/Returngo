@@ -1215,6 +1215,8 @@ with h2:
             load_open_rmas.clear()
             st.success("Cache cleared!")
             st.rerun()
+        else:
+            st.warning("No database file to reset.")
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
