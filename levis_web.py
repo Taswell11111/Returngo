@@ -914,6 +914,8 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
         set_last_sync(scope_label, _now_utc())
         st.session_state["show_toast"] = True
         st.rerun()
+        # Note: st.rerun() raises a RerunException and normally prevents execution
+        # from reaching this return; it exists to satisfy type checkers / static analyzers.
         return
 
     msg = st.empty()
