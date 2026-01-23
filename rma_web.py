@@ -173,6 +173,16 @@ def get_local_ids_for_status(store_url, status):
         conn.close()
     return {r[0] for r in rows}
 
+def delete_rmas_from_db(rma_ids):
+    if not rma_ids:
+        return
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.executemany("DELETE FROM rmas WHERE rma_id=?", [(str(rma_id),) for rma_id in rma_ids])
+        conn.commit()
+        conn.close()
+
 def update_sync_log(store_url, status):
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
@@ -343,9 +353,10 @@ def perform_sync(target_store=None, target_status=None):
             local_ids = get_local_ids_for_status(store['url'], s)
             api_ids = {r.get('rmaId') for r in api_rmas}
             stale_ids = local_ids - api_ids
+            if stale_ids:
+                delete_rmas_from_db(stale_ids)
             for r in api_rmas: tasks.append((r, store['url'], True))
-            for stale_id in stale_ids: tasks.append(({'rmaId': stale_id}, store['url'], True))
-            total_found += len(api_rmas) + len(stale_ids)
+            total_found += len(api_rmas)
             update_sync_log(store['url'], s)
         if list_bar: list_bar.progress((i + 1) / len(stores_to_sync), text=f"Fetched {store['name']}")
     if list_bar: list_bar.empty()
@@ -363,6 +374,7 @@ def perform_sync(target_store=None, target_status=None):
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state['show_toast'] = True
+    st.session_state.pop("main_table", None)
     status_msg.success(f"✅ Sync Complete!")
     st.rerun()
 
@@ -469,6 +481,7 @@ with col2:
             st.cache_resource.clear()
             st.session_state.filter_state = {"store": None, "status": "All"}
             st.session_state.pop("last_sync", None)
+            st.session_state.pop("main_table", None)
             st.success("Cache cleared! Data will reload on next sync.")
             st.rerun()
         else: st.error("DB might be locked.")
