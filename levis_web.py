@@ -1436,6 +1436,8 @@ with st.expander("Additional filters", expanded=True):
 
     def multi_select_with_state(label: str, options: list, key: str):
         old = st.session_state.get(key, [])
+    def multi_select_with_state(label: str, options: list, key: str):
+        old = st.session_state.get(key, [])
         selections = [x for x in old if x in options]
         if selections != old:
             st.session_state[key] = selections
