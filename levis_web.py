@@ -1246,8 +1246,8 @@ for rma in raw_data:
     resolution_type = get_resolution_type(rma)
 
     comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
-    is_nt = (status == "Approved" and not track_str)
-    is_fg = any("flagged" in txt for txt in comment_texts)
+    is_cc = "courier cancelled" in local_tracking_status_lower
+    is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
     is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
     is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
     actioned = is_resolution_actioned(rma, comment_texts)
