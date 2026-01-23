@@ -17,37 +17,8 @@ from typing import Optional, Tuple, Dict, Callable, Set
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
-
-# --- Preserve scroll position across reruns (page scroll) ---
-components.html(
-    """
-    <script>
-    const y = window.localStorage.getItem("scrollY");
-    if (y) window.scrollTo(0, parseInt(y));
-    window.addEventListener("scroll", () => {
-      window.localStorage.setItem("scrollY", window.scrollY);
-    }, { passive: true });
-    </script>
-    """,
-    height=0,
-)
-
-# --- ACCESS SECRETS ---
-try:
-    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-except (FileNotFoundError, KeyError):
-    MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
-
-if not MY_API_KEY:
-    st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
-    st.stop()
-
-try:
-    PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
-except Exception:
-    PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
-
+MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
+PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
@@ -65,245 +36,8 @@ RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 RATE_LIMIT_LOCK = threading.Lock()
 
-# ==========================================
-# 1b. STYLING + STICKY HEADER
-# ==========================================
-st.markdown(
-    """
-    <style>
-      .stApp {
-        background: radial-gradient(1200px 600px at 20% 0%, rgba(196,18,48,0.08), transparent 60%),
-                    radial-gradient(900px 500px at 90% 10%, rgba(59,130,246,0.08), transparent 55%),
-                    #0e1117;
-        color: #e5e7eb;
-      }
-
-      /* Title */
-      .title-wrap h1 {
-        font-size: 3.1rem;
-        margin-bottom: 0.15rem;
-        letter-spacing: 0.2px;
-        background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-      }
-
-      .subtitle-bar {
-        display: inline-flex;
-        gap: 10px;
-        align-items: center;
-        padding: 8px 14px;
-        border-radius: 999px;
-        border: 1px solid rgba(148, 163, 184, 0.22);
-        background: rgba(17, 24, 39, 0.55);
-        box-shadow: 0 8px 20px rgba(0,0,0,0.20);
-        font-size: 1.05rem;
-        color: #cbd5e1;
-      }
-      .subtitle-bar b { color: #e5e7eb; }
-      .subtitle-dot {
-        width: 7px; height: 7px;
-        border-radius: 50%;
-        background: rgba(196,18,48,0.9);
-        display: inline-block;
-      }
-
-      /* Cards */
-      .card {
-        position: relative;
-        background: rgba(17, 24, 39, 0.70);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 14px;
-        padding: 26px 12px 10px 12px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-      }
-
-      .card.selected {
-        border: 1px solid rgba(34,197,94,0.55);
-        box-shadow: 0 10px 24px rgba(0,0,0,0.34);
-      }
-
-      .card::before {
-        content: "";
-        position: absolute;
-        left: 10px;
-        right: 10px;
-        top: 10px;
-        height: 10px;
-        border-radius: 999px;
-        background: rgba(148,163,184,0.10);
-        border: 1px solid rgba(148,163,184,0.12);
-      }
-
-      .card.selected::before {
-        background: rgba(34,197,94,0.7);
-        border-color: rgba(34,197,94,0.95);
-        box-shadow: 0 0 12px rgba(34,197,94,0.7);
-      }
-
-      .tile-inner {
-        position: relative;
-      }
-
-      /* Updated pill */
-      .updated-pill {
-        position: absolute;
-        left: 14px;
-        top: 2px;
-        font-size: 0.80rem;
-        color: rgba(148,163,184,0.95);
-        padding: 4px 10px;
-        border-radius: 999px;
-        background: rgba(15, 23, 42, 0.72);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        z-index: 2;
-      }
-
-      .card.selected .updated-pill {
-        background: rgba(34,197,94,0.18);
-        border-color: rgba(34,197,94,0.95);
-        color: #bbf7d0;
-      }
-
-      .api-box {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        align-items: flex-start;
-        padding: 8px 10px;
-        border-radius: 12px;
-        background: rgba(15, 23, 42, 0.72);
-        border: 1px solid rgba(148,163,184,0.22);
-        color: rgba(226,232,240,0.95);
-        font-size: 0.85rem;
-        font-weight: 700;
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
-      }
-      .api-sub {
-        font-size: 0.72rem;
-        font-weight: 600;
-        color: rgba(148,163,184,0.9);
-      }
-
-      .header-right-card {
-        background: rgba(17,24,39,0.72);
-        border: 1px solid rgba(148,163,184,0.18);
-        border-radius: 16px;
-        padding: 12px;
-        box-shadow: 0 10px 26px rgba(0,0,0,0.25);
-      }
-      .header-right-card .stButton > button{
-        background: rgba(51,65,85,0.60) !important;
-      }
-
-      /* Buttons */
-      div.stButton > button {
-        width: 100%;
-        border: 1px solid rgba(148, 163, 184, 0.25) !important;
-        background: rgba(31, 41, 55, 0.92) !important;
-        color: #e5e7eb !important;
-        border-radius: 10px !important;
-        padding: 12px 14px !important;
-        font-size: 15px !important;
-        font-weight: 850 !important;
-        transition: 0.15s ease-in-out;
-      }
-      div.stButton > button:hover {
-        border-color: rgba(196,18,48,0.70) !important;
-        color: #fff !important;
-        transform: translateY(-1px);
-      }
-
-      /* Refresh box under each tile: lighter + touches main button */
-      .refresh-box {
-        margin-top: -2px;           /* touch main button border */
-        padding-top: 8px;
-        padding-bottom: 6px;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(148,163,184,0.14);
-        border-top: 0;
-        border-radius: 0 0 12px 12px;
-        display: flex;
-        justify-content: center;
-      }
-
-      .refresh-box div.stButton > button {
-        width: auto !important;     /* shrink-to-fit */
-        padding: 6px 12px !important;
-        font-size: 13px !important;
-        border-radius: 10px !important;
-      }
-
-      /* Sticky container */
-      .sticky-top {
-        position: sticky !important;
-        top: 0 !important;
-        z-index: 999 !important;
-        background: rgba(14,17,23,0.82) !important;
-        backdrop-filter: blur(10px);
-        border-bottom: 1px solid rgba(148,163,184,0.16);
-        padding-bottom: 10px;
-        margin-bottom: 8px;
-      }
-
-      /* Data editor: attempt “fit content” */
-      [data-testid="stDataFrame"] {
-        border-radius: 14px;
-        overflow-x: auto;
-        border: 1px solid rgba(148,163,184,0.18);
-      }
-      [data-testid="stDataFrame"] table {
-        table-layout: auto !important;
-      }
-
-      /* Dialog */
-      div[data-testid="stDialog"] {
-        background-color: rgba(17, 24, 39, 0.95);
-        border: 1px solid rgba(196,18,48,0.55);
-        border-radius: 16px;
-      }
-
-      /* Smaller Reset Cache button look (lighter) */
-      .reset-wrap div.stButton > button {
-        background: rgba(148,163,184,0.18) !important;
-        border-color: rgba(148,163,184,0.25) !important;
-        padding: 9px 12px !important;
-        font-size: 14px !important;
-      }
-
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# Sticky anchor + JS
-st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True)
-components.html(
-    """
-    <script>
-      function applySticky() {
-        const anchor = window.parent.document.querySelector('.sticky-anchor');
-        if (!anchor) return;
-
-        let el = anchor;
-        for (let i = 0; i < 12; i++) {
-          if (!el) break;
-          if (el.getAttribute && el.getAttribute("data-testid") === "stVerticalBlock") {
-            el.classList.add("sticky-top");
-            return;
-          }
-          el = el.parentElement;
-        }
-        if (anchor.parentElement) anchor.parentElement.classList.add("sticky-top");
-      }
-
-      applySticky();
-      setTimeout(applySticky, 250);
-      setTimeout(applySticky, 800);
-    </script>
-    """,
-    height=0,
-)
+df_view = pd.DataFrame()
+counts: Dict[str, int] = {}
 
 # ==========================================
 # 2. HTTP SESSIONS + RATE LIMITING
@@ -1116,34 +850,6 @@ def format_api_limit_display() -> Tuple[str, str]:
     return main, sub
 
 
-# ==========================================
-# 8. STATE
-# ==========================================
-if "active_filters" not in st.session_state:
-    st.session_state.active_filters = set()  # type: ignore
-if "search_query_input" not in st.session_state:
-    st.session_state.search_query_input = ""
-if "status_multi" not in st.session_state:
-    st.session_state.status_multi = []
-if "res_multi" not in st.session_state:
-    st.session_state.res_multi = []
-if "actioned_multi" not in st.session_state:
-    st.session_state.actioned_multi = []
-if "req_dates_selected" not in st.session_state:
-    st.session_state.req_dates_selected = []
-
-if st.session_state.get("show_toast"):
-    st.toast("✅ Updated!", icon="🔄")
-    st.session_state["show_toast"] = False
-
-if RATE_LIMIT_HIT.is_set():
-    st.warning(
-        "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
-        "If this happens often, sync less frequently or request a higher quota key."
-    )
-    RATE_LIMIT_HIT.clear()
-
-
 def toggle_filter(name: str):
     s: Set[str] = st.session_state.active_filters  # type: ignore
     if name in s:
@@ -1172,161 +878,6 @@ def updated_pill(scope: str) -> str:
 
 
 # ==========================================
-# 10. HEADER (STICKY)
-# ==========================================
-h1, h2 = st.columns([3, 1], vertical_alignment="top")
-
-with h1:
-    st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
-    st.title("Levi's ReturnGO Ops Dashboard")
-    st.markdown(
-        f"""
-        <div class="subtitle-bar">
-          <span class="subtitle-dot"></span>
-          <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
-          <span style="opacity:.45">|</span>
-          <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with h2:
-    st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
-    api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
-    with api_col:
-        api_main, api_sub = format_api_limit_display()
-        st.markdown(
-            f"""
-            <div class="api-box">
-              <div>{api_main}</div>
-              <div class="api-sub">{api_sub}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with sync_col:
-        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-            perform_sync()
-    st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
-    if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
-        if clear_db():
-            st.cache_data.clear()
-            st.success("Cache cleared!")
-            st.rerun()
-        else:
-            st.warning("No database file to reset.")
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-st.write("")
-
-# ==========================================
-# 11. LOAD + PROCESS OPEN RMAs
-# ==========================================
-raw_data = load_open_rmas(db_mtime())
-processed_rows = []
-
-counts = {
-    "Pending": 0,
-    "Approved": 0,
-    "Received": 0,
-    "NoTracking": 0,
-    "Flagged": 0,
-    "CourierCancelled": 0,
-    "ApprovedDelivered": 0,
-    "ResolutionActioned": 0,
-    "NoResolutionActioned": 0,
-}
-
-search_query = st.session_state.get("search_query_input", "")
-search_query_lower = search_query.lower().strip()
-search_active = bool(search_query_lower)
-today = datetime.now().date()
-
-for rma in raw_data:
-    summary = rma.get("rmaSummary", {}) or {}
-    shipments = rma.get("shipments", []) or []
-    comments = rma.get("comments", []) or []
-
-    status = summary.get("status", "Unknown")
-    rma_id = summary.get("rmaId", "N/A")
-    order_name = summary.get("order_name", summary.get("orderName", "N/A"))
-
-    track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
-    track_str = ", ".join(track_nums) if track_nums else ""
-    shipment_id = shipments[0].get("shipmentId") if shipments else None
-
-    local_tracking_status = rma.get("_local_courier_status", "") or ""
-    local_tracking_status_lower = local_tracking_status.lower()
-    track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
-
-    requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
-    approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
-    received_iso = get_received_date_iso(rma)
-    resolution_type = get_resolution_type(rma)
-
-    comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
-    is_cc = "courier cancelled" in local_tracking_status_lower
-    is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
-    is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
-    is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
-    actioned = is_resolution_actioned(rma, comment_texts)
-    actioned_label = resolution_actioned_label(rma)
-    is_ra = actioned
-    is_nra = (status == "Received") and (not actioned)
-
-    if status in ("Pending", "Approved", "Received"):
-        counts[status] += 1
-    if is_nt:
-        counts["NoTracking"] += 1
-    if is_fg:
-        counts["Flagged"] += 1
-    if is_cc:
-        counts["CourierCancelled"] += 1
-    if is_ad:
-        counts["ApprovedDelivered"] += 1
-    if is_ra:
-        counts["ResolutionActioned"] += 1
-    if is_nra:
-        counts["NoResolutionActioned"] += 1
-
-    if not search_active or (
-        search_query_lower in str(rma_id).lower()
-        or search_query_lower in str(order_name).lower()
-        or search_query_lower in str(track_str).lower()
-    ):
-        processed_rows.append(
-            {
-                "No": "",
-                "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
-                "Order": order_name,
-                "Current Status": status,
-                "Tracking Number": track_link_url,
-                "Tracking Status": local_tracking_status,
-                "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
-                "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
-                "Received date": str(received_iso)[:10] if received_iso else "N/A",
-                "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
-                "resolutionType": resolution_type if resolution_type else "N/A",
-                "Resolution actioned": actioned_label,
-                "DisplayTrack": track_str,
-                "shipment_id": shipment_id,
-                "full_data": rma,
-                "_rma_id_text": rma_id,
-                "is_nt": is_nt,
-                "is_fg": is_fg,
-                "is_cc": is_cc,
-                "is_ad": is_ad,
-                "is_ra": is_ra,
-                "is_nra": is_nra,
-            }
-        )
-
-df_view = pd.DataFrame(processed_rows)
-
-# ==========================================
 # 12. FILTER DEFINITIONS (multi-select)
 # ==========================================
 FilterFn = Callable[[pd.DataFrame], pd.Series]
@@ -1342,6 +893,7 @@ FILTERS: Dict[str, Dict[str, object]] = {
     "Resolution Actioned": {"icon": "💳", "count_key": "ResolutionActioned", "scope": "FILTER_ResolutionActioned", "fn": lambda d: d["is_ra"] == True},
     "No Resolution Actioned": {"icon": "⏸️", "count_key": "NoResolutionActioned", "scope": "FILTER_NoResolutionActioned", "fn": lambda d: d["is_nra"] == True},
 }
+
 
 def current_filter_mask(df: pd.DataFrame) -> pd.Series:
     active: Set[str] = st.session_state.active_filters  # type: ignore
@@ -1413,226 +965,685 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-# Row 1
-r1 = st.columns(5)
-render_filter_tile(r1[0], "Pending", "Pending")
-render_filter_tile(r1[1], "Approved", "Approved")
-render_filter_tile(r1[2], "Received", "Received")
-render_filter_tile(r1[3], "No Tracking", "FILTER_NoTracking")
-render_filter_tile(r1[4], "Flagged", "FILTER_Flagged")
+def main():
+    global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts
 
-st.write("")
+    st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
 
-# Row 2
-r2 = st.columns(4)
-render_filter_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled")
-render_filter_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered")
-render_filter_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned")
-render_filter_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned")
-
-st.write("")
-
-# ==========================================
-# 14. SEARCH + VIEW ALL + FILTER BAR
-# ==========================================
-st.write("")
-sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
-with sc1:
-    st.text_input(
-        "Search",
-        placeholder="🔍 Search Order, RMA, or Tracking...",
-        label_visibility="collapsed",
-        key="search_query_input",
+    # --- Preserve scroll position across reruns (page scroll) ---
+    components.html(
+        """
+        <script>
+        const y = window.localStorage.getItem("scrollY");
+        if (y) window.scrollTo(0, parseInt(y));
+        window.addEventListener("scroll", () => {
+          window.localStorage.setItem("scrollY", window.scrollY);
+        }, { passive: true });
+        </script>
+        """,
+        height=0,
     )
-with sc2:
-    if st.button("🧹 Clear", use_container_width=True):
-        clear_all_filters()
-with sc3:
-    if st.button("📋 View All", use_container_width=True):
+
+    # --- ACCESS SECRETS ---
+    try:
+        MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+    except (FileNotFoundError, KeyError):
+        MY_API_KEY = os.environ.get("RETURNGO_API_KEY", MY_API_KEY)
+
+    if not MY_API_KEY:
+        st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
+        st.stop()
+
+    try:
+        PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
+    except Exception:
+        PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", PARCEL_NINJA_TOKEN)
+
+    # ==========================================
+    # 1b. STYLING + STICKY HEADER
+    # ==========================================
+    st.markdown(
+        """
+        <style>
+          .stApp {
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(196,18,48,0.08), transparent 60%),
+                        radial-gradient(900px 500px at 90% 10%, rgba(59,130,246,0.08), transparent 55%),
+                        #0e1117;
+            color: #e5e7eb;
+          }
+
+          /* Title */
+          .title-wrap h1 {
+            font-size: 3.1rem;
+            margin-bottom: 0.15rem;
+            letter-spacing: 0.2px;
+            background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+          }
+
+          .subtitle-bar {
+            display: inline-flex;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 14px;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            background: rgba(17, 24, 39, 0.55);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.20);
+            font-size: 1.05rem;
+            color: #cbd5e1;
+          }
+          .subtitle-bar b { color: #e5e7eb; }
+          .subtitle-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            background: rgba(196,18,48,0.9);
+            display: inline-block;
+          }
+
+          /* Cards */
+          .card {
+            position: relative;
+            background: rgba(17, 24, 39, 0.70);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 14px;
+            padding: 26px 12px 10px 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+          }
+
+          .card.selected {
+            border: 1px solid rgba(34,197,94,0.55);
+            box-shadow: 0 10px 24px rgba(0,0,0,0.34);
+          }
+
+          .card::before {
+            content: "";
+            position: absolute;
+            left: 10px;
+            right: 10px;
+            top: 10px;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(148,163,184,0.10);
+            border: 1px solid rgba(148,163,184,0.12);
+          }
+
+          .card.selected::before {
+            background: rgba(34,197,94,0.7);
+            border-color: rgba(34,197,94,0.95);
+            box-shadow: 0 0 12px rgba(34,197,94,0.7);
+          }
+
+          .tile-inner {
+            position: relative;
+          }
+
+          /* Updated pill */
+          .updated-pill {
+            position: absolute;
+            left: 14px;
+            top: 2px;
+            font-size: 0.80rem;
+            color: rgba(148,163,184,0.95);
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            z-index: 2;
+          }
+
+          .card.selected .updated-pill {
+            background: rgba(34,197,94,0.18);
+            border-color: rgba(34,197,94,0.95);
+            color: #bbf7d0;
+          }
+
+          .api-box {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            align-items: flex-start;
+            padding: 8px 10px;
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148,163,184,0.22);
+            color: rgba(226,232,240,0.95);
+            font-size: 0.85rem;
+            font-weight: 700;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+          }
+          .api-sub {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: rgba(148,163,184,0.9);
+          }
+
+          .header-right-card {
+            background: rgba(17,24,39,0.72);
+            border: 1px solid rgba(148,163,184,0.18);
+            border-radius: 16px;
+            padding: 12px;
+            box-shadow: 0 10px 26px rgba(0,0,0,0.25);
+          }
+          .header-right-card .stButton > button{
+            background: rgba(51,65,85,0.60) !important;
+          }
+
+          /* Buttons */
+          div.stButton > button {
+            width: 100%;
+            border: 1px solid rgba(148, 163, 184, 0.25) !important;
+            background: rgba(31, 41, 55, 0.92) !important;
+            color: #e5e7eb !important;
+            border-radius: 10px !important;
+            padding: 12px 14px !important;
+            font-size: 15px !important;
+            font-weight: 850 !important;
+            transition: 0.15s ease-in-out;
+          }
+          div.stButton > button:hover {
+            border-color: rgba(196,18,48,0.70) !important;
+            color: #fff !important;
+            transform: translateY(-1px);
+          }
+
+          /* Refresh box under each tile: lighter + touches main button */
+          .refresh-box {
+            margin-top: -2px;           /* touch main button border */
+            padding-top: 8px;
+            padding-bottom: 6px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(148,163,184,0.14);
+            border-top: 0;
+            border-radius: 0 0 12px 12px;
+            display: flex;
+            justify-content: center;
+          }
+
+          .refresh-box div.stButton > button {
+            width: auto !important;     /* shrink-to-fit */
+            padding: 6px 12px !important;
+            font-size: 13px !important;
+            border-radius: 10px !important;
+          }
+
+          /* Sticky container */
+          .sticky-top {
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 999 !important;
+            background: rgba(14,17,23,0.82) !important;
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(148,163,184,0.16);
+            padding-bottom: 10px;
+            margin-bottom: 8px;
+          }
+
+          /* Data editor: attempt “fit content” */
+          [data-testid="stDataFrame"] {
+            border-radius: 14px;
+            overflow-x: auto;
+            border: 1px solid rgba(148,163,184,0.18);
+          }
+          [data-testid="stDataFrame"] table {
+            table-layout: auto !important;
+          }
+
+          /* Dialog */
+          div[data-testid="stDialog"] {
+            background-color: rgba(17, 24, 39, 0.95);
+            border: 1px solid rgba(196,18,48,0.55);
+            border-radius: 16px;
+          }
+
+          /* Smaller Reset Cache button look (lighter) */
+          .reset-wrap div.stButton > button {
+            background: rgba(148,163,184,0.18) !important;
+            border-color: rgba(148,163,184,0.25) !important;
+            padding: 9px 12px !important;
+            font-size: 14px !important;
+          }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Sticky anchor + JS
+    st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True)
+    components.html(
+        """
+        <script>
+          function applySticky() {
+            const anchor = window.parent.document.querySelector('.sticky-anchor');
+            if (!anchor) return;
+
+            let el = anchor;
+            for (let i = 0; i < 12; i++) {
+              if (!el) break;
+              if (el.getAttribute && el.getAttribute("data-testid") === "stVerticalBlock") {
+                el.classList.add("sticky-top");
+                return;
+              }
+              el = el.parentElement;
+            }
+            if (anchor.parentElement) anchor.parentElement.classList.add("sticky-top");
+          }
+
+          applySticky();
+          setTimeout(applySticky, 250);
+          setTimeout(applySticky, 800);
+        </script>
+        """,
+        height=0,
+    )
+
+    # ==========================================
+    # 8. STATE
+    # ==========================================
+    if "active_filters" not in st.session_state:
         st.session_state.active_filters = set()  # type: ignore
-        st.rerun()
+    if "search_query_input" not in st.session_state:
+        st.session_state.search_query_input = ""
+    if "status_multi" not in st.session_state:
+        st.session_state.status_multi = []
+    if "res_multi" not in st.session_state:
+        st.session_state.res_multi = []
+    if "actioned_multi" not in st.session_state:
+        st.session_state.actioned_multi = []
+    if "req_dates_selected" not in st.session_state:
+        st.session_state.req_dates_selected = []
 
-# Extra filter bar/drop (under search)
-with st.expander("Additional filters", expanded=True):
-    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
+    if st.session_state.get("show_toast"):
+        st.toast("✅ Updated!", icon="🔄")
+        st.session_state["show_toast"] = False
 
-    def multi_select_with_state(label: str, options: list, key: str):
-        old = st.session_state.get(key, [])
-    def multi_select_with_state(label: str, options: list, key: str):
-        old = st.session_state.get(key, [])
-        selections = [x for x in old if x in options]
-        if selections != old:
-            st.session_state[key] = selections
-        return st.multiselect(label, options=options, key=key)
+    if RATE_LIMIT_HIT.is_set():
+        st.warning(
+            "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
+            "If this happens often, sync less frequently or request a higher quota key."
+        )
+        RATE_LIMIT_HIT.clear()
 
-    with c1:
-        multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi")
-    with c2:
-        res_opts = []
-        if not df_view.empty and "resolutionType" in df_view.columns:
-            res_opts = sorted(
-                [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
+    # ==========================================
+    # 10. HEADER (STICKY)
+    # ==========================================
+    h1, h2 = st.columns([3, 1], vertical_alignment="top")
+
+    with h1:
+        st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
+        st.title("Levi's ReturnGO Ops Dashboard")
+        st.markdown(
+            f"""
+            <div class="subtitle-bar">
+              <span class="subtitle-dot"></span>
+              <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
+              <span style="opacity:.45">|</span>
+              <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with h2:
+        st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
+        api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
+        with api_col:
+            api_main, api_sub = format_api_limit_display()
+            st.markdown(
+                f"""
+                <div class="api-box">
+                  <div>{api_main}</div>
+                  <div class="api-sub">{api_sub}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        multi_select_with_state("Resolution type", res_opts, "res_multi")
-    with c3:
-        multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
-    with c4:
-        req_dates = []
-        if not df_view.empty and "Requested date" in df_view.columns:
-            req_dates = sorted(
-                [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
-                reverse=True,
+        with sync_col:
+            if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+                perform_sync()
+        st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
+        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
+            if clear_db():
+                st.cache_data.clear()
+                st.success("Cache cleared!")
+                st.rerun()
+            else:
+                st.warning("No database file to reset.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.write("")
+
+    # ==========================================
+    # 11. LOAD + PROCESS OPEN RMAs
+    # ==========================================
+    raw_data = load_open_rmas(db_mtime())
+    processed_rows = []
+
+    counts = {
+        "Pending": 0,
+        "Approved": 0,
+        "Received": 0,
+        "NoTracking": 0,
+        "Flagged": 0,
+        "CourierCancelled": 0,
+        "ApprovedDelivered": 0,
+        "ResolutionActioned": 0,
+        "NoResolutionActioned": 0,
+    }
+
+    search_query = st.session_state.get("search_query_input", "")
+    search_query_lower = search_query.lower().strip()
+    search_active = bool(search_query_lower)
+    today = datetime.now().date()
+
+    for rma in raw_data:
+        summary = rma.get("rmaSummary", {}) or {}
+        shipments = rma.get("shipments", []) or []
+        comments = rma.get("comments", []) or []
+
+        status = summary.get("status", "Unknown")
+        rma_id = summary.get("rmaId", "N/A")
+        order_name = summary.get("order_name", summary.get("orderName", "N/A"))
+
+        track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
+        track_str = ", ".join(track_nums) if track_nums else ""
+        shipment_id = shipments[0].get("shipmentId") if shipments else None
+
+        local_tracking_status = rma.get("_local_courier_status", "") or ""
+        local_tracking_status_lower = local_tracking_status.lower()
+        track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
+
+        requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
+        approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
+        received_iso = get_received_date_iso(rma)
+        resolution_type = get_resolution_type(rma)
+
+        comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
+        is_cc = "courier cancelled" in local_tracking_status_lower
+        is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
+        is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
+        is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
+        actioned = is_resolution_actioned(rma, comment_texts)
+        actioned_label = resolution_actioned_label(rma)
+        is_ra = actioned
+        is_nra = (status == "Received") and (not actioned)
+
+        if status in ("Pending", "Approved", "Received"):
+            counts[status] += 1
+        if is_nt:
+            counts["NoTracking"] += 1
+        if is_fg:
+            counts["Flagged"] += 1
+        if is_cc:
+            counts["CourierCancelled"] += 1
+        if is_ad:
+            counts["ApprovedDelivered"] += 1
+        if is_ra:
+            counts["ResolutionActioned"] += 1
+        if is_nra:
+            counts["NoResolutionActioned"] += 1
+
+        if not search_active or (
+            search_query_lower in str(rma_id).lower()
+            or search_query_lower in str(order_name).lower()
+            or search_query_lower in str(track_str).lower()
+        ):
+            processed_rows.append(
+                {
+                    "No": "",
+                    "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
+                    "Order": order_name,
+                    "Current Status": status,
+                    "Tracking Number": track_link_url,
+                    "Tracking Status": local_tracking_status,
+                    "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
+                    "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
+                    "Received date": str(received_iso)[:10] if received_iso else "N/A",
+                    "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
+                    "resolutionType": resolution_type if resolution_type else "N/A",
+                    "Resolution actioned": actioned_label,
+                    "DisplayTrack": track_str,
+                    "shipment_id": shipment_id,
+                    "full_data": rma,
+                    "_rma_id_text": rma_id,
+                    "is_nt": is_nt,
+                    "is_fg": is_fg,
+                    "is_cc": is_cc,
+                    "is_ad": is_ad,
+                    "is_ra": is_ra,
+                    "is_nra": is_nra,
+                }
             )
-        multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
-    with c5:
-        if st.button("🧼 Clear filters", use_container_width=True):
+
+    df_view = pd.DataFrame(processed_rows)
+
+    # Row 1
+    r1 = st.columns(5)
+    render_filter_tile(r1[0], "Pending", "Pending")
+    render_filter_tile(r1[1], "Approved", "Approved")
+    render_filter_tile(r1[2], "Received", "Received")
+    render_filter_tile(r1[3], "No Tracking", "FILTER_NoTracking")
+    render_filter_tile(r1[4], "Flagged", "FILTER_Flagged")
+
+    st.write("")
+
+    # Row 2
+    r2 = st.columns(4)
+    render_filter_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled")
+    render_filter_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered")
+    render_filter_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned")
+    render_filter_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned")
+
+    st.write("")
+
+    # ==========================================
+    # 14. SEARCH + VIEW ALL + FILTER BAR
+    # ==========================================
+    st.write("")
+    sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
+    with sc1:
+        st.text_input(
+            "Search",
+            placeholder="🔍 Search Order, RMA, or Tracking...",
+            label_visibility="collapsed",
+            key="search_query_input",
+        )
+    with sc2:
+        if st.button("🧹 Clear", use_container_width=True):
             clear_all_filters()
+    with sc3:
+        if st.button("📋 View All", use_container_width=True):
+            st.session_state.active_filters = set()  # type: ignore
+            st.rerun()
 
-st.divider()
+    # Extra filter bar/drop (under search)
+    with st.expander("Additional filters", expanded=True):
+        c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
 
-# ==========================================
-# 15. TABLE VIEW
-# ==========================================
-if df_view.empty:
-    st.warning("Database empty. Click Sync Dashboard to start.")
-    st.stop()
+        def multi_select_with_state(label: str, options: list, key: str):
+            old = st.session_state.get(key, [])
+        def multi_select_with_state(label: str, options: list, key: str):
+            old = st.session_state.get(key, [])
+            selections = [x for x in old if x in options]
+            if selections != old:
+                st.session_state[key] = selections
+            return st.multiselect(label, options=options, key=key)
 
-display_df = df_view[current_filter_mask(df_view)].copy()
+        with c1:
+            multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi")
+        with c2:
+            res_opts = []
+            if not df_view.empty and "resolutionType" in df_view.columns:
+                res_opts = sorted(
+                    [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
+                )
+            multi_select_with_state("Resolution type", res_opts, "res_multi")
+        with c3:
+            multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
+        with c4:
+            req_dates = []
+            if not df_view.empty and "Requested date" in df_view.columns:
+                req_dates = sorted(
+                    [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
+                    reverse=True,
+                )
+            multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
+        with c5:
+            if st.button("🧼 Clear filters", use_container_width=True):
+                clear_all_filters()
 
-# Apply extra filters (AND logic)
-status_multi = st.session_state.get("status_multi", [])
-res_multi = st.session_state.get("res_multi", [])
-actioned_multi = st.session_state.get("actioned_multi", [])
-req_dates_selected = st.session_state.get("req_dates_selected", [])
+    st.divider()
 
-if status_multi:
-    display_df = display_df[display_df["Current Status"].isin(status_multi)]
-if res_multi:
-    display_df = display_df[display_df["resolutionType"].isin(res_multi)]
-if actioned_multi:
-    actioned_set = set(actioned_multi)
-    if actioned_set == {"Yes"}:
-        display_df = display_df[display_df["Resolution actioned"] != "No"]
-    elif actioned_set == {"No"}:
-        display_df = display_df[display_df["Resolution actioned"] == "No"]
-if req_dates_selected:
-    display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
+    # ==========================================
+    # 15. TABLE VIEW
+    # ==========================================
+    if df_view.empty:
+        st.warning("Database empty. Click Sync Dashboard to start.")
+        st.stop()
 
-if display_df.empty:
-    st.info("No matching records found.")
-    st.stop()
+    display_df = df_view[current_filter_mask(df_view)].copy()
 
-display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
-display_df["No"] = (display_df.index + 1).astype(str)
+    # Apply extra filters (AND logic)
+    status_multi = st.session_state.get("status_multi", [])
+    res_multi = st.session_state.get("res_multi", [])
+    actioned_multi = st.session_state.get("actioned_multi", [])
+    req_dates_selected = st.session_state.get("req_dates_selected", [])
 
-@st.dialog("RMA Actions")
-def show_rma_actions_dialog(row: pd.Series):
-    rma_url = row.get("RMA ID", "")
-    rma_id_text = row.get("_rma_id_text", "")
-    shipment_id = row.get("shipment_id")
-    track_existing = row.get("DisplayTrack", "")
+    if status_multi:
+        display_df = display_df[display_df["Current Status"].isin(status_multi)]
+    if res_multi:
+        display_df = display_df[display_df["resolutionType"].isin(res_multi)]
+    if actioned_multi:
+        actioned_set = set(actioned_multi)
+        if actioned_set == {"Yes"}:
+            display_df = display_df[display_df["Resolution actioned"] != "No"]
+        elif actioned_set == {"No"}:
+            display_df = display_df[display_df["Resolution actioned"] == "No"]
+    if req_dates_selected:
+        display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
 
-    tab1, tab2 = st.tabs(["Update tracking", "View timeline"])
+    if display_df.empty:
+        st.info("No matching records found.")
+        st.stop()
 
-    with tab1:
-        st.markdown(f"### RMA `{rma_id_text}`")
-        if rma_url:
-            st.markdown(f"[Open in ReturnGO]({rma_url})")
+    display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
+    display_df["No"] = (display_df.index + 1).astype(str)
 
-        with st.form("upd_track_form", clear_on_submit=False):
-            new_track = st.text_input("Tracking number", value=track_existing)
-            submitted = st.form_submit_button("Save changes")
-            if submitted:
-                if not shipment_id:
-                    st.error("No Shipment ID available for this RMA.")
-                else:
-                    ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track.strip())
-                    if ok:
-                        st.success("Tracking updated.")
-                        time.sleep(0.2)
-                        perform_sync(["Approved", "Received"])
+    @st.dialog("RMA Actions")
+    def show_rma_actions_dialog(row: pd.Series):
+        rma_url = row.get("RMA ID", "")
+        rma_id_text = row.get("_rma_id_text", "")
+        shipment_id = row.get("shipment_id")
+        track_existing = row.get("DisplayTrack", "")
+
+        tab1, tab2 = st.tabs(["Update tracking", "View timeline"])
+
+        with tab1:
+            st.markdown(f"### RMA `{rma_id_text}`")
+            if rma_url:
+                st.markdown(f"[Open in ReturnGO]({rma_url})")
+
+            with st.form("upd_track_form", clear_on_submit=False):
+                new_track = st.text_input("Tracking number", value=track_existing)
+                submitted = st.form_submit_button("Save changes")
+                if submitted:
+                    if not shipment_id:
+                        st.error("No Shipment ID available for this RMA.")
                     else:
-                        st.error(msg)
-
-    with tab2:
-        st.markdown(f"### Timeline for `{rma_id_text}`")
-
-        with st.expander("➕ Add comment", expanded=False):
-            with st.form("add_comment_form", clear_on_submit=True):
-                comment_text = st.text_area("New internal note")
-                if st.form_submit_button("Post comment"):
-                    comment = (comment_text or "").strip()
-                    if not comment:
-                        st.error("Comment cannot be empty.")
-                    else:
-                        ok, msg = push_comment_update(rma_id_text, comment)
+                        ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track.strip())
                         if ok:
-                            st.success("Comment posted.")
+                            st.success("Tracking updated.")
                             time.sleep(0.2)
                             perform_sync(["Approved", "Received"])
                         else:
                             st.error(msg)
 
-        full = row.get("full_data", {}) or {}
-        timeline = full.get("comments", []) or []
-        if not timeline:
-            st.info("No timeline events found.")
-        else:
-            for t in timeline:
-                d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
-                trig = t.get("triggeredBy", "System") or "System"
-                txt = t.get("htmlText", "") or ""
-                st.markdown(f"**{d_str}** | `{trig}`\n> {txt}")
-                st.divider()
+        with tab2:
+            st.markdown(f"### Timeline for `{rma_id_text}`")
 
+            with st.expander("➕ Add comment", expanded=False):
+                with st.form("add_comment_form", clear_on_submit=True):
+                    comment_text = st.text_area("New internal note")
+                    if st.form_submit_button("Post comment"):
+                        comment = (comment_text or "").strip()
+                        if not comment:
+                            st.error("Comment cannot be empty.")
+                        else:
+                            ok, msg = push_comment_update(rma_id_text, comment)
+                            if ok:
+                                st.success("Comment posted.")
+                                time.sleep(0.2)
+                                perform_sync(["Approved", "Received"])
+                            else:
+                                st.error(msg)
 
-display_cols = [
-    "No",
-    "RMA ID",
-    "Order",
-    "Current Status",
-    "Tracking Number",
-    "Tracking Status",
-    "Requested date",
-    "Approved date",
-    "Received date",
-    "Days since requested",
-    "resolutionType",
-    "Resolution actioned",
-]
+            full = row.get("full_data", {}) or {}
+            timeline = full.get("comments", []) or []
+            if not timeline:
+                st.info("No timeline events found.")
+            else:
+                for t in timeline:
+                    d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
+                    trig = t.get("triggeredBy", "System") or "System"
+                    txt = t.get("htmlText", "") or ""
+                    st.markdown(f"**{d_str}** | `{trig}`\n> {txt}")
+                    st.divider()
 
-column_config = {
-    "No": st.column_config.TextColumn("No", width="small"),
-    "RMA ID": st.column_config.LinkColumn(
+    display_cols = [
+        "No",
         "RMA ID",
-        display_text=r"rmaid=([^&]+)",
-        width="small",
-    ),
-    "Order": st.column_config.TextColumn("Order", width="medium"),
-    "Current Status": st.column_config.TextColumn("Current Status", width="small"),
-    "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
-    "Tracking Status": st.column_config.TextColumn("Tracking Status", width="large"),
-    "Requested date": st.column_config.TextColumn("Requested date", width="small"),
-    "Approved date": st.column_config.TextColumn("Approved date", width="small"),
-    "Received date": st.column_config.TextColumn("Received date", width="small"),
-    "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
-    "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
-    "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
-}
+        "Order",
+        "Current Status",
+        "Tracking Number",
+        "Tracking Status",
+        "Requested date",
+        "Approved date",
+        "Received date",
+        "Days since requested",
+        "resolutionType",
+        "Resolution actioned",
+    ]
 
-_table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
+    column_config = {
+        "No": st.column_config.TextColumn("No", width="small"),
+        "RMA ID": st.column_config.LinkColumn(
+            "RMA ID",
+            display_text=r"rmaid=([^&]+)",
+            width="small",
+        ),
+        "Order": st.column_config.TextColumn("Order", width="medium"),
+        "Current Status": st.column_config.TextColumn("Current Status", width="small"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
+        "Tracking Status": st.column_config.TextColumn("Tracking Status", width="large"),
+        "Requested date": st.column_config.TextColumn("Requested date", width="small"),
+        "Approved date": st.column_config.TextColumn("Approved date", width="small"),
+        "Received date": st.column_config.TextColumn("Received date", width="small"),
+        "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
+        "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
+        "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
+    }
 
-sel_event = st.dataframe(
-    _table_df[display_cols],
-    use_container_width=True,
-    height=700,
-    hide_index=True,
-    column_config=column_config,
-    on_select="rerun",
-    selection_mode="single-row",
-)
+    _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
 
-sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
-if sel_rows:
-    idx = int(sel_rows[0])
-    show_rma_actions_dialog(display_df.iloc[idx])
+    sel_event = st.dataframe(
+        _table_df[display_cols],
+        use_container_width=True,
+        height=700,
+        hide_index=True,
+        column_config=column_config,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
+    if sel_rows:
+        idx = int(sel_rows[0])
+        show_rma_actions_dialog(display_df.iloc[idx])
+
+
+if __name__ == "__main__":
+    main()
