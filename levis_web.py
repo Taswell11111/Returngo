@@ -62,8 +62,8 @@ SYNC_OVERLAP_MINUTES = 5
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 
 RATE_LIMIT_HIT = threading.Event()
-RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
+RATE_LIMIT_LOCK = threading.Lock()
 
 # ==========================================
 # 1b. STYLING + STICKY HEADER
@@ -110,10 +110,11 @@ st.markdown(
 
       /* Cards */
       .card {
+        position: relative;
         background: rgba(17, 24, 39, 0.70);
         border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 14px;
-        padding: 12px 12px 10px 12px;
+        padding: 26px 12px 10px 12px;
         box-shadow: 0 8px 20px rgba(0,0,0,0.25);
       }
 
@@ -122,64 +123,46 @@ st.markdown(
         box-shadow: 0 10px 24px rgba(0,0,0,0.34);
       }
 
-      .card.selected .left-accent {
-        background: rgba(148,163,184,0.18);
+      .card::before {
+        content: "";
+        position: absolute;
+        left: 10px;
+        right: 10px;
+        top: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: rgba(148,163,184,0.10);
+        border: 1px solid rgba(148,163,184,0.12);
+      }
+
+      .card.selected::before {
+        background: rgba(34,197,94,0.7);
+        border-color: rgba(34,197,94,0.95);
+        box-shadow: 0 0 12px rgba(34,197,94,0.7);
       }
 
       .tile-inner {
         position: relative;
-        padding-top: 12px;
-      }
-
-      /* Top bar (selection indicator) */
-      .tile-inner::before {
-        content: "";
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 6px;
-        border-radius: 12px 12px 0 0;
-        background: rgba(148,163,184,0.22);
-      }
-
-      .card.selected .tile-inner::before {
-        background: rgba(34,197,94,0.95);
-        box-shadow: 0 0 12px rgba(34,197,94,0.45);
-      }
-
-      /* Left accent strip (selection indicator) */
-      .left-accent {
-        position: absolute;
-        left: -12px;
-        top: -12px;
-        bottom: -10px;
-        width: 6px;
-        border-radius: 14px 0 0 14px;
-        background: rgba(148,163,184,0.08);
       }
 
       /* Updated pill */
       .updated-pill {
-        display: inline-flex;
-        align-items: center;
         position: absolute;
-        top: 12px;
-        right: 12px;
-        transform: translateY(-100%);
+        left: 14px;
+        top: 2px;
         font-size: 0.80rem;
         color: rgba(148,163,184,0.95);
         padding: 4px 10px;
         border-radius: 999px;
-        background: rgba(15, 23, 42, 0.55);
+        background: rgba(15, 23, 42, 0.72);
         border: 1px solid rgba(148, 163, 184, 0.18);
         z-index: 2;
       }
 
       .card.selected .updated-pill {
-        background: rgba(34,197,94,0.22);
-        border-color: rgba(34,197,94,0.6);
-        color: rgba(240,253,244,0.98);
+        background: rgba(34,197,94,0.18);
+        border-color: rgba(34,197,94,0.95);
+        color: #bbf7d0;
       }
 
       .api-box {
@@ -446,7 +429,6 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
     for _attempt in range(1, 6):
         _sleep_for_rate_limit()
         res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
-
         update_rate_limit_info(res.headers)
         if res.status_code != 429:
             return res
@@ -1083,6 +1065,35 @@ def format_api_limit_display() -> Tuple[str, str]:
         try:
             reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
             sub = f"Resets: {reset_dt.strftime('%H:%M')}"
+        except Exception:
+            sub = f"Reset: {reset}"
+    elif reset:
+        sub = f"Reset: {reset}"
+    elif updated_at:
+        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
+
+    return main, sub
+
+
+def format_api_limit_display() -> Tuple[str, str]:
+    with RATE_LIMIT_LOCK:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        reset = RATE_LIMIT_INFO.get("reset")
+        updated_at = RATE_LIMIT_INFO.get("updated_at")
+
+    if remaining is None and limit is None:
+        main = "API Limit: --"
+    elif remaining is not None and limit is not None:
+        main = f"API Left: {remaining}/{limit}"
+    else:
+        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
+
+    sub = "Updated: --"
+    if isinstance(reset, int):
+        try:
+            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
+            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
         except (ValueError, TypeError, OSError):
             sub = f"Reset: {reset}"
     elif reset:
@@ -1372,7 +1383,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
 
     with col:
         card_class = "card selected" if selected else "card"
-        st.markdown(f"<div class='{card_class}'><div class='tile-inner'><div class='left-accent'></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
         st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
 
         if st.button(label, key=f"flt_{name}", use_container_width=True):
