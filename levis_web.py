@@ -1120,59 +1120,59 @@ def main():
     """Main function to run the Streamlit app."""
 
 
-# ==========================================
-# 8. STATE
-# ==========================================
-if "active_filters" not in st.session_state:
-    st.session_state.active_filters = set()  # type: ignore
-if "search_query_input" not in st.session_state:
-    st.session_state.search_query_input = ""
-if "status_multi" not in st.session_state:
-    st.session_state.status_multi = []
-if "res_multi" not in st.session_state:
-    st.session_state.res_multi = []
-if "actioned_multi" not in st.session_state:
-    st.session_state.actioned_multi = [] # type: ignore
-if "req_dates_selected" not in st.session_state:
-    st.session_state.req_dates_selected = [] # type: ignore
+    # ==========================================
+    # 8. STATE
+    # ==========================================
+    if "active_filters" not in st.session_state:
+        st.session_state.active_filters = set()  # type: ignore
+    if "search_query_input" not in st.session_state:
+        st.session_state.search_query_input = ""
+    if "status_multi" not in st.session_state:
+        st.session_state.status_multi = []
+    if "res_multi" not in st.session_state:
+        st.session_state.res_multi = []
+    if "actioned_multi" not in st.session_state:
+        st.session_state.actioned_multi = [] # type: ignore
+    if "req_dates_selected" not in st.session_state:
+        st.session_state.req_dates_selected = [] # type: ignore
 
-if st.session_state.get("show_toast"):
-    st.toast("✅ Updated!", icon="🔄")
-    st.session_state["show_toast"] = False # type: ignore
+    if st.session_state.get("show_toast"):
+        st.toast("✅ Updated!", icon="🔄")
+        st.session_state["show_toast"] = False # type: ignore
 
-if RATE_LIMIT_HIT.is_set():
-    st.warning(
-        "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
-        "If this happens often, sync less frequently or request a higher quota key."
-    )
-    RATE_LIMIT_HIT.clear()
-
-
-def toggle_filter(name: str):
-    s: Set[str] = st.session_state.active_filters  # type: ignore
-    if name in s:
-        s.remove(name)
-    else:
-        s.add(name)
-    st.session_state.active_filters = s  # type: ignore
-    st.rerun()
+    if RATE_LIMIT_HIT.is_set():
+        st.warning(
+            "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
+            "If this happens often, sync less frequently or request a higher quota key."
+        )
+        RATE_LIMIT_HIT.clear()
 
 
-def clear_all_filters():
-    st.session_state.active_filters = set()  # type: ignore
-    st.session_state.search_query_input = ""
-    st.session_state.status_multi = [] # type: ignore
-    st.session_state.res_multi = [] # type: ignore
-    st.session_state.actioned_multi = [] # type: ignore
-    st.session_state.req_dates_selected = [] # type: ignore
-    st.rerun()
+    def toggle_filter(name: str):
+        s: Set[str] = st.session_state.active_filters  # type: ignore
+        if name in s:
+            s.remove(name)
+        else:
+            s.add(name)
+        st.session_state.active_filters = s  # type: ignore
+        st.rerun()
 
 
-def updated_pill(scope: str) -> str:
-    ts = get_last_sync(scope)
-    if not ts:
-        return "<span class='updated-pill'>UPDATED: -</span>"
-    return f"<span class='updated-pill'>UPDATED: {ts.strftime('%H:%M')}</span>"
+    def clear_all_filters():
+        st.session_state.active_filters = set()  # type: ignore
+        st.session_state.search_query_input = ""
+        st.session_state.status_multi = [] # type: ignore
+        st.session_state.res_multi = [] # type: ignore
+        st.session_state.actioned_multi = [] # type: ignore
+        st.session_state.req_dates_selected = [] # type: ignore
+        st.rerun()
+
+
+    def updated_pill(scope: str) -> str:
+        ts = get_last_sync(scope)
+        if not ts:
+            return "<span class='updated-pill'>UPDATED: -</span>"
+        return f"<span class='updated-pill'>UPDATED: {ts.strftime('%H:%M')}</span>"
 
 
     # ==========================================
@@ -1180,153 +1180,153 @@ def updated_pill(scope: str) -> str:
     # ==========================================
     h1, h2 = st.columns([3, 1], vertical_alignment="top")
 
-with h1:
-    st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
-    st.title("Levi's ReturnGO Ops Dashboard")
-    st.markdown(
-        f"""
-        <div class="subtitle-bar">
-          <span class="subtitle-dot"></span>
-          <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
-          <span style="opacity:.45">|</span>
-          <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with h2:
-    st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
-    api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
-    with api_col:
-        api_main, api_sub = format_api_limit_display()
+    with h1:
+        st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
+        st.title("Levi's ReturnGO Ops Dashboard")
         st.markdown(
             f"""
-            <div class="api-box">
-              <div>{api_main}</div>
-              <div class="api-sub">{api_sub}</div>
+            <div class="subtitle-bar">
+              <span class="subtitle-dot"></span>
+              <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
+              <span style="opacity:.45">|</span>
+              <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
-    with sync_col:
-        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-            perform_sync()
-    st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
-    if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
-        if clear_db():
-            st.cache_data.clear()
-            st.success("Cache cleared!")
-            st.rerun()
-        else:
-            st.warning("No database file to reset.")
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    st.write("")
+    with h2:
+        st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
+        api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
+        with api_col:
+            api_main, api_sub = format_api_limit_display()
+            st.markdown(
+                f"""
+                <div class="api-box">
+                  <div>{api_main}</div>
+                  <div class="api-sub">{api_sub}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with sync_col:
+            if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+                perform_sync()
+        st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
+        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
+            if clear_db():
+                st.cache_data.clear()
+                st.success("Cache cleared!")
+                st.rerun()
+            else:
+                st.warning("No database file to reset.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # ==========================================
-    # 11. LOAD + PROCESS OPEN RMAs
-    # ==========================================
-    raw_data = load_open_rmas(db_mtime())
-    processed_rows = []
+        st.write("")
 
-counts = {
-    "Pending": 0,
-    "Approved": 0,
-    "Received": 0,
-    "NoTracking": 0,
-    "Flagged": 0,
-    "CourierCancelled": 0,
-    "ApprovedDelivered": 0,
-    "ResolutionActioned": 0,
-    "NoResolutionActioned": 0,
-}
+        # ==========================================
+        # 11. LOAD + PROCESS OPEN RMAs
+        # ==========================================
+        raw_data = load_open_rmas(db_mtime())
+        processed_rows = []
 
-    search_query = st.session_state.get("search_query_input", "")
-    search_query_lower = search_query.lower().strip()
-    search_active = bool(search_query_lower)
-    today = datetime.now().date()
+    counts = {
+        "Pending": 0,
+        "Approved": 0,
+        "Received": 0,
+        "NoTracking": 0,
+        "Flagged": 0,
+        "CourierCancelled": 0,
+        "ApprovedDelivered": 0,
+        "ResolutionActioned": 0,
+        "NoResolutionActioned": 0,
+    }
 
-for rma in raw_data:
-    summary = rma.get("rmaSummary", {}) or {}
-    shipments = rma.get("shipments", []) or []
-    comments = rma.get("comments", []) or []
+        search_query = st.session_state.get("search_query_input", "")
+        search_query_lower = search_query.lower().strip()
+        search_active = bool(search_query_lower)
+        today = datetime.now().date()
 
-    status = summary.get("status", "Unknown")
-    rma_id = summary.get("rmaId", "N/A")
-    order_name = summary.get("order_name", summary.get("orderName", "N/A"))
+    for rma in raw_data:
+        summary = rma.get("rmaSummary", {}) or {}
+        shipments = rma.get("shipments", []) or []
+        comments = rma.get("comments", []) or []
 
-    track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
-    track_str = ", ".join(track_nums) if track_nums else ""
-    shipment_id = shipments[0].get("shipmentId") if shipments else None
+        status = summary.get("status", "Unknown")
+        rma_id = summary.get("rmaId", "N/A")
+        order_name = summary.get("order_name", summary.get("orderName", "N/A"))
 
-    local_tracking_status = rma.get("_local_courier_status", "") or ""
-    local_tracking_status_lower = local_tracking_status.lower()
-    track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
+        track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
+        track_str = ", ".join(track_nums) if track_nums else ""
+        shipment_id = shipments[0].get("shipmentId") if shipments else None
 
-    requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
-    approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
-    received_iso = get_received_date_iso(rma)
-    resolution_type = get_resolution_type(rma)
+        local_tracking_status = rma.get("_local_courier_status", "") or ""
+        local_tracking_status_lower = local_tracking_status.lower()
+        track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
-    comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
-    is_cc = "courier cancelled" in local_tracking_status_lower
-    is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
-    is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
-    is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
-    actioned = is_resolution_actioned(rma, comment_texts)
-    actioned_label = resolution_actioned_label(rma)
-    is_ra = actioned
-    is_nra = (status == "Received") and (not actioned)
+        requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
+        approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
+        received_iso = get_received_date_iso(rma)
+        resolution_type = get_resolution_type(rma)
 
-    if status in ("Pending", "Approved", "Received"):
-        counts[status] += 1
-    if is_nt:
-        counts["NoTracking"] += 1
-    if is_fg:
-        counts["Flagged"] += 1
-    if is_cc:
-        counts["CourierCancelled"] += 1
-    if is_ad:
-        counts["ApprovedDelivered"] += 1
-    if is_ra:
-        counts["ResolutionActioned"] += 1
-    if is_nra:
-        counts["NoResolutionActioned"] += 1
+        comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
+        is_cc = "courier cancelled" in local_tracking_status_lower
+        is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
+        is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
+        is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
+        actioned = is_resolution_actioned(rma, comment_texts)
+        actioned_label = resolution_actioned_label(rma)
+        is_ra = actioned
+        is_nra = (status == "Received") and (not actioned)
 
-    if not search_active or (
-        search_query_lower in str(rma_id).lower()
-        or search_query_lower in str(order_name).lower()
-        or search_query_lower in str(track_str).lower()
-    ):
-        processed_rows.append(
-            {
-                "No": "",
-                "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
-                "Order": order_name,
-                "Current Status": status,
-                "Tracking Number": track_link_url,
-                "Tracking Status": local_tracking_status,
-                "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
-                "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
-                "Received date": str(received_iso)[:10] if received_iso else "N/A",
-                "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
-                "resolutionType": resolution_type if resolution_type else "N/A",
-                "Resolution actioned": actioned_label,
-                "DisplayTrack": track_str,
-                "shipment_id": shipment_id,
-                "full_data": rma,
-                "_rma_id_text": rma_id,
-                "is_nt": is_nt,
-                "is_fg": is_fg,
-                "is_cc": is_cc,
-                "is_ad": is_ad,
-                "is_ra": is_ra,
-                "is_nra": is_nra,
-            }
-        )
+        if status in ("Pending", "Approved", "Received"):
+            counts[status] += 1
+        if is_nt:
+            counts["NoTracking"] += 1
+        if is_fg:
+            counts["Flagged"] += 1
+        if is_cc:
+            counts["CourierCancelled"] += 1
+        if is_ad:
+            counts["ApprovedDelivered"] += 1
+        if is_ra:
+            counts["ResolutionActioned"] += 1
+        if is_nra:
+            counts["NoResolutionActioned"] += 1
+
+        if not search_active or (
+            search_query_lower in str(rma_id).lower()
+            or search_query_lower in str(order_name).lower()
+            or search_query_lower in str(track_str).lower()
+        ):
+            processed_rows.append(
+                {
+                    "No": "",
+                    "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
+                    "Order": order_name,
+                    "Current Status": status,
+                    "Tracking Number": track_link_url,
+                    "Tracking Status": local_tracking_status,
+                    "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
+                    "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
+                    "Received date": str(received_iso)[:10] if received_iso else "N/A",
+                    "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
+                    "resolutionType": resolution_type if resolution_type else "N/A",
+                    "Resolution actioned": actioned_label,
+                    "DisplayTrack": track_str,
+                    "shipment_id": shipment_id,
+                    "full_data": rma,
+                    "_rma_id_text": rma_id,
+                    "is_nt": is_nt,
+                    "is_fg": is_fg,
+                    "is_cc": is_cc,
+                    "is_ad": is_ad,
+                    "is_ra": is_ra,
+                    "is_nra": is_nra,
+                }
+            )
 
     df_view = pd.DataFrame(processed_rows)
 
@@ -1335,86 +1335,86 @@ for rma in raw_data:
     # ==========================================
     FilterFn = Callable[[pd.DataFrame], pd.Series]
     
-FILTERS: Dict[str, Dict[str, object]] = {
-    "Pending": {"icon": "⏳", "count_key": "Pending", "scope": "Pending", "fn": lambda d: d["Current Status"] == "Pending"},
-    "Approved": {"icon": "✅", "count_key": "Approved", "scope": "Approved", "fn": lambda d: d["Current Status"] == "Approved"},
-    "Received": {"icon": "📦", "count_key": "Received", "scope": "Received", "fn": lambda d: d["Current Status"] == "Received"},
-    "No Tracking": {"icon": "🚫", "count_key": "NoTracking", "scope": "FILTER_NoTracking", "fn": lambda d: d["is_nt"] == True},
-    "Flagged": {"icon": "🚩", "count_key": "Flagged", "scope": "FILTER_Flagged", "fn": lambda d: d["is_fg"] == True},
-    "Courier Cancelled": {"icon": "🛑", "count_key": "CourierCancelled", "scope": "FILTER_CourierCancelled", "fn": lambda d: d["is_cc"] == True},
-    "Approved > Delivered": {"icon": "📬", "count_key": "ApprovedDelivered", "scope": "FILTER_ApprovedDelivered", "fn": lambda d: d["is_ad"] == True},
-    "Resolution Actioned": {"icon": "💳", "count_key": "ResolutionActioned", "scope": "FILTER_ResolutionActioned", "fn": lambda d: d["is_ra"] == True},
-    "No Resolution Actioned": {"icon": "⏸️", "count_key": "NoResolutionActioned", "scope": "FILTER_NoResolutionActioned", "fn": lambda d: d["is_nra"] == True},
-}
+    FILTERS: Dict[str, Dict[str, object]] = {
+        "Pending": {"icon": "⏳", "count_key": "Pending", "scope": "Pending", "fn": lambda d: d["Current Status"] == "Pending"},
+        "Approved": {"icon": "✅", "count_key": "Approved", "scope": "Approved", "fn": lambda d: d["Current Status"] == "Approved"},
+        "Received": {"icon": "📦", "count_key": "Received", "scope": "Received", "fn": lambda d: d["Current Status"] == "Received"},
+        "No Tracking": {"icon": "🚫", "count_key": "NoTracking", "scope": "FILTER_NoTracking", "fn": lambda d: d["is_nt"] == True},
+        "Flagged": {"icon": "🚩", "count_key": "Flagged", "scope": "FILTER_Flagged", "fn": lambda d: d["is_fg"] == True},
+        "Courier Cancelled": {"icon": "🛑", "count_key": "CourierCancelled", "scope": "FILTER_CourierCancelled", "fn": lambda d: d["is_cc"] == True},
+        "Approved > Delivered": {"icon": "📬", "count_key": "ApprovedDelivered", "scope": "FILTER_ApprovedDelivered", "fn": lambda d: d["is_ad"] == True},
+        "Resolution Actioned": {"icon": "💳", "count_key": "ResolutionActioned", "scope": "FILTER_ResolutionActioned", "fn": lambda d: d["is_ra"] == True},
+        "No Resolution Actioned": {"icon": "⏸️", "count_key": "NoResolutionActioned", "scope": "FILTER_NoResolutionActioned", "fn": lambda d: d["is_nra"] == True},
+    }
 
     def current_filter_mask(df: pd.DataFrame) -> pd.Series:
-    active: Set[str] = st.session_state.active_filters  # type: ignore
-    if df.empty:
-        return pd.Series([], dtype=bool)
-    if not active:
-        return pd.Series([True] * len(df), index=df.index)
+        active: Set[str] = st.session_state.active_filters  # type: ignore
+        if df.empty:
+            return pd.Series([], dtype=bool)
+        if not active:
+            return pd.Series([True] * len(df), index=df.index)
 
-    masks = []
-    for name in active:
-        cfg = FILTERS.get(name)
-        if not cfg:
-            continue
-        fn: FilterFn = cfg["fn"]  # type: ignore
-        masks.append(fn(df))
+        masks = []
+        for name in active:
+            cfg = FILTERS.get(name)
+            if not cfg:
+                continue
+            fn: FilterFn = cfg["fn"]  # type: ignore
+            masks.append(fn(df))
 
-    if not masks:
-        return pd.Series([True] * len(df), index=df.index)
+        if not masks:
+            return pd.Series([True] * len(df), index=df.index)
 
-    out = masks[0].copy()
-    for m in masks[1:]:
-        out = out | m
-    return out
+        out = masks[0].copy()
+        for m in masks[1:]:
+            out = out | m
+        return out
 
 
     def ids_for_filter(name: str) -> list:
-    if df_view.empty:
-        return []
-    cfg = FILTERS.get(name)
-    if not cfg:
-        return []
-    fn: FilterFn = cfg["fn"]  # type: ignore
-    mask = fn(df_view)
-    if mask is None or mask.empty:
-        return []
-    return df_view.loc[mask, "_rma_id_text"].astype(str).tolist()
+        if df_view.empty:
+            return []
+        cfg = FILTERS.get(name)
+        if not cfg:
+            return []
+        fn: FilterFn = cfg["fn"]  # type: ignore
+        mask = fn(df_view)
+        if mask is None or mask.empty:
+            return []
+        return df_view.loc[mask, "_rma_id_text"].astype(str).tolist()
 
 
     # ==========================================
     # 13. FILTER TILE UI (selected border highlight)
     # ==========================================
     def render_filter_tile(col, name: str, refresh_scope: str):
-    cfg = FILTERS[name]
-    icon = cfg["icon"]  # type: ignore
-    count_key = cfg["count_key"]  # type: ignore
-    scope = cfg["scope"]  # type: ignore
+        cfg = FILTERS[name]
+        icon = cfg["icon"]  # type: ignore
+        count_key = cfg["count_key"]  # type: ignore
+        scope = cfg["scope"]  # type: ignore
 
-    active: Set[str] = st.session_state.active_filters  # type: ignore
-    selected = (name in active)
+        active: Set[str] = st.session_state.active_filters  # type: ignore
+        selected = (name in active)
 
-    count_val = counts.get(count_key, 0)
+        count_val = counts.get(count_key, 0)
 
-    # Selection indicator: card border highlight + top bar
-    label = f"{icon} {name.upper()} [**{count_val}**]"
+        # Selection indicator: card border highlight + top bar
+        label = f"{icon} {name.upper()} [**{count_val}**]"
 
-    with col:
-        card_class = "card selected" if selected else "card"
-        st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
-        st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
+        with col:
+            card_class = "card selected" if selected else "card"
+            st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
+            st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
 
-        if st.button(label, key=f"flt_{name}", use_container_width=True):
-            toggle_filter(name)
+            if st.button(label, key=f"flt_{name}", use_container_width=True):
+                toggle_filter(name)
 
-        st.markdown("<div class='refresh-box'>", unsafe_allow_html=True)
-        if st.button("🔄 Refresh", key=f"ref_{name}", use_container_width=False):
-            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<div class='refresh-box'>", unsafe_allow_html=True)
+            if st.button("🔄 Refresh", key=f"ref_{name}", use_container_width=False):
+                force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("</div></div>", unsafe_allow_html=True)
+            st.markdown("</div></div>", unsafe_allow_html=True)
 
 
     # Row 1
@@ -1441,56 +1441,56 @@ FILTERS: Dict[str, Dict[str, object]] = {
     # ==========================================
     st.write("")
     sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
-with sc1:
-    st.text_input(
-        "Search",
-        placeholder="🔍 Search Order, RMA, or Tracking...",
-        label_visibility="collapsed",
-        key="search_query_input",
-    )
-with sc2:
-    if st.button("🧹 Clear", use_container_width=True):
-        clear_all_filters()
-with sc3:
-    if st.button("📋 View All", use_container_width=True):
-        st.session_state.active_filters = set()  # type: ignore
-        st.rerun()
+    with sc1:
+        st.text_input(
+            "Search",
+            placeholder="🔍 Search Order, RMA, or Tracking...",
+            label_visibility="collapsed",
+            key="search_query_input",
+        )
+    with sc2:
+        if st.button("🧹 Clear", use_container_width=True):
+            clear_all_filters()
+    with sc3:
+        if st.button("📋 View All", use_container_width=True):
+            st.session_state.active_filters = set()  # type: ignore
+            st.rerun()
 
     # Extra filter bar/drop (under search)
     with st.expander("Additional filters", expanded=True):
-    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
+        c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
 
-    def multi_select_with_state(label: str, options: list, key: str):
-        old = st.session_state.get(key, [])
-        # This function seems to be duplicated, let's keep one.
-        old = st.session_state.get(key, [])
-        selections = [x for x in old if x in options]
-        if selections != old:
-            st.session_state[key] = selections
-        return st.multiselect(label, options=options, key=key)
+        def multi_select_with_state(label: str, options: list, key: str):
+            old = st.session_state.get(key, [])
+            # This function seems to be duplicated, let's keep one.
+            old = st.session_state.get(key, [])
+            selections = [x for x in old if x in options]
+            if selections != old:
+                st.session_state[key] = selections
+            return st.multiselect(label, options=options, key=key)
 
-    with c1:
-        multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi")
-    with c2:
-        res_opts = []
-        if not df_view.empty and "resolutionType" in df_view.columns:
-            res_opts = sorted(
-                [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
-            )
-        multi_select_with_state("Resolution type", res_opts, "res_multi")
-    with c3:
-        multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
-    with c4:
-        req_dates = []
-        if not df_view.empty and "Requested date" in df_view.columns:
-            req_dates = sorted(
-                [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
-                reverse=True,
-            )
-        multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
-    with c5:
-        if st.button("🧼 Clear filters", use_container_width=True):
-            clear_all_filters()
+        with c1:
+            multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi")
+        with c2:
+            res_opts = []
+            if not df_view.empty and "resolutionType" in df_view.columns:
+                res_opts = sorted(
+                    [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
+                )
+            multi_select_with_state("Resolution type", res_opts, "res_multi")
+        with c3:
+            multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
+        with c4:
+            req_dates = []
+            if not df_view.empty and "Requested date" in df_view.columns:
+                req_dates = sorted(
+                    [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
+                    reverse=True,
+                )
+            multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
+        with c5:
+            if st.button("🧼 Clear filters", use_container_width=True):
+                clear_all_filters()
 
     st.divider()
 
@@ -1498,8 +1498,8 @@ with sc3:
     # 15. TABLE VIEW
     # ==========================================
     if df_view.empty:
-    st.warning("Database empty. Click Sync Dashboard to start.")
-    st.stop()
+        st.warning("Database empty. Click Sync Dashboard to start.")
+        st.stop()
 
     display_df = df_view[current_filter_mask(df_view)].copy()
 
@@ -1509,120 +1509,120 @@ with sc3:
     actioned_multi = st.session_state.get("actioned_multi", [])
     req_dates_selected = st.session_state.get("req_dates_selected", [])
 
-if status_multi:
-    display_df = display_df[display_df["Current Status"].isin(status_multi)]
-if res_multi:
-    display_df = display_df[display_df["resolutionType"].isin(res_multi)]
-if actioned_multi:
-    actioned_set = set(actioned_multi)
-    if actioned_set == {"Yes"}:
-        display_df = display_df[display_df["Resolution actioned"] != "No"]
-    elif actioned_set == {"No"}:
-        display_df = display_df[display_df["Resolution actioned"] == "No"]
-if req_dates_selected:
-    display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
+    if status_multi:
+        display_df = display_df[display_df["Current Status"].isin(status_multi)]
+    if res_multi:
+        display_df = display_df[display_df["resolutionType"].isin(res_multi)]
+    if actioned_multi:
+        actioned_set = set(actioned_multi)
+        if actioned_set == {"Yes"}:
+            display_df = display_df[display_df["Resolution actioned"] != "No"]
+        elif actioned_set == {"No"}:
+            display_df = display_df[display_df["Resolution actioned"] == "No"]
+    if req_dates_selected:
+        display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
 
     if display_df.empty:
-    st.info("No matching records found.")
-    st.stop()
+        st.info("No matching records found.")
+        st.stop()
 
     display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
     display_df["No"] = (display_df.index + 1).astype(str)
 
     @st.dialog("RMA Actions")
-def show_rma_actions_dialog(row: pd.Series):
-    rma_url = row.get("RMA ID", "")
-    rma_id_text = row.get("_rma_id_text", "")
-    shipment_id = row.get("shipment_id")
-    track_existing = row.get("DisplayTrack", "")
+    def show_rma_actions_dialog(row: pd.Series):
+        rma_url = row.get("RMA ID", "")
+        rma_id_text = row.get("_rma_id_text", "")
+        shipment_id = row.get("shipment_id")
+        track_existing = row.get("DisplayTrack", "")
 
-    tab1, tab2 = st.tabs(["Update tracking", "View timeline"])
+        tab1, tab2 = st.tabs(["Update tracking", "View timeline"])
 
-    with tab1:
-        st.markdown(f"### RMA `{rma_id_text}`")
-        if rma_url:
-            st.markdown(f"[Open in ReturnGO]({rma_url})")
+        with tab1:
+            st.markdown(f"### RMA `{rma_id_text}`")
+            if rma_url:
+                st.markdown(f"Open in ReturnGO")
 
-        with st.form("upd_track_form", clear_on_submit=False):
-            new_track = st.text_input("Tracking number", value=track_existing)
-            submitted = st.form_submit_button("Save changes")
-            if submitted:
-                if not shipment_id:
-                    st.error("No Shipment ID available for this RMA.")
-                else:
-                    ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track.strip())
-                    if ok:
-                        st.success("Tracking updated.")
-                        time.sleep(0.2)
-                        perform_sync(["Approved", "Received"])
+            with st.form("upd_track_form", clear_on_submit=False):
+                new_track = st.text_input("Tracking number", value=track_existing)
+                submitted = st.form_submit_button("Save changes")
+                if submitted:
+                    if not shipment_id:
+                        st.error("No Shipment ID available for this RMA.")
                     else:
-                        st.error(msg)
-
-    with tab2:
-        st.markdown(f"### Timeline for `{rma_id_text}`")
-
-        with st.expander("➕ Add comment", expanded=False):
-            with st.form("add_comment_form", clear_on_submit=True):
-                comment_text = st.text_area("New internal note")
-                if st.form_submit_button("Post comment"):
-                    comment = (comment_text or "").strip()
-                    if not comment:
-                        st.error("Comment cannot be empty.")
-                    else:
-                        ok, msg = push_comment_update(rma_id_text, comment)
+                        ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track.strip())
                         if ok:
-                            st.success("Comment posted.")
+                            st.success("Tracking updated.")
                             time.sleep(0.2)
                             perform_sync(["Approved", "Received"])
                         else:
                             st.error(msg)
 
-        full = row.get("full_data", {}) or {}
-        timeline = full.get("comments", []) or []
-        if not timeline:
-            st.info("No timeline events found.")
-        else:
-            for t in timeline:
-                d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
-                trig = t.get("triggeredBy", "System") or "System"
-                txt = t.get("htmlText", "") or ""
-                st.markdown(f"**{d_str}** | `{trig}`\n> {txt}")
-                st.divider()
+        with tab2:
+            st.markdown(f"### Timeline for `{rma_id_text}`")
+
+            with st.expander("➕ Add comment", expanded=False):
+                with st.form("add_comment_form", clear_on_submit=True):
+                    comment_text = st.text_area("New internal note")
+                    if st.form_submit_button("Post comment"):
+                        comment = (comment_text or "").strip()
+                        if not comment:
+                            st.error("Comment cannot be empty.")
+                        else:
+                            ok, msg = push_comment_update(rma_id_text, comment)
+                            if ok:
+                                st.success("Comment posted.")
+                                time.sleep(0.2)
+                                perform_sync(["Approved", "Received"])
+                            else:
+                                st.error(msg)
+
+            full = row.get("full_data", {}) or {}
+            timeline = full.get("comments", []) or []
+            if not timeline:
+                st.info("No timeline events found.")
+            else:
+                for t in timeline:
+                    d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
+                    trig = t.get("triggeredBy", "System") or "System"
+                    txt = t.get("htmlText", "") or ""
+                    st.markdown(f"**{d_str}** | `{trig}`\n> {txt}")
+                    st.divider()
 
 
     display_cols = [
-    "No",
-    "RMA ID",
-    "Order",
-    "Current Status",
-    "Tracking Number",
-    "Tracking Status",
-    "Requested date",
-    "Approved date",
-    "Received date",
-    "Days since requested",
-    "resolutionType",
-    "Resolution actioned",
-]
+        "No",
+        "RMA ID",
+        "Order",
+        "Current Status",
+        "Tracking Number",
+        "Tracking Status",
+        "Requested date",
+        "Approved date",
+        "Received date",
+        "Days since requested",
+        "resolutionType",
+        "Resolution actioned",
+    ]
 
     column_config = {
-    "No": st.column_config.TextColumn("No", width="small"),
-    "RMA ID": st.column_config.LinkColumn(
-        "RMA ID",
-        display_text=r"rmaid=([^&]+)",
-        width="small",
-    ),
-    "Order": st.column_config.TextColumn("Order", width="medium"),
-    "Current Status": st.column_config.TextColumn("Current Status", width="small"),
-    "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
-    "Tracking Status": st.column_config.TextColumn("Tracking Status", width="large"),
-    "Requested date": st.column_config.TextColumn("Requested date", width="small"),
-    "Approved date": st.column_config.TextColumn("Approved date", width="small"),
-    "Received date": st.column_config.TextColumn("Received date", width="small"),
-    "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
-    "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
-    "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
-}
+        "No": st.column_config.TextColumn("No", width="small"),
+        "RMA ID": st.column_config.LinkColumn(
+            "RMA ID",
+            display_text=r"rmaid=([^&]+)",
+            width="small",
+        ),
+        "Order": st.column_config.TextColumn("Order", width="medium"),
+        "Current Status": st.column_config.TextColumn("Current Status", width="small"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
+        "Tracking Status": st.column_config.TextColumn("Tracking Status", width="large"),
+        "Requested date": st.column_config.TextColumn("Requested date", width="small"),
+        "Approved date": st.column_config.TextColumn("Approved date", width="small"),
+        "Received date": st.column_config.TextColumn("Received date", width="small"),
+        "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
+        "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
+        "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
+    }
 
     _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
 
