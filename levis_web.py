@@ -1116,6 +1116,10 @@ def format_api_limit_display() -> Tuple[str, str]:
     return main, sub
 
 
+def main():
+    """Main function to run the Streamlit app."""
+
+
 # ==========================================
 # 8. STATE
 # ==========================================
@@ -1128,13 +1132,13 @@ if "status_multi" not in st.session_state:
 if "res_multi" not in st.session_state:
     st.session_state.res_multi = []
 if "actioned_multi" not in st.session_state:
-    st.session_state.actioned_multi = []
+    st.session_state.actioned_multi = [] # type: ignore
 if "req_dates_selected" not in st.session_state:
-    st.session_state.req_dates_selected = []
+    st.session_state.req_dates_selected = [] # type: ignore
 
 if st.session_state.get("show_toast"):
     st.toast("✅ Updated!", icon="🔄")
-    st.session_state["show_toast"] = False
+    st.session_state["show_toast"] = False # type: ignore
 
 if RATE_LIMIT_HIT.is_set():
     st.warning(
@@ -1157,10 +1161,10 @@ def toggle_filter(name: str):
 def clear_all_filters():
     st.session_state.active_filters = set()  # type: ignore
     st.session_state.search_query_input = ""
-    st.session_state.status_multi = []
-    st.session_state.res_multi = []
-    st.session_state.actioned_multi = []
-    st.session_state.req_dates_selected = []
+    st.session_state.status_multi = [] # type: ignore
+    st.session_state.res_multi = [] # type: ignore
+    st.session_state.actioned_multi = [] # type: ignore
+    st.session_state.req_dates_selected = [] # type: ignore
     st.rerun()
 
 
@@ -1171,10 +1175,10 @@ def updated_pill(scope: str) -> str:
     return f"<span class='updated-pill'>UPDATED: {ts.strftime('%H:%M')}</span>"
 
 
-# ==========================================
-# 10. HEADER (STICKY)
-# ==========================================
-h1, h2 = st.columns([3, 1], vertical_alignment="top")
+    # ==========================================
+    # 10. HEADER (STICKY)
+    # ==========================================
+    h1, h2 = st.columns([3, 1], vertical_alignment="top")
 
 with h1:
     st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
@@ -1220,13 +1224,13 @@ with h2:
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-st.write("")
+    st.write("")
 
-# ==========================================
-# 11. LOAD + PROCESS OPEN RMAs
-# ==========================================
-raw_data = load_open_rmas(db_mtime())
-processed_rows = []
+    # ==========================================
+    # 11. LOAD + PROCESS OPEN RMAs
+    # ==========================================
+    raw_data = load_open_rmas(db_mtime())
+    processed_rows = []
 
 counts = {
     "Pending": 0,
@@ -1240,10 +1244,10 @@ counts = {
     "NoResolutionActioned": 0,
 }
 
-search_query = st.session_state.get("search_query_input", "")
-search_query_lower = search_query.lower().strip()
-search_active = bool(search_query_lower)
-today = datetime.now().date()
+    search_query = st.session_state.get("search_query_input", "")
+    search_query_lower = search_query.lower().strip()
+    search_active = bool(search_query_lower)
+    today = datetime.now().date()
 
 for rma in raw_data:
     summary = rma.get("rmaSummary", {}) or {}
@@ -1272,6 +1276,8 @@ for rma in raw_data:
     is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
     is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
     is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
+    is_nt = (status == "Approved" and not track_str)
+    is_fg = any("flagged" in c.get('htmlText', '').lower() for c in comment_texts)
     actioned = is_resolution_actioned(rma, comment_texts)
     actioned_label = resolution_actioned_label(rma)
     is_ra = actioned
@@ -1324,13 +1330,13 @@ for rma in raw_data:
             }
         )
 
-df_view = pd.DataFrame(processed_rows)
+    df_view = pd.DataFrame(processed_rows)
 
-# ==========================================
-# 12. FILTER DEFINITIONS (multi-select)
-# ==========================================
-FilterFn = Callable[[pd.DataFrame], pd.Series]
-
+    # ==========================================
+    # 12. FILTER DEFINITIONS (multi-select)
+    # ==========================================
+    FilterFn = Callable[[pd.DataFrame], pd.Series]
+    
 FILTERS: Dict[str, Dict[str, object]] = {
     "Pending": {"icon": "⏳", "count_key": "Pending", "scope": "Pending", "fn": lambda d: d["Current Status"] == "Pending"},
     "Approved": {"icon": "✅", "count_key": "Approved", "scope": "Approved", "fn": lambda d: d["Current Status"] == "Approved"},
@@ -1343,7 +1349,7 @@ FILTERS: Dict[str, Dict[str, object]] = {
     "No Resolution Actioned": {"icon": "⏸️", "count_key": "NoResolutionActioned", "scope": "FILTER_NoResolutionActioned", "fn": lambda d: d["is_nra"] == True},
 }
 
-def current_filter_mask(df: pd.DataFrame) -> pd.Series:
+    def current_filter_mask(df: pd.DataFrame) -> pd.Series:
     active: Set[str] = st.session_state.active_filters  # type: ignore
     if df.empty:
         return pd.Series([], dtype=bool)
@@ -1367,7 +1373,7 @@ def current_filter_mask(df: pd.DataFrame) -> pd.Series:
     return out
 
 
-def ids_for_filter(name: str) -> list:
+    def ids_for_filter(name: str) -> list:
     if df_view.empty:
         return []
     cfg = FILTERS.get(name)
@@ -1380,10 +1386,10 @@ def ids_for_filter(name: str) -> list:
     return df_view.loc[mask, "_rma_id_text"].astype(str).tolist()
 
 
-# ==========================================
-# 13. FILTER TILE UI (selected border highlight)
-# ==========================================
-def render_filter_tile(col, name: str, refresh_scope: str):
+    # ==========================================
+    # 13. FILTER TILE UI (selected border highlight)
+    # ==========================================
+    def render_filter_tile(col, name: str, refresh_scope: str):
     cfg = FILTERS[name]
     icon = cfg["icon"]  # type: ignore
     count_key = cfg["count_key"]  # type: ignore
@@ -1413,30 +1419,30 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         st.markdown("</div></div>", unsafe_allow_html=True)
 
 
-# Row 1
-r1 = st.columns(5)
-render_filter_tile(r1[0], "Pending", "Pending")
-render_filter_tile(r1[1], "Approved", "Approved")
-render_filter_tile(r1[2], "Received", "Received")
-render_filter_tile(r1[3], "No Tracking", "FILTER_NoTracking")
-render_filter_tile(r1[4], "Flagged", "FILTER_Flagged")
+    # Row 1
+    r1 = st.columns(5)
+    render_filter_tile(r1[0], "Pending", "Pending")
+    render_filter_tile(r1[1], "Approved", "Approved")
+    render_filter_tile(r1[2], "Received", "Received")
+    render_filter_tile(r1[3], "No Tracking", "FILTER_NoTracking")
+    render_filter_tile(r1[4], "Flagged", "FILTER_Flagged")
 
-st.write("")
+    st.write("")
 
-# Row 2
-r2 = st.columns(4)
-render_filter_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled")
-render_filter_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered")
-render_filter_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned")
-render_filter_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned")
+    # Row 2
+    r2 = st.columns(4)
+    render_filter_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled")
+    render_filter_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered")
+    render_filter_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned")
+    render_filter_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned")
 
-st.write("")
+    st.write("")
 
-# ==========================================
-# 14. SEARCH + VIEW ALL + FILTER BAR
-# ==========================================
-st.write("")
-sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
+    # ==========================================
+    # 14. SEARCH + VIEW ALL + FILTER BAR
+    # ==========================================
+    st.write("")
+    sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
 with sc1:
     st.text_input(
         "Search",
@@ -1452,13 +1458,13 @@ with sc3:
         st.session_state.active_filters = set()  # type: ignore
         st.rerun()
 
-# Extra filter bar/drop (under search)
-with st.expander("Additional filters", expanded=True):
+    # Extra filter bar/drop (under search)
+    with st.expander("Additional filters", expanded=True):
     c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
 
     def multi_select_with_state(label: str, options: list, key: str):
         old = st.session_state.get(key, [])
-    def multi_select_with_state(label: str, options: list, key: str):
+        # This function seems to be duplicated, let's keep one.
         old = st.session_state.get(key, [])
         selections = [x for x in old if x in options]
         if selections != old:
@@ -1488,22 +1494,22 @@ with st.expander("Additional filters", expanded=True):
         if st.button("🧼 Clear filters", use_container_width=True):
             clear_all_filters()
 
-st.divider()
+    st.divider()
 
-# ==========================================
-# 15. TABLE VIEW
-# ==========================================
-if df_view.empty:
+    # ==========================================
+    # 15. TABLE VIEW
+    # ==========================================
+    if df_view.empty:
     st.warning("Database empty. Click Sync Dashboard to start.")
     st.stop()
 
-display_df = df_view[current_filter_mask(df_view)].copy()
+    display_df = df_view[current_filter_mask(df_view)].copy()
 
-# Apply extra filters (AND logic)
-status_multi = st.session_state.get("status_multi", [])
-res_multi = st.session_state.get("res_multi", [])
-actioned_multi = st.session_state.get("actioned_multi", [])
-req_dates_selected = st.session_state.get("req_dates_selected", [])
+    # Apply extra filters (AND logic)
+    status_multi = st.session_state.get("status_multi", [])
+    res_multi = st.session_state.get("res_multi", [])
+    actioned_multi = st.session_state.get("actioned_multi", [])
+    req_dates_selected = st.session_state.get("req_dates_selected", [])
 
 if status_multi:
     display_df = display_df[display_df["Current Status"].isin(status_multi)]
@@ -1518,14 +1524,14 @@ if actioned_multi:
 if req_dates_selected:
     display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
 
-if display_df.empty:
+    if display_df.empty:
     st.info("No matching records found.")
     st.stop()
 
-display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
-display_df["No"] = (display_df.index + 1).astype(str)
+    display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
+    display_df["No"] = (display_df.index + 1).astype(str)
 
-@st.dialog("RMA Actions")
+    @st.dialog("RMA Actions")
 def show_rma_actions_dialog(row: pd.Series):
     rma_url = row.get("RMA ID", "")
     rma_id_text = row.get("_rma_id_text", "")
@@ -1586,7 +1592,7 @@ def show_rma_actions_dialog(row: pd.Series):
                 st.divider()
 
 
-display_cols = [
+    display_cols = [
     "No",
     "RMA ID",
     "Order",
@@ -1601,7 +1607,7 @@ display_cols = [
     "Resolution actioned",
 ]
 
-column_config = {
+    column_config = {
     "No": st.column_config.TextColumn("No", width="small"),
     "RMA ID": st.column_config.LinkColumn(
         "RMA ID",
@@ -1620,19 +1626,22 @@ column_config = {
     "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
 }
 
-_table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
+    _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
 
-sel_event = st.dataframe(
-    _table_df[display_cols],
-    use_container_width=True,
-    height=700,
-    hide_index=True,
-    column_config=column_config,
-    on_select="rerun",
-    selection_mode="single-row",
-)
+    sel_event = st.dataframe(
+        _table_df[display_cols],
+        use_container_width=True,
+        height=700,
+        hide_index=True,
+        column_config=column_config,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
 
-sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
-if sel_rows:
-    idx = int(sel_rows[0])
-    show_rma_actions_dialog(display_df.iloc[idx])
+    sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
+    if sel_rows:
+        idx = int(sel_rows[0])
+        show_rma_actions_dialog(display_df.iloc[idx])
+
+if __name__ == "__main__":
+    main()
