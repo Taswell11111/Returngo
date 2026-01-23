@@ -1435,8 +1435,10 @@ with st.expander("Additional filters", expanded=True):
     c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
 
     def multi_select_with_state(label: str, options: list, key: str):
-        selections = [x for x in st.session_state.get(key, []) if x in set(options)]
-        st.session_state[key] = selections
+        old = st.session_state.get(key, [])
+        selections = [x for x in old if x in options]
+        if selections != old:
+            st.session_state[key] = selections
         return st.multiselect(label, options=options, key=key)
 
     with c1:
