@@ -62,6 +62,8 @@ SYNC_OVERLAP_MINUTES = 5
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 
 RATE_LIMIT_HIT = threading.Event()
+RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 
 # ==========================================
 # 1b. STYLING + STICKY HEADER
@@ -178,6 +180,37 @@ st.markdown(
         background: rgba(34,197,94,0.22);
         border-color: rgba(34,197,94,0.6);
         color: rgba(240,253,244,0.98);
+      }
+
+      .api-box {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        align-items: flex-start;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid rgba(148,163,184,0.22);
+        color: rgba(226,232,240,0.95);
+        font-size: 0.85rem;
+        font-weight: 700;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+      }
+      .api-sub {
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: rgba(148,163,184,0.9);
+      }
+
+      .header-right-card {
+        background: rgba(17,24,39,0.72);
+        border: 1px solid rgba(148,163,184,0.18);
+        border-radius: 16px;
+        padding: 12px;
+        box-shadow: 0 10px 26px rgba(0,0,0,0.25);
+      }
+      .header-right-card .stButton > button{
+        background: rgba(51,65,85,0.60) !important;
       }
 
       /* Buttons */
@@ -368,6 +401,42 @@ def rg_headers() -> dict:
     return {"x-api-key": MY_API_KEY, "x-shop-name": STORE_URL}
 
 
+def update_rate_limit_info(headers: dict):
+    if not headers:
+        return
+    lower = {str(k).lower(): v for k, v in headers.items()}
+    remaining = (
+        lower.get("x-ratelimit-remaining")
+        or lower.get("x-rate-limit-remaining")
+        or lower.get("ratelimit-remaining")
+    )
+    limit = (
+        lower.get("x-ratelimit-limit")
+        or lower.get("x-rate-limit-limit")
+        or lower.get("ratelimit-limit")
+    )
+    reset = (
+        lower.get("x-ratelimit-reset")
+        or lower.get("x-rate-limit-reset")
+        or lower.get("ratelimit-reset")
+    )
+
+    if remaining is None and limit is None and reset is None:
+        return
+
+    def to_int(val):
+        if val is None:
+            return None
+        sval = str(val).strip()
+        return int(sval) if sval.isdigit() else sval
+
+    with RATE_LIMIT_LOCK:
+        RATE_LIMIT_INFO["remaining"] = to_int(remaining)
+        RATE_LIMIT_INFO["limit"] = to_int(limit)
+        RATE_LIMIT_INFO["reset"] = to_int(reset)
+        RATE_LIMIT_INFO["updated_at"] = _now_utc()
+
+
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
     session = get_thread_session()
     headers = headers or rg_headers()
@@ -378,6 +447,7 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
         _sleep_for_rate_limit()
         res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
 
+        update_rate_limit_info(res.headers)
         if res.status_code != 429:
             return res
 
@@ -994,6 +1064,35 @@ def days_since(dt_str: str, today: Optional[datetime.date] = None) -> str:
     return str((today - d.date()).days)
 
 
+def format_api_limit_display() -> Tuple[str, str]:
+    with RATE_LIMIT_LOCK:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        reset = RATE_LIMIT_INFO.get("reset")
+        updated_at = RATE_LIMIT_INFO.get("updated_at")
+
+    if remaining is None and limit is None:
+        main = "API Limit: --"
+    elif remaining is not None and limit is not None:
+        main = f"API Left: {remaining}/{limit}"
+    else:
+        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
+
+    sub = "Updated: --"
+    if isinstance(reset, int):
+        try:
+            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
+            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
+        except (ValueError, TypeError, OSError):
+            sub = f"Reset: {reset}"
+    elif reset:
+        sub = f"Reset: {reset}"
+    elif updated_at:
+        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
+
+    return main, sub
+
+
 # ==========================================
 # 8. STATE
 # ==========================================
@@ -1071,18 +1170,28 @@ with h1:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with h2:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-        perform_sync()
-    # smaller reset centred under sync
-    cA, cB, cC = st.columns([1, 2, 1])
-    with cB:
-        st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
-        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
-            if clear_db():
-                st.success("Cache cleared!")
-                st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
+    api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
+    with api_col:
+        api_main, api_sub = format_api_limit_display()
+        st.markdown(
+            f"""
+            <div class="api-box">
+              <div>{api_main}</div>
+              <div class="api-sub">{api_sub}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with sync_col:
+        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+            perform_sync()
+    st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
+    if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
+        if clear_db():
+            st.success("Cache cleared!")
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.write("")
