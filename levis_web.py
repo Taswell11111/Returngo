@@ -563,7 +563,7 @@ def delete_rmas(rma_ids):
     if not rma_ids:
         return
     with DB_LOCK:
-        with sqlite3.connect(DB_FILE) as conn:
+           with sqlite3.connect(DB_FILE) as conn:
             conn.executemany(
                 "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
                 [(str(i), STORE_URL) for i in rma_ids],
