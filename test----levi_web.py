@@ -998,6 +998,7 @@ counts = {
 }
 
 search_query = (st.session_state.get("search_query_input") or "").strip()
+search_query_norm = search_query.lower()
 
 for rma in raw_data:
     summary = rma.get("rmaSummary", {}) or {}
@@ -1005,8 +1006,9 @@ for rma in raw_data:
     comments = rma.get("comments", []) or []
 
     status = summary.get("status", "Unknown")
-    rma_id = str(summary.get("rmaId", "N/A"))
     order_name = summary.get("order_name", summary.get("orderName", "N/A"))
+    rma_id_text = str(summary.get("rmaId", "N/A"))
+    order_text = str(order_name)
 
     track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
     track_str = ", ".join(track_nums) if track_nums else ""
@@ -1044,22 +1046,22 @@ for rma in raw_data:
         counts["NoResolutionActioned"] += 1
 
     if search_query and not (
-        search_query.lower() in str(rma_id).lower()
-        or search_query.lower() in str(order_name).lower()
-        or search_query.lower() in str(track_str).lower()
+        search_query_norm in rma_id_text.lower()
+        or search_query_norm in order_text.lower()
+        or search_query_norm in track_str.lower()
     ):
         continue
 
-    rma_url = f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}"
+    rma_url = f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id_text}"
 
     processed_rows.append(
         {
             "No": "",
             # URL is stored here; we will display the ID using LinkColumn display_text
             "RMA ID": rma_url,
-            "_rma_id_text": rma_id,
+            "_rma_id_text": rma_id_text,
 
-            "Order": order_name,
+            "Order": order_text,
             "Current Status": status,
             "Tracking Number": track_link_url,
             "Tracking Status": local_tracking_status,
