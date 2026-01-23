@@ -567,7 +567,8 @@ def delete_rmas(rma_ids):
         return
     with DB_LOCK:
         try:
-            with sqlite3.connect(DB_FILE) as conn:
+            with sqlite3.connect(DB_FILE, timeout=10) as conn:
+                conn.execute("PRAGMA busy_timeout = 10000")
                 conn.executemany(
                     "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
                     [(i, STORE_URL) for i in normalized_ids],
