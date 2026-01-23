@@ -121,11 +121,29 @@ st.markdown(
       }
 
       .card.selected .left-accent {
-        background: rgba(34,197,94,0.95);
+        background: rgba(148,163,184,0.18);
       }
 
       .tile-inner {
         position: relative;
+        padding-top: 12px;
+      }
+
+      /* Top bar (selection indicator) */
+      .tile-inner::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 6px;
+        border-radius: 12px 12px 0 0;
+        background: rgba(148,163,184,0.22);
+      }
+
+      .card.selected .tile-inner::before {
+        background: rgba(34,197,94,0.95);
+        box-shadow: 0 0 12px rgba(34,197,94,0.45);
       }
 
       /* Left accent strip (selection indicator) */
@@ -136,19 +154,24 @@ st.markdown(
         bottom: -10px;
         width: 6px;
         border-radius: 14px 0 0 14px;
-        background: rgba(148,163,184,0.18);
+        background: rgba(148,163,184,0.08);
       }
 
       /* Updated pill */
       .updated-pill {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        transform: translateY(-100%);
         font-size: 0.80rem;
         color: rgba(148,163,184,0.95);
         padding: 4px 10px;
         border-radius: 999px;
         background: rgba(15, 23, 42, 0.55);
         border: 1px solid rgba(148, 163, 184, 0.18);
-        margin-bottom: 10px;
+        z-index: 2;
       }
 
       /* Buttons */
@@ -1278,9 +1301,8 @@ def render_filter_tile(col, name: str, refresh_scope: str):
 
     count_val = counts.get(count_key, 0)
 
-    # Selection indicator: card border highlight + left strip + optional 🟢
-    green_dot = "🟢 " if selected else "   "
-    label = f"{green_dot}{icon} {name.upper()} [**{count_val}**]"
+    # Selection indicator: card border highlight + top bar
+    label = f"{icon} {name.upper()} [**{count_val}**]"
 
     with col:
         card_class = "card selected" if selected else "card"
