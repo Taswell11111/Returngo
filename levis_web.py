@@ -1433,32 +1433,23 @@ with sc3:
 # Extra filter bar/drop (under search)
 with st.expander("Additional filters", expanded=True):
     c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
+
+    def multi_select_with_state(label: str, options: list, key: str):
+        selections = [x for x in st.session_state.get(key, []) if x in options]
+        st.session_state[key] = selections
+        return st.multiselect(label, options=options, key=key)
+
     with c1:
-        st.multiselect(
-            "Status",
-            options=ACTIVE_STATUSES,
-            default=st.session_state.get("status_multi", []),
-            key="status_multi",
-        )
+        multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi")
     with c2:
         res_opts = []
         if not df_view.empty and "resolutionType" in df_view.columns:
             res_opts = sorted(
                 [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
             )
-        st.multiselect(
-            "Resolution type",
-            options=res_opts,
-            default=st.session_state.get("res_multi", []),
-            key="res_multi",
-        )
+        multi_select_with_state("Resolution type", res_opts, "res_multi")
     with c3:
-        st.multiselect(
-            "Resolution actioned",
-            options=["Yes", "No"],
-            default=st.session_state.get("actioned_multi", []),
-            key="actioned_multi",
-        )
+        multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
     with c4:
         req_dates = []
         if not df_view.empty and "Requested date" in df_view.columns:
@@ -1466,12 +1457,7 @@ with st.expander("Additional filters", expanded=True):
                 [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
                 reverse=True,
             )
-        st.multiselect(
-            "Requested date (multi-select)",
-            options=req_dates,
-            default=st.session_state.get("req_dates_selected", []),
-            key="req_dates_selected",
-        )
+        multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
     with c5:
         if st.button("🧼 Clear filters", use_container_width=True):
             clear_all_filters()
