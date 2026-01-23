@@ -562,12 +562,15 @@ def upsert_rma(
 def delete_rmas(rma_ids):
     if not rma_ids:
         return
-+try:
-+    with sqlite3.connect(DB_FILE) as conn:
-+        conn.executemany(
-+            "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
-+            [(str(i), STORE_URL) for i in rma_ids],
-+        )
+   normalized_ids = [str(i) for i in set(rma_ids) if i not in (None, "", [])]
+  if not normalized_ids:
+         return
+     with DB_LOCK:
+         with sqlite3.connect(DB_FILE) as conn:
+             conn.executemany(
+                 "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
+                [(i, STORE_URL) for i in normalized_ids],
+                      )
 +except sqlite3.DatabaseError as e:
 +    st.error(f"Failed to delete RMAs: {e}")
 
