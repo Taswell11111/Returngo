@@ -714,10 +714,12 @@ def check_courier_status(tracking_number: str) -> str:
 # ==========================================
 # 5. RETURNGO FETCHING
 # ==========================================
-def fetch_rma_list(statuses, since_dt: Optional[datetime]):
+def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, Optional[str]]:
     all_summaries = []
     cursor = None
     status_param = ",".join(statuses)
+    had_success = False
+    last_error = None
 
     updated_filter = ""
     if since_dt is not None:
@@ -729,10 +731,22 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]):
         url = f"{base_url}&cursor={cursor}" if cursor else base_url
 
         res = rg_request("GET", url, timeout=20)
+        if res is None:
+            last_error = "No response from ReturnGO"
+            break
         if res.status_code != 200:
+            err_text = (res.text or "").strip()
+            if len(err_text) > 200:
+                err_text = f"{err_text[:200]}..."
+            last_error = f"{res.status_code}: {err_text}" if err_text else str(res.status_code)
             break
 
-        data = res.json() if res.content else {}
+        had_success = True
+        try:
+            data = res.json() if res.content else {}
+        except ValueError:
+            last_error = "Invalid JSON response from ReturnGO"
+            break
         rmas = data.get("rmas", []) or []
         if not rmas:
             break
@@ -742,7 +756,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]):
         if not cursor:
             break
 
-    return all_summaries
+    return all_summaries, had_success, last_error
 
 
 def should_refresh_detail(rma_id: str) -> bool:
@@ -842,7 +856,12 @@ def perform_sync(statuses=None, *, full=False):
     since_dt = get_incremental_since(statuses, full)
 
     list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
-    summaries = fetch_rma_list(statuses, since_dt)
+    summaries, ok, err = fetch_rma_list(statuses, since_dt)
+    if not ok:
+        list_bar.empty()
+        msg = f"ReturnGO sync failed: {err}" if err else "ReturnGO sync failed."
+        status_msg.error(msg)
+        return
     list_bar.progress(1.0, text=f"Fetched {len(summaries)} RMAs")
     time.sleep(0.08)
     list_bar.empty()
@@ -1044,35 +1063,6 @@ def days_since(dt_str: str, today: Optional[datetime.date] = None) -> str:
     if today is None:
         today = datetime.now().date()
     return str((today - d.date()).days)
-
-
-def format_api_limit_display() -> Tuple[str, str]:
-    with RATE_LIMIT_LOCK:
-        remaining = RATE_LIMIT_INFO.get("remaining")
-        limit = RATE_LIMIT_INFO.get("limit")
-        reset = RATE_LIMIT_INFO.get("reset")
-        updated_at = RATE_LIMIT_INFO.get("updated_at")
-
-    if remaining is None and limit is None:
-        main = "API Limit: --"
-    elif remaining is not None and limit is not None:
-        main = f"API Left: {remaining}/{limit}"
-    else:
-        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
-
-    sub = "Updated: --"
-    if isinstance(reset, int):
-        try:
-            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
-            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
-        except Exception:
-            sub = f"Reset: {reset}"
-    elif reset:
-        sub = f"Reset: {reset}"
-    elif updated_at:
-        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
-
-    return main, sub
 
 
 def format_api_limit_display() -> Tuple[str, str]:
