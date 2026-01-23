@@ -1212,8 +1212,11 @@ with h2:
     st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
     if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
         if clear_db():
+            st.cache_data.clear()
             st.success("Cache cleared!")
             st.rerun()
+        else:
+            st.warning("No database file to reset.")
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
