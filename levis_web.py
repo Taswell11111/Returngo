@@ -574,6 +574,7 @@ def delete_rmas(rma_ids):
                 )
         except sqlite3.DatabaseError as e:
             st.error(f"Failed to delete RMAs: {e}")
+            raise
 
 
 def get_rma(rma_id: str):
