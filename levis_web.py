@@ -1435,13 +1435,17 @@ def show_rma_actions_dialog(row: pd.Series):
             with st.form("add_comment_form", clear_on_submit=True):
                 comment_text = st.text_area("New internal note")
                 if st.form_submit_button("Post comment"):
-                    ok, msg = push_comment_update(rma_id_text, comment_text)
-                    if ok:
-                        st.success("Comment posted.")
-                        time.sleep(0.2)
-                        perform_sync(["Approved", "Received"])
+                    comment = (comment_text or "").strip()
+                    if not comment:
+                        st.error("Comment cannot be empty.")
                     else:
-                        st.error(msg)
+                        ok, msg = push_comment_update(rma_id_text, comment)
+                        if ok:
+                            st.success("Comment posted.")
+                            time.sleep(0.2)
+                            perform_sync(["Approved", "Received"])
+                        else:
+                            st.error(msg)
 
         full = row.get("full_data", {}) or {}
         timeline = full.get("comments", []) or []
