@@ -1050,53 +1050,6 @@ def updated_pill(scope: str) -> str:
 
 
 # ==========================================
-# 9. DIALOGS
-# ==========================================
-@st.dialog("Update Tracking")
-def show_update_tracking_dialog(record):
-    st.markdown(f"### Update Tracking for `{record['RMA ID']}`")
-    with st.form("upd_track"):
-        new_track = st.text_input("New Tracking Number", value=record["DisplayTrack"])
-        if st.form_submit_button("Save Changes"):
-            if not record["shipment_id"]:
-                st.error("No Shipment ID.")
-            else:
-                ok, msg = push_tracking_update(record["RMA ID"], record["shipment_id"], new_track)
-                if ok:
-                    st.success("Updated!")
-                    time.sleep(0.2)
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-
-@st.dialog("View Timeline")
-def show_timeline_dialog(record):
-    st.markdown(f"### Timeline for `{record['RMA ID']}`")
-
-    with st.expander("➕ Add Comment", expanded=False):
-        with st.form("add_comm"):
-            comment_text = st.text_area("New Note")
-            if st.form_submit_button("Post Comment"):
-                ok, msg = push_comment_update(record["RMA ID"], comment_text)
-                if ok:
-                    st.success("Posted!")
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-    full = record["full_data"]
-    timeline = full.get("comments", []) or []
-    if not timeline:
-        st.info("No timeline events found.")
-    else:
-        for t in timeline:
-            d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
-            st.markdown(f"**{d_str}** | `{t.get('triggeredBy', 'System')}`\n> {t.get('htmlText', '')}")
-            st.divider()
-
-
-# ==========================================
 # 10. HEADER (STICKY)
 # ==========================================
 h1, h2 = st.columns([3, 1], vertical_alignment="top")
@@ -1211,8 +1164,7 @@ for rma in raw_data:
         processed_rows.append(
             {
                 "No": "",
-                "RMA Link": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
-                "RMA ID": rma_id,
+                "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
                 "Order": order_name,
                 "Current Status": status,
                 "Tracking Number": track_link_url,
@@ -1223,11 +1175,10 @@ for rma in raw_data:
                 "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
                 "resolutionType": resolution_type if resolution_type else "N/A",
                 "Resolution actioned": actioned_label,
-                "Update Tracking Number": False,
-                "View Timeline": False,
                 "DisplayTrack": track_str,
                 "shipment_id": shipment_id,
                 "full_data": rma,
+                "_rma_id_text": rma_id,
                 "is_nt": is_nt,
                 "is_fg": is_fg,
                 "is_cc": is_cc,
@@ -1290,7 +1241,7 @@ def ids_for_filter(name: str) -> list:
     mask = fn(df_view)
     if mask is None or mask.empty:
         return []
-    return df_view.loc[mask, "RMA ID"].astype(str).tolist()
+    return df_view.loc[mask, "_rma_id_text"].astype(str).tolist()
 
 
 # ==========================================
@@ -1448,98 +1399,110 @@ if display_df.empty:
 display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
 display_df["No"] = (display_df.index + 1).astype(str)
 
-# Keep the table key stable so widths don't reset on dialog close
-TABLE_KEY = "main_table"
+@st.dialog("RMA Actions")
+def show_rma_actions_dialog(row: pd.Series):
+    rma_url = row.get("RMA ID", "")
+    rma_id_text = row.get("_rma_id_text", "")
+    shipment_id = row.get("shipment_id")
+    track_existing = row.get("DisplayTrack", "")
 
-edited = st.data_editor(
-    display_df[
-        [
-            "No",
-            "RMA Link",
-            "RMA ID",
-            "Order",
-            "Current Status",
-            "Tracking Number",
-            "Tracking Status",
-            "Requested date",
-            "Approved date",
-            "Received date",
-            "Days since requested",
-            "resolutionType",
-            "Resolution actioned",
-            "Update Tracking Number",
-            "View Timeline",
-        ]
-    ],
+    tab1, tab2 = st.tabs(["Update tracking", "View timeline"])
+
+    with tab1:
+        st.markdown(f"### RMA `{rma_id_text}`")
+        if rma_url:
+            st.markdown(f"[Open in ReturnGO]({rma_url})")
+
+        with st.form("upd_track_form", clear_on_submit=False):
+            new_track = st.text_input("Tracking number", value=track_existing)
+            submitted = st.form_submit_button("Save changes")
+            if submitted:
+                if not shipment_id:
+                    st.error("No Shipment ID available for this RMA.")
+                else:
+                    ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track.strip())
+                    if ok:
+                        st.success("Tracking updated.")
+                        time.sleep(0.2)
+                        perform_sync(["Approved", "Received"])
+                    else:
+                        st.error(msg)
+
+    with tab2:
+        st.markdown(f"### Timeline for `{rma_id_text}`")
+
+        with st.expander("➕ Add comment", expanded=False):
+            with st.form("add_comment_form", clear_on_submit=True):
+                comment_text = st.text_area("New internal note")
+                if st.form_submit_button("Post comment"):
+                    ok, msg = push_comment_update(rma_id_text, comment_text)
+                    if ok:
+                        st.success("Comment posted.")
+                        time.sleep(0.2)
+                        perform_sync(["Approved", "Received"])
+                    else:
+                        st.error(msg)
+
+        full = row.get("full_data", {}) or {}
+        timeline = full.get("comments", []) or []
+        if not timeline:
+            st.info("No timeline events found.")
+        else:
+            for t in timeline:
+                d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
+                trig = t.get("triggeredBy", "System") or "System"
+                txt = t.get("htmlText", "") or ""
+                st.markdown(f"**{d_str}** | `{trig}`\n> {txt}")
+                st.divider()
+
+
+display_cols = [
+    "No",
+    "RMA ID",
+    "Order",
+    "Current Status",
+    "Tracking Number",
+    "Tracking Status",
+    "Requested date",
+    "Approved date",
+    "Received date",
+    "Days since requested",
+    "resolutionType",
+    "Resolution actioned",
+]
+
+column_config = {
+    "No": st.column_config.TextColumn("No", width="small"),
+    "RMA ID": st.column_config.LinkColumn(
+        "RMA ID",
+        display_text=r"rmaid=([^&]+)",
+        width="small",
+    ),
+    "Order": st.column_config.TextColumn("Order", width="medium"),
+    "Current Status": st.column_config.TextColumn("Current Status", width="small"),
+    "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
+    "Tracking Status": st.column_config.TextColumn("Tracking Status", width="large"),
+    "Requested date": st.column_config.TextColumn("Requested date", width="small"),
+    "Approved date": st.column_config.TextColumn("Approved date", width="small"),
+    "Received date": st.column_config.TextColumn("Received date", width="small"),
+    "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
+    "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
+    "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
+}
+
+_table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
+
+sel_event = st.dataframe(
+    _table_df[display_cols],
     use_container_width=True,
     height=700,
     hide_index=True,
-    key=TABLE_KEY,
-    column_config={
-        "No": st.column_config.TextColumn("No", width="small"),
-        "RMA Link": st.column_config.LinkColumn("RMA", display_text="Open", width="small"),
-        "RMA ID": st.column_config.TextColumn("RMA ID", width="small"),
-        "Order": st.column_config.TextColumn("Order", width="small"),
-        "Current Status": st.column_config.TextColumn("Current Status", width="small"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
-        "Tracking Status": st.column_config.TextColumn("Tracking Status", width="medium"),
-        "Requested date": st.column_config.TextColumn("Requested date", width="small"),
-        "Approved date": st.column_config.TextColumn("Approved date", width="small"),
-        "Received date": st.column_config.TextColumn("Received date", width="small"),
-        "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
-        "resolutionType": st.column_config.TextColumn("resolutionType", width="small"),
-        "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="small"),
-        "Update Tracking Number": st.column_config.CheckboxColumn("Update Tracking Number", width="small"),
-        "View Timeline": st.column_config.CheckboxColumn("View Timeline", width="small"),
-    },
-    disabled=[
-        "No",
-        "RMA Link",
-        "RMA ID",
-        "Order",
-        "Current Status",
-        "Tracking Number",
-        "Tracking Status",
-        "Requested date",
-        "Approved date",
-        "Received date",
-        "Days since requested",
-        "resolutionType",
-        "Resolution actioned",
-    ],
+    column_config=column_config,
+    on_select="rerun",
+    selection_mode="single-row",
 )
 
-# ==========================================
-# 16. ACTION HANDLING WITHOUT RESETTING TABLE
-# - We clear the checkbox in session_state instead of changing the table key.
-# - This prevents column width reset and reduces scroll jump.
-# ==========================================
-def _clear_edited_checkbox(row_idx: str, field: str):
-    try:
-        ss = st.session_state.get(TABLE_KEY, {})
-        if "edited_rows" in ss and row_idx in ss["edited_rows"]:
-            if field in ss["edited_rows"][row_idx]:
-                ss["edited_rows"][row_idx][field] = False
-                st.session_state[TABLE_KEY] = ss
-    except Exception:
-        pass
-
-if TABLE_KEY in st.session_state:
-    edits = st.session_state[TABLE_KEY].get("edited_rows", {})
-    # Only handle first action found to avoid double pop-ups
-    handled = False
-
-    for row_idx, changes in edits.items():
-        if handled:
-            break
-        idx = int(row_idx)
-
-        if "Update Tracking Number" in changes and changes["Update Tracking Number"]:
-            _clear_edited_checkbox(row_idx, "Update Tracking Number")
-            show_update_tracking_dialog(display_df.iloc[idx])
-            handled = True
-
-        elif "View Timeline" in changes and changes["View Timeline"]:
-            _clear_edited_checkbox(row_idx, "View Timeline")
-            show_timeline_dialog(display_df.iloc[idx])
-            handled = True
+sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
+if sel_rows:
+    idx = int(sel_rows[0])
+    show_rma_actions_dialog(display_df.iloc[idx])
