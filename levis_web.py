@@ -562,7 +562,7 @@ def upsert_rma(
 def delete_rmas(rma_ids):
     if not rma_ids:
         return
-    normalized_ids = [str(i) for i in set(rma_ids) if i not in (None, "", [])]
+    normalized_ids = [str(i) for i in set(rma_ids) if i is not None and i != ""]
     if not normalized_ids:
         return
     with DB_LOCK:
