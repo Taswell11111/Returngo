@@ -66,10 +66,12 @@ st.markdown("""
     }
     .sync-time {
         font-size: 0.8em;
-        color: #888;
+        color: #9ca3af;
         text-align: center;
-        margin-top: -10px;
-        margin-bottom: 10px;
+        margin-top: 0;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -462,7 +464,13 @@ with col1:
 with col2:
     if st.button("🔄 Sync All Data", type="primary"): perform_sync()
     if st.button("🗑️ Reset Cache", type="secondary"):
-        if clear_db(): st.success("Cache cleared!"); st.rerun()
+        if clear_db():
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.session_state.filter_state = {"store": None, "status": "All"}
+            st.session_state.pop("last_sync", None)
+            st.success("Cache cleared! Data will reload on next sync.")
+            st.rerun()
         else: st.error("DB might be locked.")
 
 # --- Process Data ---
@@ -517,9 +525,13 @@ for i, store in enumerate(STORES):
     with cols[i]:
         st.markdown(f"**{store['name'].upper()}**")
         def show_btn(label, stat, key):
-            if st.button(f"{label}\n{c[stat]}", key=key): handle_filter_click(store['url'], stat)
             ts = get_last_sync(store['url'], stat)
-            st.markdown(f"<div class='sync-time'>Updated: {ts[11:] if ts else '-'}</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='sync-time'>Updated: {ts[11:] if ts else '-'}</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button(f"{label}\n{c[stat]}", key=key):
+                handle_filter_click(store['url'], stat)
         show_btn("Pending", "Pending", f"p_{i}"); show_btn("Approved", "Approved", f"a_{i}"); show_btn("Received", "Received", f"r_{i}")
         if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}"): handle_filter_click(store['url'], "NoTrack")
         if st.button(f"🚩 Flagged\n{c['Flagged']}", key=f"f_{i}"): handle_filter_click(store['url'], "Flagged")
