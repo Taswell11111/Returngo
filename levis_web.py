@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-from typing import Optional, Tuple, Dict, Callable, Set
+from typing import Optional, Tuple, List, Dict, Any
 
 # ==========================================
 # 1. CONFIGURATION
@@ -20,14 +20,65 @@ from typing import Optional, Tuple, Dict, Callable, Set
 st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
 
 # --- Preserve scroll position across reruns (page scroll) ---
+# --- Preserve scroll position across reruns (page + dataframe scroll) ---
 components.html(
     """
     <script>
-    const y = window.localStorage.getItem("scrollY");
-    if (y) window.scrollTo(0, parseInt(y));
-    window.addEventListener("scroll", () => {
-      window.localStorage.setItem("scrollY", window.scrollY);
-    }, { passive: true });
+    (function() {
+      const KEY_PAGE = "rg_scrollY_page";
+      const KEY_DF   = "rg_scrollY_df";
+
+      function savePageScroll() {
+        try { parent.localStorage.setItem(KEY_PAGE, String(parent.window.scrollY || 0)); } catch(e){}
+      }
+
+      function restorePageScroll() {
+        try {
+          const y = parent.localStorage.getItem(KEY_PAGE);
+          if (y) parent.window.scrollTo(0, parseInt(y));
+        } catch(e){}
+      }
+
+      function findDfScroller() {
+        const roots = parent.document.querySelectorAll('[data-testid="stDataFrame"], [data-testid="stDataEditor"]');
+        for (const r of roots) {
+          const candidates = r.querySelectorAll('div');
+          for (const c of candidates) {
+            const style = parent.getComputedStyle(c);
+            if (style && (style.overflowY === "auto" || style.overflowY === "scroll") && c.scrollHeight > c.clientHeight) {
+              return c;
+            }
+          }
+        }
+        return null;
+      }
+
+      function attachDfScroll() {
+        const scroller = findDfScroller();
+        if (!scroller) return false;
+
+        try {
+          const y = parent.localStorage.getItem(KEY_DF);
+          if (y) scroller.scrollTop = parseInt(y);
+        } catch(e){}
+
+        scroller.addEventListener("scroll", () => {
+          try { parent.localStorage.setItem(KEY_DF, String(scroller.scrollTop || 0)); } catch(e){}
+        }, { passive: true });
+
+        return true;
+      }
+
+      restorePageScroll();
+      parent.window.addEventListener("scroll", savePageScroll, { passive: true });
+
+      let tries = 0;
+      const timer = setInterval(() => {
+        tries += 1;
+        const ok = attachDfScroller();
+        if (ok || tries > 30) clearInterval(timer);
+      }, 250);
+    })();
     </script>
     """,
     height=0,
@@ -66,64 +117,84 @@ RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at"
 RATE_LIMIT_LOCK = threading.Lock()
 
 # ==========================================
-# 1b. STYLING + STICKY HEADER
+# 1b. STYLING (sticky header + modern UI)
 # ==========================================
 st.markdown(
     """
     <style>
+      :root{
+        --bg0:#0b0f14;
+        --card: rgba(17, 24, 39, 0.68);
+        --border: rgba(148, 163, 184, 0.22);
+        --text: #e5e7eb;
+        --muted: rgba(148,163,184,0.95);
+        --greenbg: rgba(34,197,94,0.14);
+        --redglow: rgba(196,18,48,0.13);
+        --blueglow: rgba(59,130,246,0.10);
+      }
+
       .stApp {
-        background: radial-gradient(1200px 600px at 20% 0%, rgba(196,18,48,0.08), transparent 60%),
-                    radial-gradient(900px 500px at 90% 10%, rgba(59,130,246,0.08), transparent 55%),
-                    #0e1117;
-        color: #e5e7eb;
+        background:
+          radial-gradient(1100px 520px at 15% 0%, var(--redglow), transparent 60%),
+          radial-gradient(850px 520px at 88% 8%, var(--blueglow), transparent 55%),
+          linear-gradient(180deg, rgba(255,255,255,0.02), transparent 40%),
+          var(--bg0);
+        color: var(--text);
       }
 
       /* Title */
-      .title-wrap h1 {
-        font-size: 3.1rem;
-        margin-bottom: 0.15rem;
-        letter-spacing: 0.2px;
-        background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+      .rg-sticky {
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        padding-top: 6px;
+        background: linear-gradient(180deg, rgba(11,15,20,0.95), rgba(11,15,20,0.75), rgba(11,15,20,0.05));
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid rgba(148,163,184,0.10);
       }
 
-      .subtitle-bar {
+      /* Title area */
+      .rg-title {
+        font-size: 2.6rem;
+        font-weight: 900;
+        letter-spacing: -0.02em;
+        margin-top: 0;
+        margin-bottom: 8px;
+        text-shadow: 0 8px 22px rgba(0,0,0,0.35);
+      }
+      .rg-sub-pill {
         display: inline-flex;
         gap: 10px;
         align-items: center;
         padding: 8px 14px;
         border-radius: 999px;
         border: 1px solid rgba(148, 163, 184, 0.22);
-        background: rgba(17, 24, 39, 0.55);
-        box-shadow: 0 8px 20px rgba(0,0,0,0.20);
-        font-size: 1.05rem;
-        color: #cbd5e1;
+        background: rgba(17, 24, 39, 0.78);
+        border: 1px solid rgba(148, 163, 184, 0.20);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.25);
+        font-size: 0.98rem;
+        color: rgba(226,232,240,0.95);
       }
-      .subtitle-bar b { color: #e5e7eb; }
-      .subtitle-dot {
-        width: 7px; height: 7px;
-        border-radius: 50%;
-        background: rgba(196,18,48,0.9);
-        display: inline-block;
+      .rg-dot {
+        width: 8px; height: 8px; border-radius: 999px;
+        background: rgba(196,18,48,0.95);
+        box-shadow: 0 0 0 6px rgba(196,18,48,0.14);
       }
 
       /* Cards */
-      .card {
+      .rg-tile {
         position: relative;
-        background: rgba(17, 24, 39, 0.70);
+        background: rgba(17, 24, 39, 0.68);
         border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 14px;
-        padding: 26px 12px 10px 12px;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.25);
-      }
-
-      .card.selected {
-        border: 1px solid rgba(34,197,94,0.55);
+        padding: 12px 12px 10px 12px;
         box-shadow: 0 10px 24px rgba(0,0,0,0.34);
       }
-
-      .card::before {
+      .rg-tile.selected {
+        border-color: rgba(34,197,94,0.55);
+        background: linear-gradient(180deg, var(--greenbg), rgba(17,24,39,0.72));
+      }
+      .rg-tile::before {
         content: "";
         position: absolute;
         left: 10px;
@@ -134,8 +205,7 @@ st.markdown(
         background: rgba(148,163,184,0.10);
         border: 1px solid rgba(148,163,184,0.12);
       }
-
-      .card.selected::before {
+      .rg-tile.selected::before {
         background: rgba(34,197,94,0.7);
         border-color: rgba(34,197,94,0.95);
         box-shadow: 0 0 12px rgba(34,197,94,0.7);
@@ -233,6 +303,36 @@ st.markdown(
         font-size: 13px !important;
         border-radius: 10px !important;
       }
+      .rg-mini div.stButton > button {
+        width: auto !important;
+        margin: 0 auto !important;
+        padding: 7px 12px !important;
+        font-size: 13px !important;
+        font-weight: 800 !important;
+        border-radius: 999px !important;
+        background: rgba(51, 65, 85, 0.55) !important;
+        border: 1px solid rgba(148,163,184,0.18) !important;
+      }
+      .rg-tile div.stButton {
+        margin-bottom: 0 !important;
+      }
+      .rg-mini {
+        margin-top: -2px;
+        display: flex;
+        justify-content: center;
+      }
+
+      /* Right control card */
+      .rg-right-card {
+        background: rgba(17,24,39,0.72);
+        border: 1px solid rgba(148,163,184,0.18);
+        border-radius: 16px;
+        padding: 12px;
+        box-shadow: 0 10px 26px rgba(0,0,0,0.25);
+      }
+      .rg-right-card .stButton > button{
+        background: rgba(51,65,85,0.60) !important;
+      }
 
       /* Sticky container */
       .sticky-top {
@@ -246,6 +346,13 @@ st.markdown(
         margin-bottom: 8px;
       }
 
+      /* Keep dataframe text on one line */
+      [data-testid="stDataFrame"] * { white-space: nowrap !important; }
+      [data-testid="stDataFrame"] {
+        border-radius: 14px;
+        overflow: hidden;
+        border: 1px solid rgba(148,163,184,0.18);
+      }
       /* Data editor: attempt “fit content” */
       [data-testid="stDataFrame"] {
         border-radius: 14px;
@@ -260,6 +367,11 @@ st.markdown(
       div[data-testid="stDialog"] {
         background-color: rgba(17, 24, 39, 0.95);
         border: 1px solid rgba(196,18,48,0.55);
+        border-radius: 16px;
+      }
+      /* Dialog */
+      div[data-testid="stDialog"] {
+        background-color: rgba(17, 24, 39, 0.96);
         border-radius: 16px;
       }
 
@@ -494,6 +606,7 @@ def init_db():
         conn.close()
 
 
+@st.cache_data(show_spinner=False)
 def clear_db():
     with DB_LOCK:
         try:
@@ -640,6 +753,7 @@ def get_all_open_from_db():
     return results
 
 
+@st.cache_data(show_spinner=False)
 def db_mtime() -> float:
     try:
         return os.path.getmtime(DB_FILE)
@@ -694,6 +808,30 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 init_db()
 
 # ==========================================
+# 4. PARCEL NINJA COURIER STATUS (cached)
+# ==========================================
+
+def check_parcel_ninja_status(tracking_number: str):
+    if not PARCEL_NINJA_TOKEN or not tracking_number:
+        return None
+
+    url = f"https://optimise.parcelninja.com/api/v1/shipments?search={tracking_number}"
+
+    try:
+        res = requests.get(url, headers={"Authorization": f"Bearer {PARCEL_NINJA_TOKEN}"}, timeout=12)
+        if res.status_code != 200:
+            return None
+        data = res.json()
+        shipments = data.get("shipments") or []
+        if not shipments:
+            return None
+        return shipments[0].get("status")
+    except Exception:
+        return None
+
+
+
+# ==========================================
 # 4. COURIER STATUS
 # ==========================================
 def check_courier_status(tracking_number: str) -> str:
@@ -728,6 +866,7 @@ def check_courier_status(tracking_number: str) -> str:
 
     except Exception:
         return "Check Failed"
+
 
 
 # ==========================================
@@ -778,6 +917,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
     return all_summaries, had_success, last_error
 
 
+# This function is no longer used in the new sync logic.
 def should_refresh_detail(rma_id: str) -> bool:
     cached = get_rma(rma_id)
     if not cached:
@@ -865,23 +1005,89 @@ def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
     return min(stamps) if stamps else None
 
 
-def perform_sync(statuses=None, *, full=False):
+# ==========================================
+# 5. SYNC LOGIC (ReturnGO)
+# ==========================================
+
+# This function is no longer used in the new sync logic.
+# def fetch_rma_detail(rma_id: str) -> bool:
+#     url = f"https://api.returngo.ai/rma/{rma_id}"
+#     res = rg_request("GET", url, timeout=18)
+#     if res.status_code != 200:
+#         return False
+#     data = res.json()
+#     summary = data.get("rmaSummary", {}) or {}
+#     status = summary.get("status", "Unknown")
+#     created = summary.get("createdAt", "")
+#     upsert_rma(rma_id, status, created, data)
+#     return True
+
+
+def fetch_status_rmas(status: str) -> List[dict]:
+    status_param = status.lower()
+    since_iso = ""
+    last = get_last_sync(status)
+    if last:
+        since = last - timedelta(minutes=SYNC_OVERLAP_MINUTES)
+        since_iso = _iso_utc(since)
+    updated_filter = f"&updatedAfter={since_iso}" if since_iso else ""
+    base_url = f"https://api.returngo.ai/rmas?pagesize=500&status={status_param}{updated_filter}"
+
+    all_rmas = []
+    next_url = base_url
+    while next_url:
+        res = rg_request("GET", next_url, timeout=18)
+        if res.status_code != 200:
+            break
+        payload = res.json()
+        rmas = payload.get("rmas") or []
+        all_rmas.extend(rmas)
+        next_url = payload.get("nextPage")
+
+    return all_rmas
+
+
+def perform_sync(statuses: Optional[List[str]] = None):
+    if statuses is None:
+        statuses = ["Pending", "Approved", "Received"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_status = {executor.submit(fetch_status_rmas, st): st for st in statuses}
+        collected = {}
+        for future in concurrent.futures.as_completed(future_to_status):
+            st_name = future_to_status[future]
+            try:
+                collected[st_name] = future.result()
+            except Exception:
+                collected[st_name] = []
+
     status_msg = st.empty()
     status_msg.info("⏳ Connecting to ReturnGO...")
 
-    if statuses is None:
-        statuses = ACTIVE_STATUSES
+    for status in statuses:
+        remote_rmas = collected.get(status, [])
+        remote_ids = {str(r.get("rmaId")) for r in remote_rmas if r.get("rmaId")}
 
-    since_dt = get_incremental_since(statuses, full)
+        local_ids = get_local_ids_for_status(status)
+        # Only delete if not a full sync, or if the status is one of the active ones
+        if not full or status in ACTIVE_STATUSES:
+            missing = local_ids - remote_ids
+            delete_rmas(missing)
 
-    list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
-    summaries, ok, err = fetch_rma_list(statuses, since_dt)
-    if not ok:
-        list_bar.empty()
-        msg = f"ReturnGO sync failed: {err}" if err else "ReturnGO sync failed."
-        status_msg.error(msg)
-        return
-    list_bar.progress(1.0, text=f"Fetched {len(summaries)} RMAs")
+        for r in remote_rmas:
+            rid = str(r.get("rmaId"))
+            created_at = r.get("createdAt", "")
+            upsert_rma(rid, status, created_at, r)
+
+
+    # The following block is for fetching details for updated RMAs,
+    # which is now handled by the `collected` dictionary from `fetch_status_rmas`.
+    # We need to extract the RMA IDs from `collected` for detail fetching.
+    all_api_ids = set()
+    for status_rmas in collected.values():
+        all_api_ids.update({str(r.get("rmaId")) for r in status_rmas if r.get("rmaId")})
+
+    # Simulate progress bar for list fetching (as it's now done in parallel)
     time.sleep(0.08)
     list_bar.empty()
 
@@ -969,8 +1175,16 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
     }
 
+    # ==========================================
+    # 6. MUTATIONS (Tracking + Comments)
+    # ==========================================
+
+    def push_tracking_update(rma_id, shipment_id, tracking_number):
+        headers = {**rg_headers(), "Content-Type": "application/json"}
+
     try:
         res = rg_request("PUT", f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, timeout=15, json_body=payload)
+        # The original code had a redundant fetch_rma_detail call.
         if res.status_code == 200:
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
@@ -983,8 +1197,16 @@ def push_comment_update(rma_id, comment_text):
     headers = {**rg_headers(), "Content-Type": "application/json"}
     payload = {"text": comment_text, "isPublic": False}
 
+    def push_comment_update(rma_id, comment_text):
+        headers = {**rg_headers(), "Content-Type": "application/json"}
+        payload = {"text": comment_text, "isPublic": False}
+
     try:
         res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, timeout=15, json_body=payload)
+        # The original code had a redundant fetch_rma_detail call.
+        if res.status_code in (200, 201):
+            fresh = fetch_rma_detail(rma_id)
+            return True, "Success" if fresh else "Posted"
         if res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
@@ -1009,6 +1231,13 @@ def get_received_date_iso(rma_payload: dict) -> str:
         dt = get_event_date_iso(rma_payload, name)
         if dt:
             return dt
+
+    shipments = rma_payload.get("shipments", []) or []
+    for s in shipments:
+        if str(s.get("status", "")).lower() == "received":
+            lu = rma_payload.get("lastUpdated")
+            if lu:
+                return str(lu)
 
     for c in (rma_payload.get("comments") or []):
         txt = (c.get("htmlText", "") or "").lower()
@@ -1046,6 +1275,10 @@ def is_resolution_actioned(rma_payload: dict, comment_texts: Optional[list] = No
     ex_orders = rma_payload.get("exchangeOrders") or []
     if isinstance(ex_orders, list) and len(ex_orders) > 0:
         return True
+    txns = rma_payload.get("transactions", []) or []
+    for t in txns:
+        if str(t.get("status", "")).lower() == "success":
+            return True
     if comment_texts is None:
         comment_texts = [(c.get("htmlText", "") or "").lower() for c in (rma_payload.get("comments") or [])]
     for txt in comment_texts:
@@ -1059,11 +1292,15 @@ def is_resolution_actioned(rma_payload: dict, comment_texts: Optional[list] = No
 
 
 def resolution_actioned_label(rma_payload: dict) -> str:
+    txns = rma_payload.get("transactions", []) or []
     for t in (rma_payload.get("transactions") or []):
         if (t.get("status") or "").lower() == "success":
             typ = (t.get("type") or "").strip()
             return pretty_resolution(typ) if typ else "Yes"
+            return f"Yes ({t.get('type', 'Transaction')})"
     ex_orders = rma_payload.get("exchangeOrders") or []
+    if ex_orders:
+        return "Yes (Exchange released)"
     if isinstance(ex_orders, list) and len(ex_orders) > 0:
         return "Exchange released"
     return "No"
@@ -1112,6 +1349,9 @@ def format_api_limit_display() -> Tuple[str, str]:
         sub = f"Reset: {reset}"
     elif updated_at:
         sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
+
+    comments = rma_payload.get("comments", []) or []
+    hay = ""
 
     return main, sub
 
@@ -1212,10 +1452,10 @@ def main():
             )
         with sync_col:
             if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-                perform_sync()
+                perform_sync(ACTIVE_STATUSES)
         st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
         if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
-            if clear_db():
+            if clear_db(): # type: ignore
                 st.cache_data.clear()
                 st.success("Cache cleared!")
                 st.rerun()
@@ -1229,7 +1469,7 @@ def main():
         # ==========================================
         # 11. LOAD + PROCESS OPEN RMAs
         # ==========================================
-        raw_data = load_open_rmas(db_mtime())
+        raw_data = load_open_rmas(db_mtime()) # type: ignore
         processed_rows = []
 
     counts = {
@@ -1262,6 +1502,10 @@ def main():
         track_str = ", ".join(track_nums) if track_nums else ""
         shipment_id = shipments[0].get("shipmentId") if shipments else None
 
+        is_nt = not track_str
+        is_fg = False # Flagged status is not yet implemented
+
+
         local_tracking_status = rma.get("_local_courier_status", "") or ""
         local_tracking_status_lower = local_tracking_status.lower()
         track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
@@ -1272,10 +1516,8 @@ def main():
         resolution_type = get_resolution_type(rma)
 
         comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
-        is_cc = "courier cancelled" in local_tracking_status_lower
-        is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
-        is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
-        is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
+        is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower) # type: ignore
+        is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower)) # type: ignore
         actioned = is_resolution_actioned(rma, comment_texts)
         actioned_label = resolution_actioned_label(rma)
         is_ra = actioned
@@ -1285,11 +1527,11 @@ def main():
             counts[status] += 1
         if is_nt:
             counts["NoTracking"] += 1
-        if is_fg:
-            counts["Flagged"] += 1
+        if is_fg: # type: ignore
+ counts["Flagged"] += 1
         if is_cc:
             counts["CourierCancelled"] += 1
-        if is_ad:
+ if is_ad:
             counts["ApprovedDelivered"] += 1
         if is_ra:
             counts["ResolutionActioned"] += 1
@@ -1333,7 +1575,7 @@ def main():
     # ==========================================
     # 12. FILTER DEFINITIONS (multi-select)
     # ==========================================
-    FilterFn = Callable[[pd.DataFrame], pd.Series]
+    FilterFn = Callable[[pd.DataFrame], pd.Series] # type: ignore
     
     FILTERS: Dict[str, Dict[str, object]] = {
         "Pending": {"icon": "⏳", "count_key": "Pending", "scope": "Pending", "fn": lambda d: d["Current Status"] == "Pending"},
@@ -1358,7 +1600,7 @@ def main():
         for name in active:
             cfg = FILTERS.get(name)
             if not cfg:
-                continue
+                continue # type: ignore
             fn: FilterFn = cfg["fn"]  # type: ignore
             masks.append(fn(df))
 
@@ -1375,7 +1617,7 @@ def main():
         if df_view.empty:
             return []
         cfg = FILTERS.get(name)
-        if not cfg:
+        if not cfg: # type: ignore
             return []
         fn: FilterFn = cfg["fn"]  # type: ignore
         mask = fn(df_view)
@@ -1390,7 +1632,7 @@ def main():
     def render_filter_tile(col, name: str, refresh_scope: str):
         cfg = FILTERS[name]
         icon = cfg["icon"]  # type: ignore
-        count_key = cfg["count_key"]  # type: ignore
+        count_key = cfg["count_key"] # type: ignore
         scope = cfg["scope"]  # type: ignore
 
         active: Set[str] = st.session_state.active_filters  # type: ignore
@@ -1403,13 +1645,13 @@ def main():
 
         with col:
             card_class = "card selected" if selected else "card"
-            st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
+            st.markdown(f"<div class='rg-tile {card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
             st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
 
             if st.button(label, key=f"flt_{name}", use_container_width=True):
                 toggle_filter(name)
 
-            st.markdown("<div class='refresh-box'>", unsafe_allow_html=True)
+            st.markdown("<div class='rg-mini'>", unsafe_allow_html=True)
             if st.button("🔄 Refresh", key=f"ref_{name}", use_container_width=False):
                 force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
             st.markdown("</div>", unsafe_allow_html=True)
