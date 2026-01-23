@@ -972,6 +972,14 @@ if "active_filters" not in st.session_state:
     st.session_state.active_filters = set()  # type: ignore
 if "search_query_input" not in st.session_state:
     st.session_state.search_query_input = ""
+if "status_multi" not in st.session_state:
+    st.session_state.status_multi = []
+if "res_multi" not in st.session_state:
+    st.session_state.res_multi = []
+if "actioned_multi" not in st.session_state:
+    st.session_state.actioned_multi = []
+if "req_dates_selected" not in st.session_state:
+    st.session_state.req_dates_selected = []
 
 if st.session_state.get("show_toast"):
     st.toast("✅ Updated!", icon="🔄")
@@ -995,8 +1003,13 @@ def toggle_filter(name: str):
     st.rerun()
 
 
-def clear_filters():
+def clear_all_filters():
     st.session_state.active_filters = set()  # type: ignore
+    st.session_state.search_query_input = ""
+    st.session_state.status_multi = []
+    st.session_state.res_multi = []
+    st.session_state.actioned_multi = []
+    st.session_state.req_dates_selected = []
     st.rerun()
 
 
@@ -1307,61 +1320,68 @@ st.write("")
 # ==========================================
 # 14. SEARCH + VIEW ALL + FILTER BAR
 # ==========================================
-fc1, fc2 = st.columns([1.6, 8.4], vertical_alignment="center")
-
-with fc1:
-    if st.button("📋 View All Open RMAs", key="btn_view_all_open", use_container_width=True):
-        clear_filters()
-
-with fc2:
-    sc1, sc2 = st.columns([10, 1], vertical_alignment="center")
-    with sc1:
-        st.text_input(
-            "Search",
-            placeholder="🔎 Search Order, RMA, or Tracking...",
-            label_visibility="collapsed",
-            key="search_query_input",
-        )
-    with sc2:
-        def clear_search_cb():
-            st.session_state.search_query_input = ""
-        st.button("❌", help="Clear Search", key="clear_search_btn", on_click=clear_search_cb, use_container_width=True)
+st.write("")
+sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
+with sc1:
+    st.text_input(
+        "Search",
+        placeholder="🔍 Search Order, RMA, or Tracking...",
+        label_visibility="collapsed",
+        key="search_query_input",
+    )
+with sc2:
+    if st.button("🧹 Clear", use_container_width=True):
+        clear_all_filters()
+with sc3:
+    if st.button("📋 View All", use_container_width=True):
+        st.session_state.active_filters = set()  # type: ignore
+        st.rerun()
 
 # Extra filter bar/drop (under search)
-with st.expander("Additional filters", expanded=False):
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 4])
+with st.expander("Additional filters", expanded=True):
+    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
     with c1:
-        status_filter = st.multiselect(
+        st.multiselect(
             "Status",
-            options=sorted(df_view["Current Status"].unique().tolist()) if not df_view.empty else [],
-            default=[],
+            options=ACTIVE_STATUSES,
+            default=st.session_state.get("status_multi", []),
+            key="status_multi",
         )
     with c2:
-        res_filter = st.multiselect(
+        res_opts = []
+        if not df_view.empty and "resolutionType" in df_view.columns:
+            res_opts = sorted(
+                [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
+            )
+        st.multiselect(
             "Resolution type",
-            options=sorted(df_view["resolutionType"].unique().tolist()) if not df_view.empty else [],
-            default=[],
+            options=res_opts,
+            default=st.session_state.get("res_multi", []),
+            key="res_multi",
         )
     with c3:
-        actioned_filter = st.selectbox(
+        st.multiselect(
             "Resolution actioned",
-            options=["All", "Yes (actioned)", "No (not actioned)"],
-            index=0,
+            options=["Yes", "No"],
+            default=st.session_state.get("actioned_multi", []),
+            key="actioned_multi",
         )
     with c4:
-        # Requested date range (YYYY-MM-DD)
-        min_d = None
-        max_d = None
-        if not df_view.empty:
-            dt_vals = df_view["Requested date"].apply(parse_yyyy_mm_dd).dropna()
-            if len(dt_vals) > 0:
-                min_d = dt_vals.min().date()
-                max_d = dt_vals.max().date()
-
-        if min_d and max_d and min_d <= max_d:
-            date_range = st.date_input("Requested date range", value=(min_d, max_d))
-        else:
-            date_range = None
+        req_dates = []
+        if not df_view.empty and "Requested date" in df_view.columns:
+            req_dates = sorted(
+                [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
+                reverse=True,
+            )
+        st.multiselect(
+            "Requested date (multi-select)",
+            options=req_dates,
+            default=st.session_state.get("req_dates_selected", []),
+            key="req_dates_selected",
+        )
+    with c5:
+        if st.button("🧼 Clear filters", use_container_width=True):
+            clear_all_filters()
 
 st.divider()
 
@@ -1374,24 +1394,24 @@ if df_view.empty:
 
 display_df = df_view[current_filter_mask(df_view)].copy()
 
-# Apply extra filters
-if status_filter:
-    display_df = display_df[display_df["Current Status"].isin(status_filter)]
-if res_filter:
-    display_df = display_df[display_df["resolutionType"].isin(res_filter)]
-if actioned_filter == "Yes (actioned)":
-    display_df = display_df[display_df["Resolution actioned"] != "No"]
-elif actioned_filter == "No (not actioned)":
-    display_df = display_df[display_df["Resolution actioned"] == "No"]
+# Apply extra filters (AND logic)
+status_multi = st.session_state.get("status_multi", [])
+res_multi = st.session_state.get("res_multi", [])
+actioned_multi = st.session_state.get("actioned_multi", [])
+req_dates_selected = st.session_state.get("req_dates_selected", [])
 
-if date_range and isinstance(date_range, tuple) and len(date_range) == 2:
-    start_d, end_d = date_range
-    def in_range(s):
-        d = parse_yyyy_mm_dd(s)
-        if not d:
-            return False
-        return start_d <= d.date() <= end_d
-    display_df = display_df[display_df["Requested date"].apply(in_range)]
+if status_multi:
+    display_df = display_df[display_df["Current Status"].isin(status_multi)]
+if res_multi:
+    display_df = display_df[display_df["resolutionType"].isin(res_multi)]
+if actioned_multi:
+    actioned_set = set(actioned_multi)
+    if actioned_set == {"Yes"}:
+        display_df = display_df[display_df["Resolution actioned"] != "No"]
+    elif actioned_set == {"No"}:
+        display_df = display_df[display_df["Resolution actioned"] == "No"]
+if req_dates_selected:
+    display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
 
 if display_df.empty:
     st.info("No matching records found.")
