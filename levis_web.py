@@ -914,6 +914,7 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
         set_last_sync(scope_label, _now_utc())
         st.session_state["show_toast"] = True
         st.rerun()
+        return
 
     msg = st.empty()
     msg.info(f"⏳ Refreshing {len(ids)} records...")
@@ -1234,6 +1235,7 @@ for rma in raw_data:
     shipment_id = shipments[0].get("shipmentId") if shipments else None
 
     local_tracking_status = rma.get("_local_courier_status", "") or ""
+    local_tracking_status_lower = local_tracking_status.lower()
     track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
     requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
@@ -1244,8 +1246,8 @@ for rma in raw_data:
     comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
     is_nt = (status == "Approved" and not track_str)
     is_fg = any("flagged" in txt for txt in comment_texts)
-    is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status.lower())
-    is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status.lower()))
+    is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
+    is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
     actioned = is_resolution_actioned(rma, comment_texts)
     actioned_label = resolution_actioned_label(rma)
     is_ra = actioned
