@@ -313,6 +313,28 @@ def get_thread_session() -> requests.Session:
     return s
 
 
+def get_parcel_session() -> requests.Session:
+    s = getattr(_thread_local, "parcel_session", None)
+    if s is not None:
+        return s
+
+    s = requests.Session()
+    retries = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.7,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    _thread_local.parcel_session = s
+    return s
+
+
 def rg_headers() -> dict:
     return {"x-api-key": MY_API_KEY, "x-shop-name": STORE_URL}
 
@@ -518,6 +540,18 @@ def get_all_open_from_db():
     return results
 
 
+def db_mtime() -> float:
+    try:
+        return os.path.getmtime(DB_FILE)
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(show_spinner=False)
+def load_open_rmas(_db_mtime: float):
+    return get_all_open_from_db()
+
+
 def get_local_ids_for_status(status: str):
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
@@ -568,7 +602,8 @@ def check_courier_status(tracking_number: str) -> str:
     try:
         url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
         headers = {"User-Agent": "Mozilla/5.0", "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}"}
-        res = requests.get(url, headers=headers, timeout=10)
+        session = get_parcel_session()
+        res = session.get(url, headers=headers, timeout=10)
 
         if res.status_code == 200:
             try:
@@ -882,15 +917,16 @@ def get_resolution_type(rma_payload: dict) -> str:
     return ""
 
 
-def is_resolution_actioned(rma_payload: dict) -> bool:
+def is_resolution_actioned(rma_payload: dict, comment_texts: Optional[list] = None) -> bool:
     for t in (rma_payload.get("transactions") or []):
         if (t.get("status") or "").lower() == "success":
             return True
     ex_orders = rma_payload.get("exchangeOrders") or []
     if isinstance(ex_orders, list) and len(ex_orders) > 0:
         return True
-    for c in (rma_payload.get("comments") or []):
-        txt = (c.get("htmlText", "") or "").lower()
+    if comment_texts is None:
+        comment_texts = [(c.get("htmlText", "") or "").lower() for c in (rma_payload.get("comments") or [])]
+    for txt in comment_texts:
         if "transaction id" in txt and ("refund" in txt or "credited" in txt):
             return True
         if "exchange order" in txt and "released" in txt:
@@ -920,11 +956,12 @@ def parse_yyyy_mm_dd(s: str) -> Optional[datetime]:
         return None
 
 
-def days_since(dt_str: str) -> str:
+def days_since(dt_str: str, today: Optional[datetime.date] = None) -> str:
     d = parse_yyyy_mm_dd(dt_str)
     if not d:
         return "N/A"
-    today = datetime.now().date()
+    if today is None:
+        today = datetime.now().date()
     return str((today - d.date()).days)
 
 
@@ -1058,7 +1095,7 @@ st.write("")
 # ==========================================
 # 11. LOAD + PROCESS OPEN RMAs
 # ==========================================
-raw_data = get_all_open_from_db()
+raw_data = load_open_rmas(db_mtime())
 processed_rows = []
 
 counts = {
@@ -1074,6 +1111,9 @@ counts = {
 }
 
 search_query = st.session_state.get("search_query_input", "")
+search_query_lower = search_query.lower().strip()
+search_active = bool(search_query_lower)
+today = datetime.now().date()
 
 for rma in raw_data:
     summary = rma.get("rmaSummary", {}) or {}
@@ -1096,13 +1136,13 @@ for rma in raw_data:
     received_iso = get_received_date_iso(rma)
     resolution_type = get_resolution_type(rma)
 
-    actioned = is_resolution_actioned(rma)
-    actioned_label = resolution_actioned_label(rma)
-
+    comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
     is_nt = (status == "Approved" and not track_str)
-    is_fg = any("flagged" in (c.get("htmlText", "").lower()) for c in comments)
+    is_fg = any("flagged" in txt for txt in comment_texts)
     is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status.lower())
     is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status.lower()))
+    actioned = is_resolution_actioned(rma, comment_texts)
+    actioned_label = resolution_actioned_label(rma)
     is_ra = actioned
     is_nra = (status == "Received") and (not actioned)
 
@@ -1121,10 +1161,10 @@ for rma in raw_data:
     if is_nra:
         counts["NoResolutionActioned"] += 1
 
-    if not search_query or (
-        search_query.lower() in str(rma_id).lower()
-        or search_query.lower() in str(order_name).lower()
-        or search_query.lower() in str(track_str).lower()
+    if not search_active or (
+        search_query_lower in str(rma_id).lower()
+        or search_query_lower in str(order_name).lower()
+        or search_query_lower in str(track_str).lower()
     ):
         processed_rows.append(
             {
@@ -1138,7 +1178,7 @@ for rma in raw_data:
                 "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
                 "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
                 "Received date": str(received_iso)[:10] if received_iso else "N/A",
-                "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A"),
+                "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
                 "resolutionType": resolution_type if resolution_type else "N/A",
                 "Resolution actioned": actioned_label,
                 "Update Tracking Number": False,
