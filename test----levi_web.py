@@ -887,6 +887,35 @@ def days_since(date_str: str) -> str:
             return "N/A"
 
 
+def format_api_limit_display() -> Tuple[str, str]:
+    with RATE_LIMIT_LOCK:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        reset = RATE_LIMIT_INFO.get("reset")
+        updated_at = RATE_LIMIT_INFO.get("updated_at")
+
+    if remaining is None and limit is None:
+        main = "API Limit: --"
+    elif remaining is not None and limit is not None:
+        main = f"API Left: {remaining}/{limit}"
+    else:
+        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
+
+    sub = "Updated: --"
+    if isinstance(reset, int):
+        try:
+            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
+            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
+        except Exception:
+            sub = f"Reset: {reset}"
+    elif reset:
+        sub = f"Reset: {reset}"
+    elif updated_at:
+        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
+
+    return main, sub
+
+
 # ==========================================
 # 8. UI STATE
 # ==========================================
@@ -1065,35 +1094,6 @@ def get_status_time_html(s: str) -> str:
         return f"UPDATED: {ts.strftime('%H:%M')}"
     except Exception:
         return "UPDATED: -"
-
-
-def format_api_limit_display() -> Tuple[str, str]:
-    with RATE_LIMIT_LOCK:
-        remaining = RATE_LIMIT_INFO.get("remaining")
-        limit = RATE_LIMIT_INFO.get("limit")
-        reset = RATE_LIMIT_INFO.get("reset")
-        updated_at = RATE_LIMIT_INFO.get("updated_at")
-
-    if remaining is None and limit is None:
-        main = "API Limit: --"
-    elif remaining is not None and limit is not None:
-        main = f"API Left: {remaining}/{limit}"
-    else:
-        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
-
-    sub = "Updated: --"
-    if isinstance(reset, int):
-        try:
-            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
-            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
-        except Exception:
-            sub = f"Reset: {reset}"
-    elif reset:
-        sub = f"Reset: {reset}"
-    elif updated_at:
-        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
-
-    return main, sub
 
 
 def toggle_filter(key: str):
