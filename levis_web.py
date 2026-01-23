@@ -1356,10 +1356,6 @@ def format_api_limit_display() -> Tuple[str, str]:
     return main, sub
 
 
-def main():
-    """Main function to run the Streamlit app."""
-
-
     # ==========================================
     # 8. STATE
     # ==========================================
@@ -1483,6 +1479,7 @@ def main():
         "ResolutionActioned": 0,
         "NoResolutionActioned": 0,
     }
+
         search_query = st.session_state.get("search_query_input", "")
         search_query_lower = search_query.lower().strip()
         search_active = bool(search_query_lower)
