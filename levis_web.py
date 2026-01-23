@@ -658,7 +658,10 @@ def perform_sync(statuses=None, *, full=False):
 
     st.session_state["show_toast"] = True
     status_msg.success("✅ Sync Complete!")
-    load_open_rmas.clear()
+    try:
+        load_open_rmas.clear()
+    except Exception:
+        st.error("Failed to clear open-RMA cache")
     st.rerun()
 
 
@@ -688,7 +691,10 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
     set_last_sync(scope_label, _now_utc())
     st.session_state["show_toast"] = True
     msg.success("✅ Refresh Complete!")
-    load_open_rmas.clear()
+    try:
+        load_open_rmas.clear()
+    except Exception:
+        st.error("Failed to clear open-RMA cache")
     st.rerun()
 
 
@@ -1363,13 +1369,13 @@ def main():
         approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
         received_iso = get_received_date_iso(rma)
         resolution_type = get_resolution_type(rma)
-        is_nt = len(track_nums) == 0
+        is_nt = not track_nums
         req_dt = parse_yyyy_mm_dd(str(requested_iso)[:10] if requested_iso else "")
         is_fg = status == "Pending" and req_dt is not None and (today - req_dt.date()).days >= 7
 
         comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
-        is_cc = bool(local_tracking_status) and ("courier cancelled" in local_tracking_status_lower)
-        is_ad = (status == "Approved") and (bool(local_tracking_status) and ("delivered" in local_tracking_status_lower))
+        is_cc = "courier cancelled" in local_tracking_status_lower
+        is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
         actioned = is_resolution_actioned(rma, comment_texts)
         actioned_label = resolution_actioned_label(rma)
         is_ra = actioned
