@@ -1243,7 +1243,6 @@ def main():
         "ResolutionActioned": 0,
         "NoResolutionActioned": 0,
     }
-
         search_query = st.session_state.get("search_query_input", "")
         search_query_lower = search_query.lower().strip()
         search_active = bool(search_query_lower)
