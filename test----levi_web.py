@@ -887,6 +887,26 @@ def days_since(date_str: str) -> str:
             return "N/A"
 
 
+# ==========================================
+# 8. UI STATE
+# ==========================================
+if "selected_filters" not in st.session_state:
+    st.session_state.selected_filters = set()
+if "search_query_input" not in st.session_state:
+    st.session_state.search_query_input = ""
+
+if st.session_state.get("show_toast"):
+    st.toast("✅ API Sync Complete!", icon="🔄")
+    st.session_state["show_toast"] = False
+
+if RATE_LIMIT_HIT.is_set():
+    st.warning(
+        "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
+        "If this happens often, sync less frequently or request a higher quota key."
+    )
+    RATE_LIMIT_HIT.clear()
+
+
 def format_api_limit_display() -> Tuple[str, str]:
     with RATE_LIMIT_LOCK:
         remaining = RATE_LIMIT_INFO.get("remaining")
@@ -915,25 +935,6 @@ def format_api_limit_display() -> Tuple[str, str]:
 
     return main, sub
 
-
-# ==========================================
-# 8. UI STATE
-# ==========================================
-if "selected_filters" not in st.session_state:
-    st.session_state.selected_filters = set()
-if "search_query_input" not in st.session_state:
-    st.session_state.search_query_input = ""
-
-if st.session_state.get("show_toast"):
-    st.toast("✅ API Sync Complete!", icon="🔄")
-    st.session_state["show_toast"] = False
-
-if RATE_LIMIT_HIT.is_set():
-    st.warning(
-        "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
-        "If this happens often, sync less frequently or request a higher quota key."
-    )
-    RATE_LIMIT_HIT.clear()
 
 # ==========================================
 # 9. STICKY HEADER AREA
