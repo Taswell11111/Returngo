@@ -1083,7 +1083,7 @@ def format_api_limit_display() -> Tuple[str, str]:
         try:
             reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
             sub = f"Resets: {reset_dt.strftime('%H:%M')}"
-        except Exception:
+        except (ValueError, TypeError, OSError):
             sub = f"Reset: {reset}"
     elif reset:
         sub = f"Reset: {reset}"
