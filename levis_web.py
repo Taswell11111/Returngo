@@ -1437,7 +1437,6 @@ with st.expander("Additional filters", expanded=True):
         st.multiselect(
             "Status",
             options=ACTIVE_STATUSES,
-            default=st.session_state.get("status_multi", []),
             key="status_multi",
         )
     with c2:
@@ -1449,14 +1448,12 @@ with st.expander("Additional filters", expanded=True):
         st.multiselect(
             "Resolution type",
             options=res_opts,
-            default=st.session_state.get("res_multi", []),
             key="res_multi",
         )
     with c3:
         st.multiselect(
             "Resolution actioned",
             options=["Yes", "No"],
-            default=st.session_state.get("actioned_multi", []),
             key="actioned_multi",
         )
     with c4:
@@ -1469,7 +1466,6 @@ with st.expander("Additional filters", expanded=True):
         st.multiselect(
             "Requested date (multi-select)",
             options=req_dates,
-            default=st.session_state.get("req_dates_selected", []),
             key="req_dates_selected",
         )
     with c5:
