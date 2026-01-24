@@ -1162,38 +1162,6 @@ def main():
             color: rgba(148,163,184,0.9);
           }
 
-          .header-right-card {
-            background: rgba(17,24,39,0.72);
-            border: 1px solid rgba(148,163,184,0.18);
-            border-radius: 16px;
-            padding: 12px;
-            box-shadow: 0 10px 26px rgba(0,0,0,0.25);
-          }
-          .header-right-card .stButton > button{
-            background: rgba(51,65,85,0.60) !important;
-          }
-
-          /* Buttons */
-          div.stButton > button {
-            width: 100%;
-            border: 1px solid rgba(148, 163, 184, 0.25) !important;
-            background: rgba(31, 41, 55, 0.92) !important;
-            color: #e5e7eb !important;
-            border-radius: 10px !important;
-            padding: 12px 14px !important;
-            font-size: 15px !important;
-            font-weight: 850 !important;
-            transition: 0.15s ease-in-out;
-          }
-          div.stButton > button strong {
-            font-size: 19px !important;
-          }
-          div.stButton > button:hover {
-            border-color: rgba(196,18,48,0.70) !important;
-            color: #fff !important;
-            transform: translateY(-1px);
-          }
-
           /* Refresh link under each tile */
           .refresh-link {
             margin-top: 4px;
@@ -1384,7 +1352,6 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with h2:
-        st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
         api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
         with api_col:
             api_main, api_sub = format_api_limit_display()
@@ -1420,7 +1387,6 @@ def main():
                 st.rerun()
             else:
                 st.warning("No database file to reset.")
-        st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.write("")
