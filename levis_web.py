@@ -428,11 +428,13 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 # 4. COURIER STATUS
 # ==========================================
 def check_courier_status(tracking_number: str) -> str:
-    if not tracking_number or not PARCEL_NINJA_TOKEN:
+    if not tracking_number:
         return "Unknown"
     try:
-        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
-        headers = {"User-Agent": "Mozilla/5.0", "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}"}
+        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        if PARCEL_NINJA_TOKEN:
+            headers["Authorization"] = f"Bearer {PARCEL_NINJA_TOKEN}"
         session = get_parcel_session()
         res = session.get(url, headers=headers, timeout=10)
 
@@ -441,12 +443,24 @@ def check_courier_status(tracking_number: str) -> str:
                 data = res.json()
                 if isinstance(data, dict) and data.get("history"):
                     s0 = data["history"][0]
-                    return (s0.get("status") or s0.get("description") or "Unknown") or "Unknown"
+                    status = (s0.get("status") or s0.get("description") or "Unknown") or "Unknown"
+                    ts = (s0.get("datetime") or s0.get("date") or "").strip()
+                    return f"{ts} {status}".strip() if ts else status
                 return (data.get("status") or data.get("currentStatus") or "Unknown") or "Unknown"
             except Exception:
                 pass
 
             clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
+            row_match = re.search(
+                r"<tr[^>]*>\s*<td[^>]*>\s*([^<]+?)\s*</td>\s*<td[^>]*>\s*([^<]+?)\s*</td>",
+                clean_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if row_match:
+                date_text = re.sub(r"\s+", " ", row_match.group(1)).strip()
+                status_text = re.sub(r"\s+", " ", row_match.group(2)).strip()
+                return f"{date_text} {status_text}".strip()
+
             for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                 if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                     return kw
@@ -722,7 +736,7 @@ def push_comment_update(rma_id, comment_text):
     payload = {"text": comment_text, "isPublic": False}
 
     try:
-        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, timeout=15, json_body=payload)
+        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, timeout=15, json_body=payload)
         if res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
@@ -903,8 +917,8 @@ def update_data_table_log(rows: list):
             )
 
     if new_entries:
-        st.session_state.data_table_log = new_entries + st.session_state.data_table_log
-    st.session_state.data_table_prev = current_map
+        st.session_state.data_table_log = (new_entries + st.session_state.data_table_log)[:100]
+    st.session_state.data_table_prev = {**prev_map, **current_map}
 
 
 def updated_pill(scope: str) -> str:
@@ -912,6 +926,18 @@ def updated_pill(scope: str) -> str:
     if not ts:
         return "<span class='updated-pill'>UPDATED: -</span>"
     return f"<span class='updated-pill'>UPDATED: {ts.strftime('%H:%M')}</span>"
+
+
+def header_last_sync_display(scopes: list) -> str:
+    scope_key = ",".join(scopes)
+    ts = get_last_sync(scope_key)
+    if not ts:
+        stamps = [get_last_sync(s) for s in scopes]
+        stamps = [stamp for stamp in stamps if stamp]
+        ts = max(stamps) if stamps else None
+    if not ts:
+        return "--"
+    return ts.astimezone().strftime("%H:%M")
 
 
 # ==========================================
@@ -994,6 +1020,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         if st.button(label, key=f"flt_{name}", use_container_width=True):
             toggle_filter(name)
 
+        st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<div class='refresh-link'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
             force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
@@ -1059,6 +1086,7 @@ def main():
             background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            text-shadow: 0 12px 30px rgba(15, 23, 42, 0.45);
           }
 
           .subtitle-bar {
@@ -1091,7 +1119,7 @@ def main():
             background: rgba(17, 24, 39, 0.70);
             border: 1px solid rgba(148, 163, 184, 0.18);
             border-radius: 14px;
-            padding: 26px 12px 10px 12px;
+            padding: 26px 12px 0 12px;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
           }
 
@@ -1125,7 +1153,7 @@ def main():
           /* Updated pill */
           .updated-pill {
             position: absolute;
-            left: 10px;
+            left: 0;
             top: 2px;
             font-size: 0.80rem;
             color: rgba(148,163,184,0.95);
@@ -1164,7 +1192,7 @@ def main():
 
           /* Refresh link under each tile */
           .refresh-link {
-            margin-top: 4px;
+            margin-top: 6px;
             display: flex;
             justify-content: center;
           }
@@ -1178,6 +1206,7 @@ def main():
             font-style: italic !important;
             color: #60a5fa !important;
             text-decoration: underline !important;
+            line-height: 1 !important;
           }
           .refresh-link div.stButton > button:hover {
             color: #93c5fd !important;
@@ -1240,15 +1269,28 @@ def main():
             box-shadow: 0 10px 22px rgba(0,0,0,0.25);
             z-index: 5;
           }
-          .sync-time-bar {
-            margin-bottom: 8px;
-            padding: 6px 10px;
+          .sync-time-pill {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 8px;
+            padding: 6px 12px;
             border-radius: 999px;
             background: rgba(15, 23, 42, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.22);
+            border: 1px solid rgba(148,163,184,0.22);
             color: rgba(226,232,240,0.95);
-            font-size: 0.75rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+          }
+          .sync-time-pill .label {
+            color: rgba(148,163,184,0.9);
             font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .sync-time-pill .value {
+            color: #e2e8f0;
+            font-weight: 800;
           }
           .data-table-actions {
             display: flex;
@@ -1316,8 +1358,6 @@ def main():
         st.session_state.actioned_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
-    if "last_sync_pressed" not in st.session_state:
-        st.session_state.last_sync_pressed = None
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1721,22 +1761,35 @@ def main():
         log_col, copy_col = st.columns([1, 1])
         with log_col:
             st.markdown("<div class='data-log-tab'>", unsafe_allow_html=True)
-            if st.button("Data table log", use_container_width=True):
+            if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
                 show_data_table_log()
             st.markdown("</div>", unsafe_allow_html=True)
         with copy_col:
             st.markdown("<div class='copy-all-btn'>", unsafe_allow_html=True)
             if st.button("📋 Copy all", use_container_width=True):
                 st.session_state["copy_all_payload"] = tsv_text
+                st.session_state["suppress_row_dialog"] = True
             st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.get("copy_all_payload"):
         copy_payload = st.session_state.pop("copy_all_payload")
+        json_payload = json.dumps(copy_payload)
         components.html(
             f"""
             <script>
-              navigator.clipboard.writeText({copy_payload!r});
+              (async () => {{
+                try {{
+                  const payload = JSON.parse({json_payload});
+                  if (navigator.clipboard?.writeText) {{
+                    await navigator.clipboard.writeText(payload);
+                  }} else {{
+                    console.warn("Clipboard API unavailable.");
+                  }}
+                }} catch (err) {{
+                  console.error("Clipboard write failed.", err);
+                }}
+              }})();
             </script>
             """,
             height=0,
@@ -1750,6 +1803,7 @@ def main():
 
     styled_table = _table_df[display_cols].style.apply(highlight_missing_tracking, axis=1)
 
+    table_key = "rma_table"
     sel_event = st.dataframe(
         styled_table,
         use_container_width=True,
@@ -1758,12 +1812,19 @@ def main():
         column_config=column_config,
         on_select="rerun",
         selection_mode="single-row",
+        key=table_key,
     )
 
     sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
     if sel_rows:
-        idx = int(sel_rows[0])
-        show_rma_actions_dialog(display_df.iloc[idx])
+        if st.session_state.pop("suppress_row_dialog", False):
+            table_state = st.session_state.get(table_key, {})
+            if isinstance(table_state, dict):
+                table_state["selection"] = {"rows": []}
+                st.session_state[table_key] = table_state
+        else:
+            idx = int(sel_rows[0])
+            show_rma_actions_dialog(display_df.iloc[idx])
 
 
 if __name__ == "__main__":
