@@ -362,17 +362,17 @@ def perform_sync(target_store=None, target_status=None):
     if total_found > 0:
         bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(fetch_rma_detail, task): task for task in tasks}
-            completed = 0
-            for future in concurrent.futures.as_completed(futures):
-                completed += 1
-                if completed % 5 == 0: bar.progress(completed / total_found, text=f"Syncing: {completed}/{total_found}")
+            futures = [executor.submit(fetch_rma_detail, task) for task in tasks]
+            
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                # We can do something with the result here if needed, e.g., future.result()
+                bar.progress((i + 1) / total_found, text=f"Syncing: {i + 1}/{total_found}")
         bar.empty()
                 
     st.session_state['last_sync'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state['show_toast'] = True
-    st.session_state.pop("main_table", None)
     status_msg.success(f"✅ Sync Complete!")
+    st.cache_data.clear()
     st.rerun()
 
 def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):

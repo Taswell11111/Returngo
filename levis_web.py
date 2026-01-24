@@ -644,9 +644,8 @@ def perform_sync(statuses=None, *, full=False):
         bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             futures = [ex.submit(fetch_rma_detail, rid, force=force) for rid in to_fetch]
-            done = 0
-            for _ in concurrent.futures.as_completed(futures):
-                done += 1
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                done = i + 1
                 bar.progress(done / total, text=f"Syncing: {done}/{total}")
         bar.empty()
 
