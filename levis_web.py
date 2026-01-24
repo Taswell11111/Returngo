@@ -436,7 +436,7 @@ def _clean_html_text(value: str) -> str:
 
 def _extract_latest_tracking_row(html_text: str) -> Optional[str]:
     rows = re.findall(r"<tr[^>]*>.*?</tr>", html_text, flags=re.IGNORECASE | re.DOTALL)
-    for row in rows:
+    for row in reversed(rows):
         cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.IGNORECASE | re.DOTALL)
         if len(cells) >= 2:
             ts = _clean_html_text(cells[0])
