@@ -871,7 +871,40 @@ def clear_all_filters():
     st.session_state.res_multi = []
     st.session_state.actioned_multi = []
     st.session_state.req_dates_selected = []
-    st.rerun()
+
+
+def update_data_table_log(rows: list):
+    if "data_table_log" not in st.session_state:
+        st.session_state.data_table_log = []
+    if "data_table_prev" not in st.session_state:
+        st.session_state.data_table_prev = {}
+
+    prev_map = st.session_state.data_table_prev
+    current_map = {}
+    new_entries = []
+    timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    for row in rows:
+        rma_id = row.get("_rma_id_text") or row.get("RMA ID")
+        if not rma_id:
+            continue
+        status = row.get("Current Status", "Unknown")
+        resolution = row.get("resolutionType", "N/A")
+        current_map[rma_id] = {"status": status, "resolution": resolution}
+
+        prev = prev_map.get(rma_id)
+        if not prev:
+            continue
+        if prev.get("status") != status:
+            new_entries.append(f"{timestamp} | RMA {rma_id}: {prev.get('status')} → {status}")
+        if prev.get("resolution") != resolution:
+            new_entries.append(
+                f"{timestamp} | RMA {rma_id}: Resolution {prev.get('resolution')} → {resolution}"
+            )
+
+    if new_entries:
+        st.session_state.data_table_log = new_entries + st.session_state.data_table_log
+    st.session_state.data_table_prev = current_map
 
 
 def updated_pill(scope: str) -> str:
@@ -961,8 +994,8 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         if st.button(label, key=f"flt_{name}", use_container_width=True):
             toggle_filter(name)
 
-        st.markdown("<div class='refresh-box'>", unsafe_allow_html=True)
-        if st.button("🔄 Refresh", key=f"ref_{name}", use_container_width=False):
+        st.markdown("<div class='refresh-link'>", unsafe_allow_html=True)
+        if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
             force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1021,6 +1054,8 @@ def main():
             font-size: 3.1rem;
             margin-bottom: 0.15rem;
             letter-spacing: 0.2px;
+            font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            font-weight: 700;
             background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -1044,6 +1079,10 @@ def main():
             border-radius: 50%;
             background: rgba(196,18,48,0.9);
             display: inline-block;
+          }
+
+          .block-container {
+            background: transparent !important;
           }
 
           /* Cards */
@@ -1086,7 +1125,7 @@ def main():
           /* Updated pill */
           .updated-pill {
             position: absolute;
-            left: 14px;
+            left: 10px;
             top: 2px;
             font-size: 0.80rem;
             color: rgba(148,163,184,0.95);
@@ -1146,30 +1185,35 @@ def main():
             font-weight: 850 !important;
             transition: 0.15s ease-in-out;
           }
+          div.stButton > button strong {
+            font-size: 19px !important;
+          }
           div.stButton > button:hover {
             border-color: rgba(196,18,48,0.70) !important;
             color: #fff !important;
             transform: translateY(-1px);
           }
 
-          /* Refresh box under each tile: lighter + touches main button */
-          .refresh-box {
-            margin-top: -2px;           /* touch main button border */
-            padding-top: 8px;
-            padding-bottom: 6px;
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(148,163,184,0.14);
-            border-top: 0;
-            border-radius: 0 0 12px 12px;
+          /* Refresh link under each tile */
+          .refresh-link {
+            margin-top: 4px;
             display: flex;
             justify-content: center;
           }
-
-          .refresh-box div.stButton > button {
-            width: auto !important;     /* shrink-to-fit */
-            padding: 6px 12px !important;
+          .refresh-link div.stButton > button {
+            width: auto !important;
+            padding: 0 !important;
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
             font-size: 13px !important;
-            border-radius: 10px !important;
+            font-style: italic !important;
+            color: #60a5fa !important;
+            text-decoration: underline !important;
+          }
+          .refresh-link div.stButton > button:hover {
+            color: #93c5fd !important;
+            transform: none !important;
           }
 
           /* Sticky container */
@@ -1199,14 +1243,60 @@ def main():
             background-color: rgba(17, 24, 39, 0.95);
             border: 1px solid rgba(196,18,48,0.55);
             border-radius: 16px;
+            width: min(96vw, 1200px) !important;
+            max-width: 96vw !important;
           }
 
           /* Smaller Reset Cache button look (lighter) */
+          .reset-wrap {
+            position: relative;
+          }
           .reset-wrap div.stButton > button {
             background: rgba(148,163,184,0.18) !important;
             border-color: rgba(148,163,184,0.25) !important;
             padding: 9px 12px !important;
             font-size: 14px !important;
+          }
+          .reset-wrap:hover::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            right: 0;
+            top: -42px;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(148,163,184,0.35);
+            color: #e2e8f0;
+            padding: 6px 10px;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
+            z-index: 5;
+          }
+          .sync-time-bar {
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            color: rgba(226,232,240,0.95);
+            font-size: 0.75rem;
+            font-weight: 600;
+          }
+          .data-table-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            align-items: center;
+          }
+          .data-log-tab div.stButton > button {
+            background: rgba(15, 23, 42, 0.72) !important;
+            border-color: rgba(148, 163, 184, 0.22) !important;
+            font-size: 14px !important;
+            padding: 8px 12px !important;
+          }
+          .copy-all-btn div.stButton > button {
+            background: rgba(59, 130, 246, 0.18) !important;
+            border-color: rgba(59,130,246,0.35) !important;
           }
 
         </style>
@@ -1258,6 +1348,8 @@ def main():
         st.session_state.actioned_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
+    if "last_sync_pressed" not in st.session_state:
+        st.session_state.last_sync_pressed = None
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1306,9 +1398,21 @@ def main():
                 unsafe_allow_html=True,
             )
         with sync_col:
+            last_sync = st.session_state.get("last_sync_pressed")
+            last_sync_display = (
+                last_sync.strftime("%d/%m/%Y : %H:%M:%S") if isinstance(last_sync, datetime) else "--"
+            )
+            st.markdown(
+                f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
+                unsafe_allow_html=True,
+            )
             if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+                st.session_state.last_sync_pressed = datetime.now()
                 perform_sync()
-        st.markdown("<div class='reset-wrap'>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
+            unsafe_allow_html=True,
+        )
         if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
             if clear_db():
                 st.cache_data.clear()
@@ -1425,6 +1529,7 @@ def main():
             )
 
     df_view = pd.DataFrame(processed_rows)
+    update_data_table_log(processed_rows)
 
     # Row 1
     r1 = st.columns(5)
@@ -1458,8 +1563,7 @@ def main():
             key="search_query_input",
         )
     with sc2:
-        if st.button("🧹 Clear", use_container_width=True):
-            clear_all_filters()
+        st.button("🧹 Clear", use_container_width=True, on_click=clear_all_filters)
     with sc3:
         if st.button("📋 View All", use_container_width=True):
             st.session_state.active_filters = set()  # type: ignore
@@ -1469,8 +1573,6 @@ def main():
     with st.expander("Additional filters", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
 
-        def multi_select_with_state(label: str, options: list, key: str):
-            old = st.session_state.get(key, [])
         def multi_select_with_state(label: str, options: list, key: str):
             old = st.session_state.get(key, [])
             selections = [x for x in old if x in options]
@@ -1498,8 +1600,7 @@ def main():
                 )
             multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
         with c5:
-            if st.button("🧼 Clear filters", use_container_width=True):
-                clear_all_filters()
+            st.button("🧼 Clear filters", use_container_width=True, on_click=clear_all_filters)
 
     st.divider()
 
@@ -1537,6 +1638,15 @@ def main():
 
     display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
     display_df["No"] = (display_df.index + 1).astype(str)
+
+    @st.dialog("Data table log")
+    def show_data_table_log():
+        logs = st.session_state.get("data_table_log", [])
+        if not logs:
+            st.info("No edits recorded yet.")
+        else:
+            for entry in logs:
+                st.markdown(f"- {entry}")
 
     @st.dialog("RMA Actions")
     def show_rma_actions_dialog(row: pd.Series):
@@ -1614,28 +1724,68 @@ def main():
     ]
 
     column_config = {
-        "No": st.column_config.TextColumn("No", width="small"),
+        "No": st.column_config.TextColumn("No"),
         "RMA ID": st.column_config.LinkColumn(
             "RMA ID",
             display_text=r"rmaid=([^&]+)",
-            width="small",
         ),
-        "Order": st.column_config.TextColumn("Order", width="medium"),
-        "Current Status": st.column_config.TextColumn("Current Status", width="small"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", width="medium"),
-        "Tracking Status": st.column_config.TextColumn("Tracking Status", width="large"),
-        "Requested date": st.column_config.TextColumn("Requested date", width="small"),
-        "Approved date": st.column_config.TextColumn("Approved date", width="small"),
-        "Received date": st.column_config.TextColumn("Received date", width="small"),
-        "Days since requested": st.column_config.TextColumn("Days since requested", width="small"),
-        "resolutionType": st.column_config.TextColumn("resolutionType", width="medium"),
-        "Resolution actioned": st.column_config.TextColumn("Resolution actioned", width="medium"),
+        "Order": st.column_config.TextColumn("Order"),
+        "Current Status": st.column_config.TextColumn("Current Status"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)"),
+        "Tracking Status": st.column_config.TextColumn("Tracking Status"),
+        "Requested date": st.column_config.TextColumn("Requested date"),
+        "Approved date": st.column_config.TextColumn("Approved date"),
+        "Received date": st.column_config.TextColumn("Received date"),
+        "Days since requested": st.column_config.TextColumn("Days since requested"),
+        "resolutionType": st.column_config.TextColumn("resolutionType"),
+        "Resolution actioned": st.column_config.TextColumn("Resolution actioned"),
     }
 
     _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
 
+    total_rows = len(_table_df)
+    tsv_rows = [display_cols] + _table_df[display_cols].astype(str).values.tolist()
+    tsv_text = "\n".join(["\t".join(row) for row in tsv_rows])
+
+    count_col, action_col = st.columns([5, 3], vertical_alignment="center")
+    with count_col:
+        st.markdown(f"**Rows in table:** {total_rows}")
+    with action_col:
+        st.markdown("<div class='data-table-actions'>", unsafe_allow_html=True)
+        log_col, copy_col = st.columns([1, 1])
+        with log_col:
+            st.markdown("<div class='data-log-tab'>", unsafe_allow_html=True)
+            if st.button("Data table log", use_container_width=True):
+                show_data_table_log()
+            st.markdown("</div>", unsafe_allow_html=True)
+        with copy_col:
+            st.markdown("<div class='copy-all-btn'>", unsafe_allow_html=True)
+            if st.button("📋 Copy all", use_container_width=True):
+                st.session_state["copy_all_payload"] = tsv_text
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if st.session_state.get("copy_all_payload"):
+        copy_payload = st.session_state.pop("copy_all_payload")
+        components.html(
+            f"""
+            <script>
+              navigator.clipboard.writeText({copy_payload!r});
+            </script>
+            """,
+            height=0,
+        )
+        st.toast("Copied table to clipboard.", icon="📋")
+
+    def highlight_missing_tracking(row: pd.Series):
+        if row.get("Current Status") == "Approved" and not row.get("Tracking Number"):
+            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(display_cols)
+        return [""] * len(display_cols)
+
+    styled_table = _table_df[display_cols].style.apply(highlight_missing_tracking, axis=1)
+
     sel_event = st.dataframe(
-        _table_df[display_cols],
+        styled_table,
         use_container_width=True,
         height=700,
         hide_index=True,
