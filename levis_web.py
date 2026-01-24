@@ -3,6 +3,7 @@ import streamlit.components.v1 as components
 import sqlite3
 import requests
 import json
+import html
 import pandas as pd
 import os
 import threading
@@ -427,12 +428,32 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 # ==========================================
 # 4. COURIER STATUS
 # ==========================================
+def _clean_html_text(value: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", " ", value or "")
+    cleaned = html.unescape(cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _extract_latest_tracking_row(html_text: str) -> Optional[str]:
+    rows = re.findall(r"<tr[^>]*>.*?</tr>", html_text, flags=re.IGNORECASE | re.DOTALL)
+    for row in rows:
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.IGNORECASE | re.DOTALL)
+        if len(cells) >= 2:
+            ts = _clean_html_text(cells[0])
+            status = _clean_html_text(cells[1])
+            if status:
+                return f"{ts} {status}".strip() if ts else status
+    return None
+
+
 def check_courier_status(tracking_number: str) -> str:
-    if not tracking_number or not PARCEL_NINJA_TOKEN:
+    if not tracking_number:
         return "Unknown"
     try:
-        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
-        headers = {"User-Agent": "Mozilla/5.0", "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}"}
+        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        if PARCEL_NINJA_TOKEN:
+            headers["Authorization"] = f"Bearer {PARCEL_NINJA_TOKEN}"
         session = get_parcel_session()
         res = session.get(url, headers=headers, timeout=10)
 
@@ -447,6 +468,9 @@ def check_courier_status(tracking_number: str) -> str:
                 pass
 
             clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
+            latest_row = _extract_latest_tracking_row(clean_html)
+            if latest_row:
+                return latest_row
             for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                 if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                     return kw
@@ -703,7 +727,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         "status": "LabelCreated",
         "carrierName": "CourierGuy",
         "trackingNumber": tracking_number,
-        "trackingURL": f"https://optimise.parcelninja.com/shipment/track/{tracking_number}",
+        "trackingURL": f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}",
         "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
     }
 
@@ -722,7 +746,7 @@ def push_comment_update(rma_id, comment_text):
     payload = {"text": comment_text, "isPublic": False}
 
     try:
-        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, timeout=15, json_body=payload)
+        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, timeout=15, json_body=payload)
         if res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
@@ -903,8 +927,8 @@ def update_data_table_log(rows: list):
             )
 
     if new_entries:
-        st.session_state.data_table_log = new_entries + st.session_state.data_table_log
-    st.session_state.data_table_prev = current_map
+        st.session_state.data_table_log = (new_entries + st.session_state.data_table_log)[:100]
+    st.session_state.data_table_prev = {**prev_map, **current_map}
 
 
 def updated_pill(scope: str) -> str:
@@ -1048,6 +1072,10 @@ def main():
                         #0e1117;
             color: #e5e7eb;
           }
+          [data-testid="stAppViewContainer"],
+          [data-testid="stAppViewContainer"] > .main {
+            background: transparent !important;
+          }
 
           /* Title */
           .title-wrap h1 {
@@ -1125,7 +1153,8 @@ def main():
           /* Updated pill */
           .updated-pill {
             position: absolute;
-            left: 10px;
+            left: 0;
+            transform: translateX(-22px);
             top: 2px;
             font-size: 0.80rem;
             color: rgba(148,163,184,0.95);
@@ -1196,7 +1225,8 @@ def main():
 
           /* Refresh link under each tile */
           .refresh-link {
-            margin-top: 4px;
+            margin-top: -6px;
+            margin-bottom: -4px;
             display: flex;
             justify-content: center;
           }
@@ -1272,15 +1302,11 @@ def main():
             box-shadow: 0 10px 22px rgba(0,0,0,0.25);
             z-index: 5;
           }
-          .sync-time-bar {
-            margin-bottom: 8px;
-            padding: 6px 10px;
-            border-radius: 999px;
-            background: rgba(15, 23, 42, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            color: rgba(226,232,240,0.95);
-            font-size: 0.75rem;
+          .sync-time-text {
+            color: rgba(226,232,240,0.85);
+            font-size: 0.8rem;
             font-weight: 600;
+            margin-bottom: 6px;
           }
           .data-table-actions {
             display: flex;
@@ -1350,6 +1376,8 @@ def main():
         st.session_state.req_dates_selected = []
     if "last_sync_pressed" not in st.session_state:
         st.session_state.last_sync_pressed = None
+    if "table_key" not in st.session_state:
+        st.session_state.table_key = f"table_{int(time.time())}"
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1385,30 +1413,17 @@ def main():
 
     with h2:
         st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
-        api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
-        with api_col:
-            api_main, api_sub = format_api_limit_display()
-            st.markdown(
-                f"""
-                <div class="api-box">
-                  <div>{api_main}</div>
-                  <div class="api-sub">{api_sub}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with sync_col:
-            last_sync = st.session_state.get("last_sync_pressed")
-            last_sync_display = (
-                last_sync.strftime("%d/%m/%Y : %H:%M:%S") if isinstance(last_sync, datetime) else "--"
-            )
-            st.markdown(
-                f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-                st.session_state.last_sync_pressed = datetime.now()
-                perform_sync()
+        last_sync = st.session_state.get("last_sync_pressed")
+        last_sync_display = (
+            last_sync.strftime("%d/%m/%Y : %H:%M:%S") if isinstance(last_sync, datetime) else "--"
+        )
+        st.markdown(
+            f"<div class='sync-time-text'>Last sync: {last_sync_display}</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+            st.session_state.last_sync_pressed = datetime.now()
+            perform_sync()
         st.markdown(
             "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
             unsafe_allow_html=True,
@@ -1463,7 +1478,9 @@ def main():
 
         local_tracking_status = rma.get("_local_courier_status", "") or ""
         local_tracking_status_lower = local_tracking_status.lower()
-        track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
+        track_link_url = (
+            f"https://optimise.parcelninja.com/shipment/track?WaybillNo={track_nums[0]}" if track_nums else ""
+        )
 
         requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
         approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
@@ -1731,7 +1748,7 @@ def main():
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"WaybillNo=([^&]+)"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1755,22 +1772,32 @@ def main():
         log_col, copy_col = st.columns([1, 1])
         with log_col:
             st.markdown("<div class='data-log-tab'>", unsafe_allow_html=True)
-            if st.button("Data table log", use_container_width=True):
+            if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
                 show_data_table_log()
             st.markdown("</div>", unsafe_allow_html=True)
         with copy_col:
             st.markdown("<div class='copy-all-btn'>", unsafe_allow_html=True)
             if st.button("📋 Copy all", use_container_width=True):
                 st.session_state["copy_all_payload"] = tsv_text
+                st.session_state.table_key = f"table_{int(time.time() * 1000)}"
+                st.session_state["suppress_row_dialog"] = True
             st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.get("copy_all_payload"):
         copy_payload = st.session_state.pop("copy_all_payload")
+        json_payload = json.dumps(copy_payload)
         components.html(
             f"""
             <script>
-              navigator.clipboard.writeText({copy_payload!r});
+              try {{
+                const payload = JSON.parse({json_payload});
+                if (navigator.clipboard && navigator.clipboard.writeText) {{
+                  navigator.clipboard.writeText(payload);
+                }}
+              }} catch (err) {{
+                console.warn("Clipboard copy failed", err);
+              }}
             </script>
             """,
             height=0,
@@ -1792,10 +1819,11 @@ def main():
         column_config=column_config,
         on_select="rerun",
         selection_mode="single-row",
+        key=st.session_state.table_key,
     )
 
     sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
-    if sel_rows:
+    if sel_rows and not st.session_state.pop("suppress_row_dialog", False):
         idx = int(sel_rows[0])
         show_rma_actions_dialog(display_df.iloc[idx])
 
