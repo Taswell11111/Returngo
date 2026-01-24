@@ -928,6 +928,18 @@ def updated_pill(scope: str) -> str:
     return f"<span class='updated-pill'>UPDATED: {ts.strftime('%H:%M')}</span>"
 
 
+def header_last_sync_display(scopes: list) -> str:
+    scope_key = ",".join(scopes)
+    ts = get_last_sync(scope_key)
+    if not ts:
+        stamps = [get_last_sync(s) for s in scopes]
+        stamps = [stamp for stamp in stamps if stamp]
+        ts = max(stamps) if stamps else None
+    if not ts:
+        return "--"
+    return ts.astimezone().strftime("%H:%M")
+
+
 # ==========================================
 # 12. FILTER DEFINITIONS (multi-select)
 # ==========================================
@@ -1008,6 +1020,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         if st.button(label, key=f"flt_{name}", use_container_width=True):
             toggle_filter(name)
 
+        st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<div class='refresh-link'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
             force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
@@ -1106,7 +1119,7 @@ def main():
             background: rgba(17, 24, 39, 0.70);
             border: 1px solid rgba(148, 163, 184, 0.18);
             border-radius: 14px;
-            padding: 26px 12px 10px 12px;
+            padding: 26px 12px 0 12px;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
           }
 
@@ -1211,7 +1224,7 @@ def main():
 
           /* Refresh link under each tile */
           .refresh-link {
-            margin-top: -2px;
+            margin-top: 6px;
             display: flex;
             justify-content: center;
           }
@@ -1288,11 +1301,28 @@ def main():
             box-shadow: 0 10px 22px rgba(0,0,0,0.25);
             z-index: 5;
           }
-          .sync-time-text {
-            margin-bottom: 6px;
+          .sync-time-pill {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148,163,184,0.22);
             color: rgba(226,232,240,0.95);
-            font-size: 0.8rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+          }
+          .sync-time-pill .label {
+            color: rgba(148,163,184,0.9);
             font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .sync-time-pill .value {
+            color: #e2e8f0;
+            font-weight: 800;
           }
           .data-table-actions {
             display: flex;
@@ -1360,8 +1390,6 @@ def main():
         st.session_state.actioned_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
-    if "last_sync_pressed" not in st.session_state:
-        st.session_state.last_sync_pressed = None
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1397,16 +1425,17 @@ def main():
 
     with h2:
         st.markdown("<div class='header-right-card'>", unsafe_allow_html=True)
-        last_sync = st.session_state.get("last_sync_pressed")
-        last_sync_display = (
-            last_sync.strftime("%d/%m/%Y : %H:%M:%S") if isinstance(last_sync, datetime) else "--"
-        )
+        last_sync_display = header_last_sync_display(ACTIVE_STATUSES)
         st.markdown(
-            f"<div class='sync-time-text'>Last sync: {last_sync_display}</div>",
+            (
+                "<div class='sync-time-pill'>"
+                "<span class='label'>Last sync</span>"
+                f"<span class='value'>{last_sync_display}</span>"
+                "</div>"
+            ),
             unsafe_allow_html=True,
         )
         if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-            st.session_state.last_sync_pressed = datetime.now()
             perform_sync()
         st.markdown(
             "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
