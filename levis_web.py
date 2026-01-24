@@ -424,9 +424,6 @@ def get_last_sync(scope: str) -> Optional[datetime]:
         finally:
             conn.close()
 
-
-init_db()
-
 # ==========================================
 # 4. COURIER STATUS
 # ==========================================
@@ -1654,4 +1651,5 @@ def main():
 
 
 if __name__ == "__main__":
+    init_db()
     main()
