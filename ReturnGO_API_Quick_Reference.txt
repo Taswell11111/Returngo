@@ -1,0 +1,950 @@
+ReturnGO API – Quick Reference Documentation
+================================
+
+This document is a practical, developer-friendly overview of the ReturnGO API,
+intended for integrations such as ecommerce platforms, WMS, or customer service tools.
+
+Note:
+This is a working reference, not an official or complete specification.
+Endpoints, fields, and permissions may vary depending on your ReturnGO plan
+and enabled features.
+
+--------------------------------------------------
+Authentication
+--------------------------------------------------
+ReturnGO uses API keys for authentication.
+
+• API Key is passed via HTTP headers
+• All requests must be sent over HTTPS
+
+Example header:
+Authorization: Bearer YOUR_API_KEY
+
+--------------------------------------------------
+Base URL
+--------------------------------------------------
+The base URL is typically:
+
+https://api.returngo.ai
+
+(Some accounts may use region-specific or versioned URLs.)
+
+--------------------------------------------------
+Core Resources
+--------------------------------------------------
+
+1. Returns
+----------
+Represents a return request submitted by a customer.
+
+Common fields:
+• id
+• order_number
+• status (pending, approved, rejected, received, refunded)
+• customer_email
+• created_at
+• updated_at
+• items[]
+• refund_method
+
+Example endpoints:
+GET    /returns
+GET    /returns/{id}
+POST   /returns
+PUT    /returns/{id}
+
+--------------------------------------------------
+
+2. Return Items
+---------------
+Individual items within a return.
+
+Common fields:
+• sku
+• quantity
+• reason
+• condition
+• images[]
+
+--------------------------------------------------
+
+3. Webhooks
+-----------
+ReturnGO can send event notifications to your system.
+
+Common events:
+• return.created
+• return.approved
+• return.rejected
+• return.received
+• return.refunded
+
+Webhook payloads are sent as JSON via POST.
+
+--------------------------------------------------
+
+4. Refunds
+----------
+Refund-related data tied to a return.
+
+Common fields:
+• refund_amount
+• refund_status
+• refund_method
+• processed_at
+
+--------------------------------------------------
+Filtering & Pagination
+--------------------------------------------------
+List endpoints typically support:
+
+• status
+• order_number
+• created_at (date ranges)
+• limit / page or cursor-based pagination
+
+--------------------------------------------------
+Response Format
+--------------------------------------------------
+Responses are JSON.
+
+Example:
+{
+  "data": [],
+  "meta": {
+    "page": 1,
+    "total": 50
+  }
+}
+
+--------------------------------------------------
+Error Handling
+--------------------------------------------------
+Common HTTP status codes:
+
+• 200 – Success
+• 400 – Bad request
+• 401 – Unauthorized
+• 403 – Forbidden
+• 404 – Not found
+• 422 – Validation error
+• 500 – Server error
+
+--------------------------------------------------
+Best Practices
+--------------------------------------------------
+• Always verify webhook signatures
+• Handle retries for webhooks
+• Log return status changes
+• Do not assume synchronous refunds
+
+--------------------------------------------------
+Useful Integration Scenarios
+--------------------------------------------------
+• Sync returns into Shopify / ERP / WMS
+• Trigger courier collections
+• Automate refund workflows
+• Generate CS ticket context
+
+
+ReturnGO API - Prod
+ 1.0 
+OAS 3.0
+openapi.json
+This page documents the APIs used by merchants to extend their integration with ReturnGO.
+
+Authentication
+To authenticate the calls, an API key and a shop name are required.
+
+To obtain an API key, access your account on the ReturnGO Dashboard.
+The same API key can work for all the stores on the same account.
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard. This will copy your shop URL (which is not visible) to your clipboard.
+How to find your shop name
+
+Webhooks
+Webhooks allow you to write applications that respond to events from ReturnGO.
+
+In order to receive webhooks, register your webhook handler using the webhook registration APIs.
+
+When an event happens, ReturnGO sends a webhook to the registered address.
+
+When your application receives a webhook, check the eventName field to determine the event being reported.
+
+Webhooks sent from ReturnGO contain a JSON body, as documented below:
+
+RMA events (RMA_CREATED, RMA_STATUS_UPDATED): See RmaEventData.
+Shipment Events (SHIPMENT_CREATED, SHIPMENT_STATUS_UPDATED): see ShipmentEventData
+Shipment Tracker Events (SHIPMENT_TRACKER_STATUS_UPDATED): see ShipmentTrackerStatusUpdatedEventData
+Transaction Events (TRANSACTION_CREATED): see TransactionEventData
+Refund Events (REFUND_CREATED): see RefundCreatedEventData
+How to Build an ETL Process for RMAs
+Synchronizing your database involves two main steps:
+
+Initial Data Synchronization - Use the API to fetch existing data (GET /rmas). If needed fetch single RMA (GET /rma/{rmaId}).
+Incremental Updates – Keep your data up to date using one of the following methods:
+Registering webhooks – Subscribe to relevant events (for example RMA_STATUS_UPDATED). When your server receives a webhook notification, use the API to fetch the full resource (via GET /rmas/{rmaId}).
+Scheduled Polling – Set up a recurring job (e.g., hourly) to fetch records updated since the last run. Example: GET /rmas?rma_updated_at=gte:2025-04-01T18:00:00
+Notes:
+
+This synchronization strategy applies to RMAs, shipments, and transactions.
+
+Minimize concurrency — ideally to one request — to avoid rate limits. On a 429 response, implement exponential backoff and retry.
+
+If you need to retrieve a large volume of historical data as part of the initial synchronization, you can request a special bulk operations quota API key through customer support.
+
+RMA Creation APIs
+There are two ways to use this API:
+
+Create Return In One GO: A quick, predefined combination solution.
+E.g. a warehouse may have two options of creating an RMA for a "blind return": damaged / not damaged.
+The return method would be known, and the resolution would often be known as well.
+Eligibility is enforced by the API, to make sure that exceptional cases are not missed.
+Interactive - allow merchants and partners to build their own portal / bot / interface.
+The app needs to query the system for which return options are available for the returned items, then choose according to the availalbe options.
+In order to support both scenarios, the creation APIs are split into two steps, where the first step is optional:
+
+getEligiblePolicies - to get the available policies for the returned items
+createRmaByPolicy - the predefined, one go solution, but also - the second step of the interactive solution
+When you call getEligiblePolicies, you can call createRmaByPolicy with the same items and the policies that were returned by the API.
+
+NOTE There may still be multiple options for the same items, and combining options for multiple items may be rejected due to unsupported combinations.
+
+Reporting Issues
+When reporting an issue, please include the response headers, e.g.:
+
+access-control-allow-origin: *
+content-length: 269
+content-type: application/json
+date: Mon, 18 Aug 2025 13:21:23 GMT
+x-amz-apigw-id: PgNRHH36CYcEmfA=
+x-amzn-requestid: f4d95dac-002e-457d-93ed-079a8611003f
+x-amzn-trace-id + Root=1-68a328d3-3de289b45dc41289736d8375;Parent=6445ea60410f7417;Sampled=0;Lineage=1:74ee4320:0
+Servers
+
+https://api.returngo.ai
+
+Authorize
+Returns
+APIs for Return Management
+
+
+
+GET
+/rmas
+List and search RMAs
+
+
+Use this API to get all RMAs within a search criteria.
+
+Use the cursor argument to get the next batch.
+
+Parameters
+Cancel
+Name	Description
+pagesize *
+number
+(query)
+The number of RMAs to include in the response. Valid values are 1 through 500.
+
+pagesize
+cursor
+string
+(query)
+The position to start from, as received from a previous call. If not present, start from the beginning
+
+cursor
+sort_by
+string
+(query)
+The column names to sort by.
+
+Each column name should be preceded by - for descending and + for ascending.
+
+sort_by can be a comma separated list, for example: ?sort_by=+rma_created_at,-rma_updated_at.
+
+NOTE: the + sign must be url encoded to %2B
+
+sort_by
+rma_created_at
+string
+(query)
+Filter by criteria on the created_at column
+
+Allowed criteria: lt,lte,gt,gte,eq,neq
+
+Example: ?rma_created_at=lte:2021-01-20T00:00:00
+
+The date value should be in ISO 8601 format YYYY-MM-DDTHH:mm:ss
+
+rma_created_at
+rma_updated_at
+string
+(query)
+Filter by criteria on the updated_at column
+
+Allowed criteria: lt,lte,gt,gte,eq,neq
+
+Example: ?rma_updated_at=lte:2021-01-20T00:00:00
+
+The date value should be in ISO 8601 format YYYY-MM-DDTHH:mm:ss
+
+rma_updated_at
+status
+string
+(query)
+A comma delimited status list, the accepted values are:
+
+Pending
+
+Approved
+
+Received
+
+Validated
+
+Done
+
+Rejected
+
+Canceled
+
+status
+order_name
+string
+(query)
+A comma delimited list of order names e.g order_name=1001,1002 ...
+
+order_name
+customer_ids
+string
+(query)
+A comma delimited list of customer ids e.g customer_ids=6898673516706,6433510031522 ...
+
+customer_ids
+tracking_numbers
+string
+(query)
+A comma delimited list of tracking numbers e.g tracking_numbers=113498651924,390730297459 ...
+
+tracking_numbers
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+x-shop-name
+Execute
+Responses
+Code	Description	Links
+200	
+A list of all RMAs with their IDs and status
+
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+{
+  "rmas": [
+    {
+      "rmaId": "string",
+      "status": "Pending",
+      "order_name": "string",
+      "events": [
+        {
+          "eventName": "RMA_CREATED",
+          "eventDate": "string",
+          "triggeredVia": "Return Portal",
+          "storeLocationId": "online",
+          "userDetails": {
+            "userFirstName": "string",
+            "userLastName": "string",
+            "userEmailAddress": "string",
+            "userRole": "Owner"
+          }
+        }
+      ]
+    }
+  ],
+  "next_cursor": "string"
+}
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+500	
+Internal server error
+
+No links
+
+GET
+/rma/{rmaId}
+Get RMA details
+
+
+Use this API to get all the information about a single RMA
+
+Parameters
+Cancel
+Name	Description
+rmaId *
+string
+(path)
+The ID of the RMA to get the details of. E.g. for RMA1234, the ID is 1234
+
+rmaId
+includeMedia
+boolean
+(query)
+Include media files in the response. If false or ommitted, media answers are not included
+
+
+--
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+x-shop-name
+Execute
+Responses
+Code	Description	Links
+200	
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+{
+  "rmaSummary": {
+    "rmaId": "string",
+    "status": "Pending",
+    "order_name": "string",
+    "events": [
+      {
+        "eventName": "RMA_CREATED",
+        "eventDate": "string",
+        "triggeredVia": "Return Portal",
+        "storeLocationId": "online",
+        "userDetails": {
+          "userFirstName": "string",
+          "userLastName": "string",
+          "userEmailAddress": "string",
+          "userRole": "Owner"
+        }
+      }
+    ]
+  },
+  "orderDetails": {
+    "orderId": "string",
+    "order_name": "string"
+  },
+  "shipments": [
+    {
+      "shipmentId": "string",
+      "status": "Pending",
+      "carrierName": "string",
+      "requestedServiceLevel": "string",
+      "actualServiceLevel": "string",
+      "trackingNumber": "string",
+      "trackingURL": "string",
+      "labelURL": "string",
+      "customerAddress": {
+        "name": "string",
+        "street1": "string",
+        "street2": "string",
+        "city": "string",
+        "state": "string",
+        "zip": "string",
+        "country": "string",
+        "phone": "string",
+        "email": "string"
+      },
+      "returnAddress": {
+        "name": "string",
+        "street1": "string",
+        "street2": "string",
+        "city": "string",
+        "state": "string",
+        "zip": "string",
+        "country": "string",
+        "phone": "string",
+        "email": "string"
+      },
+      "isOutbound": true
+    }
+  ],
+  "items": [
+    {
+      "shopLineItemId": "string",
+      "shopProductId": "string",
+      "variantId": "string",
+      "returnedItemId": "string",
+      "fullName": "string",
+      "productName": "string",
+      "variantName": "string",
+      "image": "string",
+      "sku": "string",
+      "barcode": "string",
+      "paidPrice": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "paidTax": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "taxIncluded": true,
+      "returnReason": "string",
+      "resolutionName": "string",
+      "policyRuleName": "string",
+      "isAutoApprove": true,
+      "resolutionType": "RefundToPaymentMethod",
+      "restockingFee": 0,
+      "returnFee": 0,
+      "shipmentFee": 0,
+      "shipmentId": "string",
+      "extendedReason": "string",
+      "returnMethod": {
+        "type": "No shipment required",
+        "name": "string"
+      },
+      "itemValidationStatusResponse": {
+        "returnedItemId": "string",
+        "isRestockable": true,
+        "isReturned": true,
+        "nonRestockableReason": "string",
+        "nonReturnedReason": "string",
+        "storeLocationId": "string",
+        "lastValidationDate": "string",
+        "lastValidatedBy": "string",
+        "thirdPartyName": "string",
+        "userDetails": {
+          "userFirstName": "string",
+          "userLastName": "string",
+          "userEmailAddress": "string",
+          "userRole": "Owner"
+        }
+      },
+      "exchangeItems": [
+        {
+          "productId": "string",
+          "variantId": "string",
+          "quantity": 0,
+          "sku": "string",
+          "itemPriceMethod": "PaidPrice",
+          "freeExchangePriceRange": {
+            "min": 0,
+            "max": 0
+          },
+          "catalogPrice": {
+            "amount": 0,
+            "currency": "string",
+            "shopAmount": 0,
+            "shopCurrency": "string"
+          },
+          "effectivePrice": {
+            "amount": 0,
+            "currency": "string",
+            "shopAmount": 0,
+            "shopCurrency": "string"
+          }
+        }
+      ],
+      "followUpQuestions": [
+        {
+          "type": "Text",
+          "name": "string",
+          "answer": {
+            "textAnswer": "string",
+            "textArrayAnswer": [
+              "string"
+            ],
+            "mediaAnswer": [
+              {
+                "mediaType": "string",
+                "mediaFileSize": 0,
+                "tempDownloadUrl": "string"
+              }
+            ],
+            "numericAnswer": 0
+          }
+        }
+      ]
+    }
+  ],
+  "comments": [
+    {
+      "commentType": "merchant",
+      "triggeredBy": "string",
+      "htmlText": "string",
+      "datetime": "string"
+    }
+  ],
+  "exchangeOrders": [
+    {
+      "draftOrderId": "string",
+      "orderId": "string",
+      "orderName": "string",
+      "type": "Fee"
+    }
+  ],
+  "exchangeItems": [
+    {
+      "productId": "string",
+      "variantId": "string",
+      "quantity": 0,
+      "sku": "string",
+      "itemPriceMethod": "PaidPrice",
+      "freeExchangePriceRange": {
+        "min": 0,
+        "max": 0
+      },
+      "catalogPrice": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "effectivePrice": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      }
+    }
+  ],
+  "cancellationFee": 0,
+  "transactions": [
+    {
+      "id": "string",
+      "type": "RefundToPaymentMethod",
+      "externalReferenceId": "string",
+      "externalReferenceType": "PlatformRefundId",
+      "amount": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "status": "Requested",
+      "processor": "Shopify",
+      "bankAccountDetails": {
+        "iban": "string",
+        "firstName": "string",
+        "lastName": "string",
+        "branchName": "string",
+        "branchAddress": "string",
+        "comment": "string"
+      },
+      "returnItemIds": [
+        "string"
+      ],
+      "createdAt": "string",
+      "lastUpdated": "string"
+    }
+  ],
+  "createdAt": "string",
+  "lastUpdated": "string",
+  "isOutOfPolicy": true
+}
+No links
+400	
+Invalid rmaId
+
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+404	
+An RMA with the given ID could not be found
+
+No links
+500	
+Internal server error
+
+No links
+
+POST
+/rma/{rmaId}/comment
+Add comment to RMA timeline
+
+
+
+PUT
+/rma/{rmaId}/status
+Set RMA status
+
+
+
+POST
+/rma/getEligiblePolicies
+Get the eligible policies for the given order items
+
+
+
+POST
+/rma/createByPolicy
+Create a new RMA for the given order items, and the policies to use for each
+
+
+Shipments
+APIs for Shipment Management
+
+
+
+PUT
+/shipment/{shipmentId}
+Set Shipment Details
+
+
+Use this API to update the information about a single Shipment
+
+Validation
+There is validation based in initial and new status, if status was a part of request body.
+
+Allowed status transitions (If same sattus passed - status transition will not happen, but other shipment data will be updated):
+Pending → LabelCreated
+
+Pending → Shipped
+
+Pending → Received
+
+Pending → Canceled
+
+Pending → Validated
+
+LabelCreated → Shipped
+
+LabelCreated → Received
+
+LabelCreated → Canceled
+
+LabelCreated → Validated
+
+Shipped → Received
+
+Shipped → Canceled
+
+Shipped → Validated
+
+Canceled → Received
+
+Canceled → Validated
+
+Received → Validated
+
+Parameters
+Cancel
+Name	Description
+shipmentId *
+string
+(path)
+The ID of the shipment
+
+shipmentId
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+x-shop-name
+Request body
+
+application/json
+{
+  "status": "Pending",
+  "carrierName": "string",
+  "trackingNumber": "string",
+  "trackingURL": "string",
+  "labelURL": "string"
+}
+Execute
+Responses
+Code	Description	Links
+200	
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+{
+  "shipmentId": "string",
+  "status": "Pending",
+  "carrierName": "string",
+  "requestedServiceLevel": "string",
+  "actualServiceLevel": "string",
+  "trackingNumber": "string",
+  "trackingURL": "string",
+  "labelURL": "string",
+  "customerAddress": {
+    "name": "string",
+    "street1": "string",
+    "street2": "string",
+    "city": "string",
+    "state": "string",
+    "zip": "string",
+    "country": "string",
+    "phone": "string",
+    "email": "string"
+  },
+  "returnAddress": {
+    "name": "string",
+    "street1": "string",
+    "street2": "string",
+    "city": "string",
+    "state": "string",
+    "zip": "string",
+    "country": "string",
+    "phone": "string",
+    "email": "string"
+  },
+  "isOutbound": true
+}
+No links
+400	
+Invalid status transition
+
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+404	
+A Shipment with the given data could not be found
+
+No links
+500	
+Internal server error
+
+No links
+
+DELETE
+/shipment/{shipmentId}
+Delete Shipment
+
+
+Webhooks
+APIs for webhook registration and de-registration
+
+
+
+GET
+/webhooks
+List of Registered Webhooks
+
+
+Use this API to get all Webhooks.
+
+Parameters
+Cancel
+Name	Description
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+reebok-dev-south-africa.myshopify.com
+Execute
+Clear
+Responses
+Snippets
+
+cURL (bash)
+
+curl -X 'GET' \
+  'https://api.returngo.ai/webhooks' \
+  -H 'accept: application/json' \
+  -H 'x-shop-name: reebok-dev-south-africa.myshopify.com' \
+  -H 'x-api-key:   G0dxSEprxa5iOAIsK5X6g7fCDdPl09q2882osmWD'
+Request URL
+https://api.returngo.ai/webhooks
+Server response
+Code	Details
+200	
+Response body
+Download
+[
+  {
+    "id": "11216",
+    "url": "string",
+    "eventName": "RMA_CREATED"
+  },
+  {
+    "id": "18986",
+    "url": "https://ecom-sfs.dpworld.com/oms/dpw-oms-service/v1/webhook/return-go/rma-event-update?subscription-key=276e2c4c736b4761b46707abfda5dc4b&s=e14f2246-0b75-5&t=g_15Dwc060zRyyT4LgHCuk9HbF-5M8atZtOCUL0Ccfw=",
+    "eventName": "RMA_STATUS_UPDATED"
+  }
+]
+Response headers
+ content-length: 323 
+ content-type: application/json 
+Responses
+Code	Description	Links
+200	
+A list of all webhooks with their url and event name
+
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+[
+  {
+    "id": "string",
+    "url": "string",
+    "eventName": "RMA_CREATED"
+  }
+]
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+500	
+Internal server error
+--------------------------------------------------
+End of Document
+--------------------------------------------------

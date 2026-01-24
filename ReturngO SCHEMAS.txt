@@ -1,0 +1,770 @@
+Returns
+APIs for Return Management
+
+
+
+GET
+/rmas
+List and search RMAs
+
+
+Use this API to get all RMAs within a search criteria.
+
+Use the cursor argument to get the next batch.
+
+Parameters
+Cancel
+Name	Description
+pagesize *
+number
+(query)
+The number of RMAs to include in the response. Valid values are 1 through 500.
+
+1
+cursor
+string
+(query)
+The position to start from, as received from a previous call. If not present, start from the beginning
+
+cursor
+sort_by
+string
+(query)
+The column names to sort by.
+
+Each column name should be preceded by - for descending and + for ascending.
+
+sort_by can be a comma separated list, for example: ?sort_by=+rma_created_at,-rma_updated_at.
+
+NOTE: the + sign must be url encoded to %2B
+
+sort_by
+rma_created_at
+string
+(query)
+Filter by criteria on the created_at column
+
+Allowed criteria: lt,lte,gt,gte,eq,neq
+
+Example: ?rma_created_at=lte:2021-01-20T00:00:00
+
+The date value should be in ISO 8601 format YYYY-MM-DDTHH:mm:ss
+
+rma_created_at
+rma_updated_at
+string
+(query)
+Filter by criteria on the updated_at column
+
+Allowed criteria: lt,lte,gt,gte,eq,neq
+
+Example: ?rma_updated_at=lte:2021-01-20T00:00:00
+
+The date value should be in ISO 8601 format YYYY-MM-DDTHH:mm:ss
+
+rma_updated_at
+status
+string
+(query)
+A comma delimited status list, the accepted values are:
+
+Pending
+
+Approved
+
+Received
+
+Validated
+
+Done
+
+Rejected
+
+Canceled
+
+Pending
+order_name
+string
+(query)
+A comma delimited list of order names e.g order_name=1001,1002 ...
+
+order_name
+customer_ids
+string
+(query)
+A comma delimited list of customer ids e.g customer_ids=6898673516706,6433510031522 ...
+
+customer_ids
+tracking_numbers
+string
+(query)
+A comma delimited list of tracking numbers e.g tracking_numbers=113498651924,390730297459 ...
+
+tracking_numbers
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+reebok-dev-south-africa.myshopify.com
+Execute
+Clear
+Responses
+Snippets
+
+cURL (bash)
+
+curl -X 'GET' \
+  'https://api.returngo.ai/rmas?pagesize=1&status=Pending' \
+  -H 'accept: application/json' \
+  -H 'x-shop-name: reebok-dev-south-africa.myshopify.com' \
+  -H 'x-api-key: G0dxSEprxa5iOAIsK5X6g7fCDdPl09q2882osmWD'
+Request URL
+https://api.returngo.ai/rmas?pagesize=1&status=Pending
+Server response
+Code	Details
+200	
+Response body
+Download
+{
+  "rmas": [
+    {
+      "rmaId": "9856537",
+      "status": "Pending",
+      "order_name": "R99288",
+      "events": [
+        {
+          "eventName": "RMA_CREATED",
+          "eventDate": "2026-01-18T17:49:33+00:00",
+          "triggeredVia": "Return Portal",
+          "storeLocationId": "online",
+          "userDetails": null
+        }
+      ]
+    }
+  ],
+  "next_cursor": "cmV0dXJucy5pZDo5ODQ0OTMx"
+}
+Response headers
+ content-length: 268 
+ content-type: application/json 
+Responses
+Code	Description	Links
+200	
+A list of all RMAs with their IDs and status
+
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+{
+  "rmas": [
+    {
+      "rmaId": "string",
+      "status": "Pending",
+      "order_name": "string",
+      "events": [
+        {
+          "eventName": "RMA_CREATED",
+          "eventDate": "string",
+          "triggeredVia": "Return Portal",
+          "storeLocationId": "online",
+          "userDetails": {
+            "userFirstName": "string",
+            "userLastName": "string",
+            "userEmailAddress": "string",
+            "userRole": "Owner"
+          }
+        }
+      ]
+    }
+  ],
+  "next_cursor": "string"
+}
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+500	
+Internal server error
+
+No links
+
+GET
+/rma/{rmaId}
+Get RMA details
+
+
+Use this API to get all the information about a single RMA
+
+Parameters
+Cancel
+Name	Description
+rmaId *
+string
+(path)
+The ID of the RMA to get the details of. E.g. for RMA1234, the ID is 1234
+
+rmaId
+includeMedia
+boolean
+(query)
+Include media files in the response. If false or ommitted, media answers are not included
+
+
+--
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+x-shop-name
+Execute
+Responses
+Code	Description	Links
+200	
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+{
+  "rmaSummary": {
+    "rmaId": "string",
+    "status": "Pending",
+    "order_name": "string",
+    "events": [
+      {
+        "eventName": "RMA_CREATED",
+        "eventDate": "string",
+        "triggeredVia": "Return Portal",
+        "storeLocationId": "online",
+        "userDetails": {
+          "userFirstName": "string",
+          "userLastName": "string",
+          "userEmailAddress": "string",
+          "userRole": "Owner"
+        }
+      }
+    ]
+  },
+  "orderDetails": {
+    "orderId": "string",
+    "order_name": "string"
+  },
+  "shipments": [
+    {
+      "shipmentId": "string",
+      "status": "Pending",
+      "carrierName": "string",
+      "requestedServiceLevel": "string",
+      "actualServiceLevel": "string",
+      "trackingNumber": "string",
+      "trackingURL": "string",
+      "labelURL": "string",
+      "customerAddress": {
+        "name": "string",
+        "street1": "string",
+        "street2": "string",
+        "city": "string",
+        "state": "string",
+        "zip": "string",
+        "country": "string",
+        "phone": "string",
+        "email": "string"
+      },
+      "returnAddress": {
+        "name": "string",
+        "street1": "string",
+        "street2": "string",
+        "city": "string",
+        "state": "string",
+        "zip": "string",
+        "country": "string",
+        "phone": "string",
+        "email": "string"
+      },
+      "isOutbound": true
+    }
+  ],
+  "items": [
+    {
+      "shopLineItemId": "string",
+      "shopProductId": "string",
+      "variantId": "string",
+      "returnedItemId": "string",
+      "fullName": "string",
+      "productName": "string",
+      "variantName": "string",
+      "image": "string",
+      "sku": "string",
+      "barcode": "string",
+      "paidPrice": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "paidTax": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "taxIncluded": true,
+      "returnReason": "string",
+      "resolutionName": "string",
+      "policyRuleName": "string",
+      "isAutoApprove": true,
+      "resolutionType": "RefundToPaymentMethod",
+      "restockingFee": 0,
+      "returnFee": 0,
+      "shipmentFee": 0,
+      "shipmentId": "string",
+      "extendedReason": "string",
+      "returnMethod": {
+        "type": "No shipment required",
+        "name": "string"
+      },
+      "itemValidationStatusResponse": {
+        "returnedItemId": "string",
+        "isRestockable": true,
+        "isReturned": true,
+        "nonRestockableReason": "string",
+        "nonReturnedReason": "string",
+        "storeLocationId": "string",
+        "lastValidationDate": "string",
+        "lastValidatedBy": "string",
+        "thirdPartyName": "string",
+        "userDetails": {
+          "userFirstName": "string",
+          "userLastName": "string",
+          "userEmailAddress": "string",
+          "userRole": "Owner"
+        }
+      },
+      "exchangeItems": [
+        {
+          "productId": "string",
+          "variantId": "string",
+          "quantity": 0,
+          "sku": "string",
+          "itemPriceMethod": "PaidPrice",
+          "freeExchangePriceRange": {
+            "min": 0,
+            "max": 0
+          },
+          "catalogPrice": {
+            "amount": 0,
+            "currency": "string",
+            "shopAmount": 0,
+            "shopCurrency": "string"
+          },
+          "effectivePrice": {
+            "amount": 0,
+            "currency": "string",
+            "shopAmount": 0,
+            "shopCurrency": "string"
+          }
+        }
+      ],
+      "followUpQuestions": [
+        {
+          "type": "Text",
+          "name": "string",
+          "answer": {
+            "textAnswer": "string",
+            "textArrayAnswer": [
+              "string"
+            ],
+            "mediaAnswer": [
+              {
+                "mediaType": "string",
+                "mediaFileSize": 0,
+                "tempDownloadUrl": "string"
+              }
+            ],
+            "numericAnswer": 0
+          }
+        }
+      ]
+    }
+  ],
+  "comments": [
+    {
+      "commentType": "merchant",
+      "triggeredBy": "string",
+      "htmlText": "string",
+      "datetime": "string"
+    }
+  ],
+  "exchangeOrders": [
+    {
+      "draftOrderId": "string",
+      "orderId": "string",
+      "orderName": "string",
+      "type": "Fee"
+    }
+  ],
+  "exchangeItems": [
+    {
+      "productId": "string",
+      "variantId": "string",
+      "quantity": 0,
+      "sku": "string",
+      "itemPriceMethod": "PaidPrice",
+      "freeExchangePriceRange": {
+        "min": 0,
+        "max": 0
+      },
+      "catalogPrice": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "effectivePrice": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      }
+    }
+  ],
+  "cancellationFee": 0,
+  "transactions": [
+    {
+      "id": "string",
+      "type": "RefundToPaymentMethod",
+      "externalReferenceId": "string",
+      "externalReferenceType": "PlatformRefundId",
+      "amount": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "status": "Requested",
+      "processor": "Shopify",
+      "bankAccountDetails": {
+        "iban": "string",
+        "firstName": "string",
+        "lastName": "string",
+        "branchName": "string",
+        "branchAddress": "string",
+        "comment": "string"
+      },
+      "returnItemIds": [
+        "string"
+      ],
+      "createdAt": "string",
+      "lastUpdated": "string"
+    }
+  ],
+  "createdAt": "string",
+  "lastUpdated": "string",
+  "isOutOfPolicy": true
+}
+No links
+400	
+Invalid rmaId
+
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+404	
+An RMA with the given ID could not be found
+
+No links
+500	
+Internal server error
+
+No links
+
+POST
+/rma/{rmaId}/comment
+Add comment to RMA timeline
+
+
+
+PUT
+/rma/{rmaId}/status
+Set RMA status
+
+
+
+POST
+/rma/getEligiblePolicies
+Get the eligible policies for the given order items
+
+
+
+POST
+/rma/createByPolicy
+Create a new RMA for the given order items, and the policies to use for each
+
+
+Shipments
+APIs for Shipment Management
+
+
+Webhooks
+APIs for webhook registration and de-registration
+
+
+
+GET
+/webhooks
+List of Registered Webhooks
+
+
+
+PUT
+/webhook/{webhookId}
+Update Webhook details
+
+
+
+DELETE
+/webhook/{webhookId}
+Delete Webhook
+
+
+
+POST
+/webhook
+Create Webhook
+
+
+Shipment-Trackers
+APIs for Shipment Tracker Management
+
+
+
+POST
+/shipment-tracker
+Track Shipment
+
+Transactions
+
+
+GET
+/transactions
+List and search all transactions
+
+
+Use this API to get all transaction within a search criteria.
+
+Use the cursor argument to get the next batch.
+
+Parameters
+Cancel
+Name	Description
+pagesize *
+number
+(query)
+The number of transactions to include in the response. Valid values are 1 through 500.
+
+1
+cursor
+string
+(query)
+The position to start from, as received from a previous call. If not present, start from the beginning
+
+cursor
+created_at
+string
+(query)
+Filter by criteria on the created_at column
+
+Allowed criteria: lt,lte,gt,gte,eq,neq
+
+Example: ?created_at=lte:2021-01-20T00:00:00
+
+The date value should be in ISO 8601 format YYYY-MM-DDTHH:mm:ss
+
+created_at
+updated_at
+string
+(query)
+Filter by criteria on the updated_at column
+
+Allowed criteria: lt,lte,gt,gte,eq,neq
+
+Example: ?updated_at=lte:2021-01-20T00:00:00
+
+The date value should be in ISO 8601 format YYYY-MM-DDTHH:mm:ss
+
+updated_at
+rma_ids
+string
+(query)
+A comma delimited list of RMA IDs, e.g rma_ids=120,121,...
+
+rma_ids
+order_ids
+string
+(query)
+A comma delimited list of order IDs, e.g rma_ids=3247583,2547583,...
+
+NOTE: The Order ID is the e-commerce platform's internal identifier for the order, not the customer facing order number/name
+
+order_ids
+statuses
+string
+(query)
+A comma delimited list of transaction statuses
+
+
+--
+types
+string
+(query)
+A comma delimited list of transaction types
+
+
+--
+processors
+string
+(query)
+A comma delimited list of transaction processors
+
+processors
+ids
+(query)
+A comma delimited list of transaction IDs, e.g ids=9538329,4829042,...
+
+ids
+x-shop-name *
+string
+(header)
+The shop to operate on, e.g. example.myshopify.com.
+
+To find your shop URL, click on the "copy" icon next to your store name at the top of the ReturnGO dashboard.
+
+This will copy your shop URL (which is not visible) to your clipboard.
+
+reebok-dev-south-africa.myshopify.com
+Execute
+Clear
+Responses
+Snippets
+
+cURL (bash)
+
+curl -X 'GET' \
+  'https://api.returngo.ai/transactions?pagesize=1' \
+  -H 'accept: application/json' \
+  -H 'x-shop-name: reebok-dev-south-africa.myshopify.com' \
+  -H 'x-api-key: G0dxSEprxa5iOAIsK5X6g7fCDdPl09q2882osmWD'
+Request URL
+https://api.returngo.ai/transactions?pagesize=1
+Server response
+Code	Details
+200	
+Response body
+Download
+{
+  "transactions": [
+    {
+      "id": 6070096,
+      "type": "InvoicePayment",
+      "externalReferenceId": "6143913132331",
+      "externalReferenceType": "InvoicePaymentId",
+      "amount": {
+        "amount": 1119.6,
+        "currency": "ZAR",
+        "shopAmount": 1119.6,
+        "shopCurrency": "ZAR"
+      },
+      "status": "Success",
+      "processor": "Shopify",
+      "bankAccountDetails": null,
+      "returnItemIds": [],
+      "createdAt": "2024-10-17T17:18:53+00:00",
+      "lastUpdated": "2024-10-17T17:20:38+00:00"
+    }
+  ],
+  "next_cursor": "NjA3MDA5Ng=="
+}
+Response headers
+ content-length: 420 
+ content-type: application/json 
+Responses
+Code	Description	Links
+200	
+A list of all transaction and their full details
+
+Media type
+
+application/json
+Controls Accept header.
+Example Value
+Schema
+{
+  "transactions": [
+    {
+      "id": "string",
+      "type": "RefundToPaymentMethod",
+      "externalReferenceId": "string",
+      "externalReferenceType": "PlatformRefundId",
+      "amount": {
+        "amount": 0,
+        "currency": "string",
+        "shopAmount": 0,
+        "shopCurrency": "string"
+      },
+      "status": "Requested",
+      "processor": "Shopify",
+      "bankAccountDetails": {
+        "iban": "string",
+        "firstName": "string",
+        "lastName": "string",
+        "branchName": "string",
+        "branchAddress": "string",
+        "comment": "string"
+      },
+      "returnItemIds": [
+        "string"
+      ],
+      "createdAt": "string",
+      "lastUpdated": "string"
+    }
+  ],
+  "next_cursor": "string"
+}
+No links
+401	
+Missing or incorrect API key
+
+No links
+403	
+No such shop for this user
+
+No links
+500	
+Internal server error
+
+No links

@@ -1,0 +1,6 @@
+Diesel: diesel-dev-south-africa.myshopify.com 
+Hurley: hurley-dev-south-africa.myshopify.com
+Jeep Apparel: jeep-apparel-dev-south-africa.myshopify.com
+Reebok: reebok-dev-south-africa.myshopify.com 
+Superdry: superdry-dev-south-africa.myshopify.com
+G0dxSEprxa5iOAIsK5X6g7fCDdPl09q2882osmWD
