@@ -1794,6 +1794,13 @@ def main():
                 const payload = JSON.parse({json_payload});
                 if (navigator.clipboard && navigator.clipboard.writeText) {{
                   navigator.clipboard.writeText(payload);
+                }} else {{
+                  const textArea = document.createElement("textarea");
+                  textArea.value = payload;
+                  document.body.appendChild(textArea);
+                  textArea.select();
+                  document.execCommand('copy');
+                  document.body.removeChild(textArea);
                 }}
               }} catch (err) {{
                 console.warn("Clipboard copy failed", err);
