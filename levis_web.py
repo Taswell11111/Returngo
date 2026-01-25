@@ -921,13 +921,6 @@ def update_data_table_log(rows: list):
     st.session_state.data_table_prev = {**prev_map, **current_map}
 
 
-def updated_pill(scope: str) -> str:
-    ts = get_last_sync(scope)
-    if not ts:
-        return "<span class='updated-pill'>UPDATED: -</span>"
-    return f"<span class='updated-pill'>UPDATED: {ts.strftime('%H:%M')}</span>"
-
-
 def header_last_sync_display(scopes: list) -> str:
     scope_key = ",".join(scopes)
     ts = get_last_sync(scope_key)
@@ -1009,17 +1002,24 @@ def render_filter_tile(col, name: str, refresh_scope: str):
 
     count_val = counts.get(count_key, 0)
 
-    # Selection indicator: card border highlight + top bar
-    label = f"{icon} {name.upper()} [**{count_val}**]"
+    label = f"{icon} {name.upper()}"
 
     with col:
         card_class = "card selected" if selected else "card"
         st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
-        st.markdown(updated_pill(str(scope)), unsafe_allow_html=True)
+
+        ts = get_last_sync(str(scope))
+        ts_str = f"UPDATED: {ts.strftime('%H:%M')}" if ts else "UPDATED: -"
+        pill_html = f"""
+        <div class='updated-pill'>
+            <span class='pill-count'>{count_val}</span>
+            <span class='pill-time'>{ts_str}</span>
+        </div>
+        """
+        st.markdown(pill_html, unsafe_allow_html=True)
 
         if st.button(label, key=f"flt_{name}", use_container_width=True):
             toggle_filter(name)
-
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<div class='refresh-link'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
@@ -1119,7 +1119,7 @@ def main():
             background: rgba(17, 24, 39, 0.70);
             border: 1px solid rgba(148, 163, 184, 0.18);
             border-radius: 14px;
-            padding: 26px 12px 0 12px;
+            padding: 26px 12px 24px 12px;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
           }
 
@@ -1152,47 +1152,44 @@ def main():
 
           /* Updated pill */
           .updated-pill {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             position: absolute;
             left: 0;
+            right: 0;
             top: 2px;
             font-size: 0.80rem;
             color: rgba(148,163,184,0.95);
             padding: 4px 10px;
+            z-index: 2;
+          }
+          .pill-count {
+            font-weight: 800;
+            font-size: 0.9rem;
+            padding: 2px 8px;
             border-radius: 999px;
             background: rgba(15, 23, 42, 0.72);
             border: 1px solid rgba(148, 163, 184, 0.18);
-            z-index: 2;
           }
-
-          .card.selected .updated-pill {
+          .pill-time {
+            font-size: 0.75rem;
+          }
+          .card.selected .pill-count {
             background: rgba(34,197,94,0.18);
             border-color: rgba(34,197,94,0.95);
             color: #bbf7d0;
           }
-
-          .api-box {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-            align-items: flex-start;
-            padding: 8px 10px;
-            border-radius: 12px;
-            background: rgba(15, 23, 42, 0.72);
-            border: 1px solid rgba(148,163,184,0.22);
-            color: rgba(226,232,240,0.95);
-            font-size: 0.85rem;
-            font-weight: 700;
-            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
-          }
-          .api-sub {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: rgba(148,163,184,0.9);
+          .card.selected .pill-time {
+            color: #bbf7d0;
           }
 
           /* Refresh link under each tile */
           .refresh-link {
-            margin-top: 6px;
+            position: absolute;
+            bottom: 4px;
+            left: 0;
+            right: 0;
             display: flex;
             justify-content: center;
           }
@@ -1251,8 +1248,8 @@ def main():
           .reset-wrap div.stButton > button {
             background: rgba(148,163,184,0.18) !important;
             border-color: rgba(148,163,184,0.25) !important;
-            padding: 9px 12px !important;
-            font-size: 14px !important;
+            padding: 4px 8px !important;
+            font-size: 12px !important;
           }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
@@ -1397,17 +1394,15 @@ def main():
             api_main, api_sub = format_api_limit_display()
             st.markdown(
                 f"""
-                <div class="api-box">
-                  <div>{api_main}</div>
-                  <div class="api-sub">{api_sub}</div>
-                </div>
+                <div>{api_main}</div>
+                <div>{api_sub}</div>
                 """,
                 unsafe_allow_html=True,
             )
         with sync_col:
             last_sync = st.session_state.get("last_sync_pressed")
             last_sync_display = (
-                last_sync.strftime("%d/%m/%Y : %H:%M:%S") if isinstance(last_sync, datetime) else "--"
+                last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--"
             )
             st.markdown(
                 f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
