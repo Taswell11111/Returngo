@@ -1221,11 +1221,11 @@ def format_tracking_status_with_icon(status: str) -> str:
 
 
 def toggle_filter(name: str):
-    s: Set[str] = st.session_state.active_filters  # type: ignore
+    s: Set[str] = set(st.session_state.active_filters)  # type: ignore
     if name in s:
-        s.clear()
+        s.remove(name)
     else:
-        s = {name}
+        s.add(name)
     st.session_state.active_filters = s  # type: ignore
     st.rerun()
 
@@ -1305,7 +1305,7 @@ def inject_command_center_css():
         """
         <style>
         /* ═══════════════════════════════════════════════════════════
-           COMMAND CENTER CORE THEME
+           COMMAND CENTER CORE THEME - REFINED
            ═══════════════════════════════════════════════════════════ */
 
         :root {
@@ -1315,14 +1315,15 @@ def inject_command_center_css():
             --cc-danger: #ef4444;
             --cc-surface: rgba(17, 24, 39, 0.6);
             --cc-surface-hover: rgba(31, 41, 55, 0.8);
-            --cc-border: rgba(148, 163, 184, 0.15);
-            --cc-glow: rgba(59, 130, 246, 0.3);
+            --cc-border-neutral: rgba(148, 163, 184, 0.15);
+            --cc-border-active: #22c55e;
+            --cc-glow: rgba(34, 197, 94, 0.4);
             --cc-text-primary: #f1f5f9;
             --cc-text-secondary: #94a3b8;
         }
 
         /* ═══════════════════════════════════════════════════════════
-           GLASSMORPHIC TILE SYSTEM
+           GLASSMORPHIC TILE SYSTEM - NO PILLS
            ═══════════════════════════════════════════════════════════ */
 
         .command-tile {
@@ -1334,7 +1335,7 @@ def inject_command_center_css():
             );
             backdrop-filter: blur(20px) saturate(180%);
             -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border: 1px solid var(--cc-border);
+            border: 1px solid var(--cc-border-neutral);
             border-radius: 16px;
             padding: 24px 20px;
             transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
@@ -1345,61 +1346,49 @@ def inject_command_center_css():
             overflow: hidden;
         }
 
-        .command-tile::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, var(--tile-accent), transparent);
-            opacity: 0;
-            transition: opacity 0.3s ease;
+        /* Active tile gets subtle glow border */
+        .command-tile.selected {
+            border-color: var(--cc-border-active);
+            box-shadow:
+                0 4px 6px -1px rgba(0, 0, 0, 0.1),
+                0 0 0 1px var(--cc-border-active),
+                0 0 20px -5px var(--cc-glow);
         }
 
         .command-tile:hover {
-            transform: translateY(-4px);
-            border-color: var(--tile-accent);
+            transform: translateY(-2px);
             box-shadow:
-                0 20px 25px -5px rgba(0, 0, 0, 0.2),
-                0 10px 10px -5px rgba(0, 0, 0, 0.04),
-                0 0 0 1px var(--tile-accent),
-                0 0 30px -5px var(--tile-accent);
+                0 10px 15px -3px rgba(0, 0, 0, 0.2),
+                0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
 
-        .command-tile:hover::before {
-            opacity: 1;
+        /* Remove top accent bar */
+        .command-tile::before {
+            display: none;
         }
 
-        /* Tile variants */
-        .command-tile.pending { --tile-accent: var(--cc-warning); }
-        .command-tile.approved { --tile-accent: var(--cc-success); }
-        .command-tile.received { --tile-accent: var(--cc-primary); }
-        .command-tile.flagged { --tile-accent: var(--cc-danger); }
-        .command-tile.selected {
-            border-color: var(--tile-accent);
-            background: linear-gradient(
-                135deg,
-                var(--cc-surface-hover) 0%,
-                rgba(30, 41, 59, 0.7) 100%
-            );
-            box-shadow:
-                0 0 0 2px var(--tile-accent),
-                0 0 40px -10px var(--tile-accent);
-        }
-
-        /* Pulse animation for urgent tiles */
+        /* Pulse animation for urgent tiles only */
         @keyframes pulse-glow {
-            0%, 100% { box-shadow: 0 0 0 0 var(--tile-accent); }
-            50% { box-shadow: 0 0 0 8px transparent; }
+            0%, 100% {
+                box-shadow:
+                    0 4px 6px -1px rgba(0, 0, 0, 0.1),
+                    0 0 0 1px var(--cc-border-active),
+                    0 0 20px -5px var(--cc-glow);
+            }
+            50% {
+                box-shadow:
+                    0 4px 6px -1px rgba(0, 0, 0, 0.1),
+                    0 0 0 1px var(--cc-border-active),
+                    0 0 30px -5px var(--cc-glow);
+            }
         }
 
-        .command-tile.urgent {
+        .command-tile.urgent.selected {
             animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
 
         /* ═══════════════════════════════════════════════════════════
-           HERO COUNT & TYPOGRAPHY
+           HERO COUNT & TYPOGRAPHY (No color pills)
            ═══════════════════════════════════════════════════════════ */
 
         .tile-count {
@@ -1407,7 +1396,7 @@ def inject_command_center_css():
             font-weight: 800;
             line-height: 1;
             color: var(--cc-text-primary);
-            margin: 0 0 8px 0;
+            margin: 0 0 4px 0;
             font-variant-numeric: tabular-nums;
             letter-spacing: -0.02em;
             text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
@@ -1419,7 +1408,7 @@ def inject_command_center_css():
             text-transform: uppercase;
             letter-spacing: 0.1em;
             color: var(--cc-text-secondary);
-            margin: 0 0 12px 0;
+            margin: 0 0 16px 0;
             display: flex;
             align-items: center;
             gap: 6px;
@@ -1427,7 +1416,7 @@ def inject_command_center_css():
 
         .tile-label-icon {
             font-size: 1rem;
-            filter: drop-shadow(0 0 8px var(--tile-accent));
+            opacity: 0.7;
         }
 
         .tile-divider {
@@ -1436,33 +1425,123 @@ def inject_command_center_css():
             background: linear-gradient(
                 90deg,
                 transparent,
-                var(--tile-accent) 50%,
+                rgba(148, 163, 184, 0.2) 50%,
                 transparent
             );
-            margin: 12px 0;
-            opacity: 0.3;
+            margin: 16px 0 12px 0;
         }
 
-        .tile-meta {
+        /* ═══════════════════════════════════════════════════════════
+           VIEW DETAILS BUTTON - GREEN BORDER WHEN SELECTED
+           ═══════════════════════════════════════════════════════════ */
+
+        .command-tile div[data-testid="stButton"] > button {
+            all: unset;
+            width: 100%;
+            padding: 10px 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 2px solid var(--cc-border-neutral);
+            border-radius: 8px;
+            color: var(--cc-text-primary);
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            text-align: center;
+            display: block;
+            box-sizing: border-box;
+        }
+
+        /* Hover state - green border preview */
+        .command-tile div[data-testid="stButton"] > button:hover {
+            background: rgba(34, 197, 94, 0.08);
+            border-color: var(--cc-border-active);
+            transform: translateY(-1px);
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+        }
+
+        /* Selected state - constant green border */
+        .command-tile.selected div[data-testid="stButton"] > button {
+            border-color: var(--cc-border-active);
+            background: rgba(34, 197, 94, 0.12);
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+        }
+
+        .command-tile.selected div[data-testid="stButton"] > button:hover {
+            background: rgba(34, 197, 94, 0.18);
+            box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.2);
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           REFRESH BUTTON - INLINE WITH COUNT
+           ═══════════════════════════════════════════════════════════ */
+
+        .tile-header-row {
             display: flex;
             justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 4px;
+        }
+
+        .tile-count-wrapper {
+            flex: 1;
+        }
+
+        .tile-refresh-btn {
+            flex-shrink: 0;
+            margin-left: 12px;
+        }
+
+        .tile-refresh-btn div[data-testid="stButton"] {
+            margin: 0 !important;
+        }
+
+        .tile-refresh-btn button {
+            all: unset;
+            width: 32px;
+            height: 32px;
+            display: flex;
             align-items: center;
-            font-size: 0.7rem;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--cc-border-neutral);
+            border-radius: 6px;
             color: var(--cc-text-secondary);
-            margin-top: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 1rem;
+        }
+
+        .command-tile.selected .tile-refresh-btn div[data-testid="stButton"] > button {
+            border-color: var(--cc-border-neutral);
+            background: rgba(255, 255, 255, 0.03);
+            box-shadow: none;
+        }
+
+        .tile-refresh-btn button:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: var(--cc-primary);
+            color: var(--cc-text-primary);
+            transform: rotate(90deg);
         }
 
         .tile-time {
             display: flex;
             align-items: center;
             gap: 4px;
+            font-size: 0.7rem;
+            color: var(--cc-text-secondary);
+            margin-top: 8px;
+            justify-content: flex-end;
         }
 
         .tile-status-dot {
             width: 6px;
             height: 6px;
             border-radius: 50%;
-            background: var(--tile-accent);
+            background: var(--cc-success);
             animation: pulse-dot 2s ease-in-out infinite;
         }
 
@@ -1472,13 +1551,53 @@ def inject_command_center_css():
         }
 
         /* ═══════════════════════════════════════════════════════════
+           RESPONSIVE ADJUSTMENTS
+           ═══════════════════════════════════════════════════════════ */
+
+        @media (max-width: 768px) {
+            .command-tile {
+                padding: 20px 16px;
+            }
+
+            .tile-count {
+                font-size: 2.5rem;
+            }
+
+            .tile-header-row {
+                flex-direction: column;
+            }
+
+            .tile-refresh-btn {
+                margin-left: 0;
+                margin-top: 8px;
+                align-self: flex-end;
+            }
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           STREAMLIT OVERRIDES
+           ═══════════════════════════════════════════════════════════ */
+
+        .command-tile [data-testid="column"] {
+            padding: 0 !important;
+        }
+
+        .command-tile .stMarkdown {
+            margin: 0 !important;
+        }
+
+        .command-tile .element-container {
+            margin: 0 !important;
+        }
+
+        /* ═══════════════════════════════════════════════════════════
            API ACTION BAR
            ═══════════════════════════════════════════════════════════ */
 
         .api-action-bar {
             background: var(--cc-surface);
             backdrop-filter: blur(20px);
-            border: 1px solid var(--cc-border);
+            border: 1px solid var(--cc-border-neutral);
             border-radius: 12px;
             padding: 20px 24px;
             margin: 24px 0;
@@ -1496,10 +1615,9 @@ def inject_command_center_css():
             margin-bottom: 12px;
         }
 
-        /* Style Streamlit selectbox in action bar */
         .api-action-bar [data-baseweb="select"] {
             background: rgba(15, 23, 42, 0.8) !important;
-            border: 1px solid var(--cc-border) !important;
+            border: 1px solid var(--cc-border-neutral) !important;
             border-radius: 8px !important;
         }
 
@@ -1523,69 +1641,6 @@ def inject_command_center_css():
         .api-action-bar button[kind="primary"]:hover {
             transform: translateY(-2px) !important;
             box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4) !important;
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           RESPONSIVE GRID SYSTEM
-           ═══════════════════════════════════════════════════════════ */
-
-        @media (max-width: 768px) {
-            .command-tile {
-                padding: 20px 16px;
-            }
-
-            .tile-count {
-                font-size: 2.5rem;
-            }
-
-            .tile-label {
-                font-size: 0.7rem;
-            }
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           STREAMLIT DOM OVERRIDES (Surgical targeting)
-           ═══════════════════════════════════════════════════════════ */
-
-        /* Hide default Streamlit button styling in tiles */
-        .command-tile div[data-testid="stButton"] > button {
-            all: unset;
-            width: 100%;
-            padding: 10px 16px;
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid var(--cc-border);
-            border-radius: 8px;
-            color: var(--cc-text-primary);
-            font-size: 0.8rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            text-align: center;
-            display: block;
-        }
-
-        .command-tile div[data-testid="stButton"] > button:hover {
-            background: rgba(255, 255, 255, 0.08);
-            border-color: var(--tile-accent);
-            transform: translateY(-1px);
-        }
-
-        .command-tile .tile-meta div[data-testid="stButton"] > button {
-            width: auto;
-            padding: 6px 10px;
-            font-size: 0.7rem;
-            letter-spacing: 0.03em;
-        }
-
-        /* Remove margins from Streamlit columns inside tiles */
-        .command-tile [data-testid="column"] {
-            padding: 0 !important;
-        }
-
-        .command-tile .stMarkdown {
-            margin: 0 !important;
         }
 
         /* ═══════════════════════════════════════════════════════════
@@ -1618,73 +1673,75 @@ def inject_command_center_css():
 FilterFn = Callable[[pd.DataFrame], pd.Series]
 
 FILTERS: Dict[str, Dict[str, object]] = {
-    "Pending": {
+    "Pending Requests": {
         "icon": "⏳",
-        "count_key": "Pending",
+        "count_key": "PendingRequests",
         "scope": "Pending",
-        "semantic_label": "Needs Review",
         "fn": lambda d: d["Current Status"] == "Pending",
     },
-    "Approved": {
-        "icon": "✅",
-        "count_key": "Approved",
-        "scope": "Approved",
-        "semantic_label": "In Transit",
-        "fn": lambda d: d["Current Status"] == "Approved",
+    "Approved - Submitted": {
+        "icon": "📬",
+        "count_key": "ApprovedSubmitted",
+        "scope": "FILTER_ApprovedSubmitted",
+        "fn": lambda d: (
+            (d["Current Status"] == "Approved")
+            & (d["Tracking Status"].str.contains("Submitted to Courier", case=False, na=False))
+        ),
+    },
+    "Approved - In Transit": {
+        "icon": "🚚",
+        "count_key": "ApprovedInTransit",
+        "scope": "FILTER_ApprovedInTransit",
+        "fn": lambda d: (
+            (d["Current Status"] == "Approved")
+            & (d["DisplayTrack"] != "")
+            & (d["Tracking Status"].str.contains("routing delivery", case=False, na=False))
+        ),
     },
     "Received": {
         "icon": "📦",
         "count_key": "Received",
         "scope": "Received",
-        "semantic_label": "At Warehouse",
         "fn": lambda d: d["Current Status"] == "Received",
     },
     "No Tracking": {
         "icon": "🚫",
         "count_key": "NoTracking",
         "scope": "FILTER_NoTracking",
-        "semantic_label": "No Label",
-        "fn": lambda d: d["is_nt"] == True,
+        "fn": lambda d: d["is_nt"],
     },
     "Flagged": {
         "icon": "🚩",
         "count_key": "Flagged",
         "scope": "FILTER_Flagged",
-        "semantic_label": "Urgent Action",
         "fn": lambda d: d["is_fg"] == True,
     },
     "Courier Cancelled": {
         "icon": "🛑",
         "count_key": "CourierCancelled",
         "scope": "FILTER_CourierCancelled",
-        "semantic_label": "Cancelled",
         "fn": lambda d: d["is_cc"] == True,
-    },
-    "Approved > Delivered": {
-        "icon": "📬",
-        "count_key": "ApprovedDelivered",
-        "scope": "FILTER_ApprovedDelivered",
-        "semantic_label": "Delivered",
-        "fn": lambda d: d["is_ad"] == True,
     },
     "Resolution Actioned": {
         "icon": "💳",
         "count_key": "ResolutionActioned",
         "scope": "FILTER_ResolutionActioned",
-        "semantic_label": "Resolved",
         "fn": lambda d: d["is_ra"] == True,
     },
     "No Resolution Actioned": {
         "icon": "⏸️",
         "count_key": "NoResolutionActioned",
         "scope": "FILTER_NoResolutionActioned",
-        "semantic_label": "Pending Refund",
         "fn": lambda d: d["is_nra"] == True,
     },
 }
 
 
 def current_filter_mask(df: pd.DataFrame) -> pd.Series:
+    """
+    Apply active filters and return a boolean mask.
+    Handles multi-select with OR logic.
+    """
     active: Set[str] = st.session_state.active_filters  # type: ignore
     if df.empty:
         return pd.Series([], dtype=bool)
@@ -1702,23 +1759,91 @@ def current_filter_mask(df: pd.DataFrame) -> pd.Series:
     if not masks:
         return pd.Series([True] * len(df), index=df.index)
 
-    out = masks[0].copy()
+    combined_mask = masks[0].copy()
     for m in masks[1:]:
-        out = out | m
-    return out
+        combined_mask = combined_mask | m
+    return combined_mask
+
+
+def deduplicate_filtered_rmas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove duplicate RMAs that appear in multiple filters.
+    Keep only the instance with the most recent update timestamp.
+
+    Args:
+        df: Filtered DataFrame (already masked by current_filter_mask)
+
+    Returns:
+        DataFrame with duplicates removed based on most recent 'last_fetched'
+    """
+    if df.empty:
+        return df
+
+    if "_rma_id_text" not in df.columns:
+        logger.warning("Cannot deduplicate: _rma_id_text column missing")
+        return df
+
+    def get_last_fetched_ts(row: pd.Series) -> datetime:
+        try:
+            # Prioritize the pre-fetched timestamp from the DataFrame
+            last_fetched_iso = row.get("_last_fetched_iso")
+            if last_fetched_iso:
+                try:
+                    return datetime.fromisoformat(last_fetched_iso)
+                except (ValueError, TypeError):
+                    pass
+
+            # Fallback to requested date if the primary timestamp is missing
+            req_date = row.get("Requested date", "")
+            if req_date and req_date != "N/A":
+                try:
+                    # Parse only the date part and make it timezone-aware for safe comparison
+                    return datetime.fromisoformat(req_date[:10]).replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    pass
+
+            return datetime.min.replace(tzinfo=timezone.utc)
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    df_work = df.copy()
+    df_work["_dedup_ts"] = df_work.apply(get_last_fetched_ts, axis=1)
+
+    df_deduped = (
+        df_work.sort_values(["_rma_id_text", "_dedup_ts"], ascending=[True, False])
+        .drop_duplicates(subset="_rma_id_text", keep="first")
+        .drop(columns=["_dedup_ts"])
+    )
+
+    num_removed = len(df_work) - len(df_deduped)
+    if num_removed > 0:
+        logger.info("Removed %s duplicate RMAs (kept most recent)", num_removed)
+
+    return df_deduped
 
 
 def ids_for_filter(name: str) -> list:
+    """Get RMA IDs that match a specific filter."""
     if df_view.empty:
         return []
     cfg = FILTERS.get(name)
     if not cfg:
+        logger.warning("Filter '%s' not found in FILTERS config", name)
         return []
     fn: FilterFn = cfg["fn"]  # type: ignore
-    mask = fn(df_view)
-    if mask is None or mask.empty:
+    try:
+        mask = fn(df_view)
+        if mask is None or mask.empty:
+            return []
+
+        filtered_df = df_view.loc[mask].copy()
+        if len(st.session_state.active_filters) > 1:
+            filtered_df = deduplicate_filtered_rmas(filtered_df)
+
+        return filtered_df["_rma_id_text"].astype(str).tolist()
+    except Exception as exc:
+        logger.error("Error getting IDs for filter '%s': %s", name, exc)
         return []
-    return df_view.loc[mask, "_rma_id_text"].astype(str).tolist()
 
 
 # ==========================================
@@ -1728,45 +1853,55 @@ def render_command_tile(
     col,
     name: str,
     refresh_scope: str,
-    semantic_label: Optional[str] = None,
-    icon: Optional[str] = None,
-    variant: str = "default",
+    semantic_label: str,
+    icon: str,
 ):
     """
-    Render a glassmorphic command center tile.
+    Render a glassmorphic command center tile with inline refresh button.
 
     Args:
         col: Streamlit column to render into
-        name: Filter name (e.g., "Pending")
+        name: Filter name (e.g., "Pending Requests")
         refresh_scope: Scope key for sync operations
-        semantic_label: Human-readable action label (e.g., "Needs Review")
+        semantic_label: Human-readable action label (e.g., "PENDING REQUESTS")
         icon: Emoji icon
-        variant: CSS class variant (pending|approved|received|flagged)
     """
-    cfg = FILTERS[name]
+    cfg = FILTERS.get(name)
+    if not cfg:
+        st.error(f"Filter '{name}' not found in FILTERS config")
+        return
+
     count_key = cfg["count_key"]  # type: ignore
-    semantic_label = semantic_label or str(cfg.get("semantic_label", name)).upper()
-    icon = icon or str(cfg.get("icon", ""))
 
     active: Set[str] = st.session_state.active_filters  # type: ignore
-    selected = name in active
-    is_urgent = name in {"Flagged", "No Tracking"} or (
-        name == "Approved" and counts.get("NoTracking", 0) > 10
-    )
+    is_selected = name in active
+    is_urgent = name == "Flagged"
 
     count_val = counts.get(count_key, 0)
     last_sync_ts = get_last_sync(refresh_scope)
     time_ago_str = format_time_ago(last_sync_ts)
 
     with col:
-        tile_classes = ["command-tile", variant, "fade-in"]
-        if selected:
+        tile_classes = ["command-tile", "fade-in"]
+        if is_selected:
             tile_classes.append("selected")
-        if is_urgent:
+        if is_urgent and is_selected:
             tile_classes.append("urgent")
 
         st.markdown(f"<div class='{' '.join(tile_classes)}'>", unsafe_allow_html=True)
+
+        st.markdown("<div class='tile-header-row'>", unsafe_allow_html=True)
+        st.markdown("<div class='tile-count-wrapper'>", unsafe_allow_html=True)
         st.markdown(f"<div class='tile-count'>{count_val}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='tile-refresh-btn'>", unsafe_allow_html=True)
+        if st.button("⟳", key=f"ref_{name}", help=f"Refresh {semantic_label}"):
+            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
         st.markdown(
             f"<div class='tile-label'>"
             f"<span class='tile-label-icon'>{icon}</span>"
@@ -1775,28 +1910,23 @@ def render_command_tile(
             unsafe_allow_html=True,
         )
 
+        button_label = "✓ VIEWING" if is_selected else "VIEW DETAILS"
         if st.button(
-            f"{'✓ ' if selected else ''}View Details",
+            button_label,
             key=f"tile_{name}",
             use_container_width=True,
         ):
             toggle_filter(name)
 
         st.markdown("<div class='tile-divider'></div>", unsafe_allow_html=True)
+
         st.markdown(
-            f"<div class='tile-meta'>"
             f"<div class='tile-time'>"
             f"<span class='tile-status-dot'></span>"
-            f"<span>{time_ago_str}</span>"
-            f"</div>"
-            f"<div>",
+            f"<span>Updated {time_ago_str}</span>"
+            f"</div>",
             unsafe_allow_html=True,
         )
-
-        if st.button("⟳", key=f"ref_{name}", help=f"Refresh {name}"):
-            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
-
-        st.markdown("</div></div>", unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2390,6 +2520,7 @@ def main():
     # ==========================================
     if "active_filters" not in st.session_state:
         st.session_state.active_filters = set()  # type: ignore
+        logger.info("Initialized active_filters session state")
     if "search_query_input" not in st.session_state:
         st.session_state.search_query_input = ""
     if "status_multi" not in st.session_state:
@@ -2410,6 +2541,20 @@ def main():
         st.session_state.failure_shipment = False
     if "cache_version" not in st.session_state:
         st.session_state.cache_version = 0
+
+    filter_migration = {
+        "Pending": "Pending Requests",
+        "Approved": "Approved - Submitted",
+    }
+    active = st.session_state.active_filters
+    migrated = set()
+    for old_name in active:
+        migrated.add(filter_migration.get(old_name, old_name))
+    valid_filters = set(FILTERS.keys())
+    migrated = {name for name in migrated if name in valid_filters}
+    if migrated != active:
+        st.session_state.active_filters = migrated  # type: ignore
+        logger.info("Migrated filters: %s -> %s", active, migrated)
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -2488,13 +2633,13 @@ def main():
     processed_rows = []
 
     counts = {
-        "Pending": 0,
-        "Approved": 0,
+        "PendingRequests": 0,
+        "ApprovedSubmitted": 0,
+        "ApprovedInTransit": 0,
         "Received": 0,
         "NoTracking": 0,
         "Flagged": 0,
         "CourierCancelled": 0,
-        "ApprovedDelivered": 0,
         "ResolutionActioned": 0,
         "NoResolutionActioned": 0,
     }
@@ -2555,20 +2700,6 @@ def main():
         if track_nums and should_refresh_courier(rma):
             rmas_needing_courier_refresh.append((rma_id, rma, requested_iso, status))
 
-        if status in ("Pending", "Approved", "Received"):
-            counts[status] += 1
-        if is_nt:
-            counts["NoTracking"] += 1
-        if is_fg:
-            counts["Flagged"] += 1
-        if is_cc:
-            counts["CourierCancelled"] += 1
-        if is_ad:
-            counts["ApprovedDelivered"] += 1
-        if is_ra:
-            counts["ResolutionActioned"] += 1
-        if is_nra:
-            counts["NoResolutionActioned"] += 1
         if has_refund_failure:
             failure_counts["refund_failure"] += 1
         if has_upload_failed:
@@ -2616,6 +2747,19 @@ def main():
     df_view = pd.DataFrame(processed_rows)
     update_data_table_log(processed_rows)
 
+    for filter_name, cfg in FILTERS.items():
+        count_key = cfg["count_key"]  # type: ignore
+        fn: FilterFn = cfg["fn"]  # type: ignore
+        if df_view.empty:
+            counts[count_key] = 0
+        else:
+            try:
+                mask = fn(df_view)
+                counts[count_key] = int(mask.sum())
+            except Exception as exc:
+                logger.error("Error calculating count for %s: %s", filter_name, exc)
+                counts[count_key] = 0
+
     if rmas_needing_courier_refresh:
         def refresh_courier_batch():
             for rma_id, rma_payload, requested_iso, status in rmas_needing_courier_refresh:
@@ -2647,22 +2791,22 @@ def main():
     st.markdown("### 📊 Command Center")
     st.write("")
 
-    # Row 1
+    # Row 1: Primary statuses
     r1 = st.columns(5)
-    render_command_tile(r1[0], "Pending", "Pending", variant="pending")
-    render_command_tile(r1[1], "Approved", "Approved", variant="approved")
-    render_command_tile(r1[2], "Received", "Received", variant="received")
-    render_command_tile(r1[3], "No Tracking", "FILTER_NoTracking", variant="flagged")
-    render_command_tile(r1[4], "Flagged", "FILTER_Flagged", variant="flagged")
+    render_command_tile(r1[0], "Pending Requests", "Pending", "PENDING REQUESTS", "⏳")
+    render_command_tile(r1[1], "Approved - Submitted", "FILTER_ApprovedSubmitted", "SUBMITTED", "📬")
+    render_command_tile(r1[2], "Approved - In Transit", "FILTER_ApprovedInTransit", "IN TRANSIT", "🚚")
+    render_command_tile(r1[3], "Received", "Received", "AT WAREHOUSE", "📦")
+    render_command_tile(r1[4], "No Tracking", "FILTER_NoTracking", "NO LABEL", "🚫")
 
     st.write("")
 
-    # Row 2
+    # Row 2: Secondary statuses
     r2 = st.columns(4)
-    render_command_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled", variant="flagged")
-    render_command_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered", variant="approved")
-    render_command_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned", variant="approved")
-    render_command_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned", variant="pending")
+    render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "URGENT ACTION", "🚩")
+    render_command_tile(r2[1], "Courier Cancelled", "FILTER_CourierCancelled", "CANCELLED", "🛑")
+    render_command_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned", "RESOLVED", "💳")
+    render_command_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned", "PENDING REFUND", "⏸️")
 
     st.write("")
 
@@ -2751,6 +2895,8 @@ def main():
         st.stop()
 
     display_df = df_view[current_filter_mask(df_view)].copy()
+    if len(st.session_state.active_filters) > 1:
+        display_df = deduplicate_filtered_rmas(display_df)
 
     # Apply extra filters (AND logic)
     status_multi = st.session_state.get("status_multi", [])
