@@ -455,26 +455,31 @@ def check_courier_status(tracking_number: str) -> str:
         if not rows:
             return "No tracking events found"
 
-        first_row = rows[0]
-        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", first_row, flags=re.IGNORECASE | re.DOTALL)
-        if not cells:
-            return "No tracking events found"
-
         def clean_text(value: str) -> str:
             text = re.sub(r"<[^>]+>", " ", value)
             return re.sub(r"\s+", " ", text).strip()
 
-        status_text = ""
-        if len(cells) >= 2:
-            status_text = clean_text(cells[1])
-        else:
-            status_text = clean_text(cells[0])
-        if status_text:
-            return status_text
+        for row_html in rows:
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
+            cleaned_cells = [clean_text(c) for c in cells]
+            cleaned_cells = [c for c in cleaned_cells if c]
+            if not cleaned_cells:
+                continue
+            if len(cleaned_cells) >= 2:
+                if re.search(r"\d", cleaned_cells[0]):
+                    return "\t".join(cleaned_cells[:2])
+            else:
+                if re.search(r"\d", cleaned_cells[0]):
+                    return cleaned_cells[0]
 
-        for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
-            if re.search(re.escape(kw), clean_html, re.IGNORECASE):
-                return kw
+        for row_html in rows:
+            cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
+            cleaned_cells = [clean_text(c) for c in cells]
+            cleaned_cells = [c for c in cleaned_cells if c]
+            if not cleaned_cells:
+                continue
+            return "\t".join(cleaned_cells[:2]) if len(cleaned_cells) >= 2 else cleaned_cells[0]
+
         return "No tracking events found"
 
     except requests.Timeout:
@@ -741,7 +746,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
 
 def push_comment_update(rma_id, comment_text):
     headers = {**rg_headers(), "Content-Type": "application/json"}
-    payload = {"text": comment_text, "isPublic": False}
+    payload = {"htmlText": comment_text}
 
     try:
         res = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
@@ -827,6 +832,45 @@ def resolution_actioned_label(rma_payload: dict) -> str:
     if isinstance(ex_orders, list) and len(ex_orders) > 0:
         return "Exchange released"
     return "No"
+
+
+def tracking_update_comment(old_tracking: str, new_tracking: str) -> str:
+    old_value = old_tracking.strip() if old_tracking else "None"
+    new_value = new_tracking.strip() if new_tracking else "None"
+    return f"Updated Shipment tracking number from {old_value} to {new_value}."
+
+
+def has_tracking_update_comment(comment_texts: list[str]) -> bool:
+    pattern = re.compile(r"updated shipment", re.IGNORECASE)
+    for text in comment_texts:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def failure_labels(
+    comment_texts: list[str],
+    *,
+    status: str,
+    approved_iso: str,
+    has_tracking: bool,
+) -> str:
+    failures = []
+    joined = " ".join(comment_texts).lower()
+    if "refund failed" in joined:
+        failures.append("refund_failure")
+    if "missing required media" in joined:
+        failures.append("upload_failed")
+    if status == "Approved" and not has_tracking and approved_iso:
+        try:
+            approved_dt = datetime.fromisoformat(approved_iso)
+            if approved_dt.tzinfo is None:
+                approved_dt = approved_dt.replace(tzinfo=timezone.utc)
+            if (_now_utc() - approved_dt) >= timedelta(hours=1):
+                failures.append("shipment_failure")
+        except Exception:
+            pass
+    return ", ".join(failures)
 
 
 def parse_yyyy_mm_dd(s: str) -> Optional[datetime]:
@@ -1019,12 +1063,12 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         st.markdown("<div class='status-tile'>", unsafe_allow_html=True)
         st.markdown(f"<div class='count-banner'>{count_val}</div>", unsafe_allow_html=True)
         st.markdown("<div class='status-button'>", unsafe_allow_html=True)
-        if st.button(label, key=f"flt_{name}", use_container_width=True):
+        if st.button(label, key=f"flt_{name}", width="stretch"):
             toggle_filter(name)
         st.markdown("</div>", unsafe_allow_html=True)
         # Streamlit-native refresh row for predictable spacing (no button borders).
         st.markdown("<div class='refresh-row'>", unsafe_allow_html=True)
-        if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
+        if st.button("Refresh", key=f"ref_{name}", width="content"):
             force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
         st.markdown(
             f"<span class='updated-time'>Updated: {updated_display}</span>",
@@ -1461,14 +1505,14 @@ def main():
             f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
             unsafe_allow_html=True,
         )
-        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+        if st.button("🔄 Sync Dashboard", key="btn_sync_all", width="stretch"):
             st.session_state.last_sync_pressed = datetime.now()
             perform_sync()
         st.markdown(
             "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
             unsafe_allow_html=True,
         )
-        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=False):
+        if st.button("🗑️ Reset Cache", key="btn_reset", width="content"):
             if clear_db():
                 st.cache_data.clear()
                 st.success("Cache cleared!")
@@ -1527,13 +1571,21 @@ def main():
         req_dt = parse_yyyy_mm_dd(str(requested_iso)[:10] if requested_iso else "")
         is_fg = status == "Pending" and req_dt is not None and (today - req_dt.date()).days >= 7
 
-        comment_texts = [(c.get("htmlText", "") or "").lower() for c in comments]
+        comment_texts = [(c.get("htmlText", "") or "") for c in comments]
+        comment_texts_lower = [c.lower() for c in comment_texts]
         is_cc = "courier cancelled" in local_tracking_status_lower
         is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
-        actioned = is_resolution_actioned(rma, comment_texts)
+        actioned = is_resolution_actioned(rma, comment_texts_lower)
         actioned_label = resolution_actioned_label(rma)
         is_ra = actioned
         is_nra = (status == "Received") and (not actioned)
+        is_tracking_updated = "Yes" if has_tracking_update_comment(comment_texts) else "No"
+        failures = failure_labels(
+            comment_texts_lower,
+            status=status,
+            approved_iso=str(approved_iso) if approved_iso else "",
+            has_tracking=bool(track_nums),
+        )
 
         if status in ("Pending", "Approved", "Received"):
             counts[status] += 1
@@ -1569,6 +1621,8 @@ def main():
                     "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
                     "resolutionType": resolution_type if resolution_type else "N/A",
                     "Resolution actioned": actioned_label,
+                    "Is_tracking_updated": is_tracking_updated,
+                    "failures": failures,
                     "DisplayTrack": track_str,
                     "shipment_id": shipment_id,
                     "full_data": rma,
@@ -1617,9 +1671,9 @@ def main():
             key="search_query_input",
         )
     with sc2:
-        st.button("🧹 Clear", use_container_width=True, on_click=clear_all_filters)
+        st.button("🧹 Clear", width="stretch", on_click=clear_all_filters)
     with sc3:
-        if st.button("📋 View All", use_container_width=True):
+        if st.button("📋 View All", width="stretch"):
             st.session_state.active_filters = set()  # type: ignore
             st.rerun()
 
@@ -1654,7 +1708,7 @@ def main():
                 )
             multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
         with c5:
-            st.button("🧼 Clear filters", use_container_width=True, on_click=clear_all_filters)
+            st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters)
 
     st.divider()
 
@@ -1723,8 +1777,12 @@ def main():
                     if not shipment_id:
                         st.error("No Shipment ID available for this RMA.")
                     else:
-                        ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track.strip())
+                        new_track_value = new_track.strip()
+                        ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track_value)
                         if ok:
+                            if new_track_value != track_existing:
+                                comment_payload = tracking_update_comment(track_existing, new_track_value)
+                                push_comment_update(rma_id_text, comment_payload)
                             st.success("Tracking updated.")
                             time.sleep(0.2)
                             perform_sync(["Approved", "Received"])
@@ -1775,6 +1833,8 @@ def main():
         "Days since requested",
         "resolutionType",
         "Resolution actioned",
+        "Is_tracking_updated",
+        "failures",
     ]
 
     column_config = {
@@ -1793,6 +1853,8 @@ def main():
         "Days since requested": st.column_config.TextColumn("Days since requested"),
         "resolutionType": st.column_config.TextColumn("resolutionType"),
         "Resolution actioned": st.column_config.TextColumn("Resolution actioned"),
+        "Is_tracking_updated": st.column_config.TextColumn("Is_tracking_updated"),
+        "failures": st.column_config.TextColumn("failures"),
     }
 
     _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
@@ -1809,12 +1871,13 @@ def main():
         log_col, copy_col = st.columns([1, 1])
         with log_col:
             st.markdown("<div class='data-log-tab'>", unsafe_allow_html=True)
-            if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
+            if st.button("Data table log", key="btn_data_table_log", width="stretch"):
+                st.session_state["suppress_row_dialog"] = True
                 show_data_table_log()
             st.markdown("</div>", unsafe_allow_html=True)
         with copy_col:
             st.markdown("<div class='copy-all-btn'>", unsafe_allow_html=True)
-            if st.button("📋 Copy all", use_container_width=True):
+            if st.button("📋 Copy all", width="stretch"):
                 st.session_state["copy_all_payload"] = tsv_text
                 st.session_state["suppress_row_dialog"] = True
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1854,7 +1917,7 @@ def main():
     table_key = "rma_table"
     sel_event = st.dataframe(
         styled_table,
-        use_container_width=True,
+        width="stretch",
         height=700,
         hide_index=True,
         column_config=column_config,
