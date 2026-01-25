@@ -450,7 +450,72 @@ def check_courier_status(tracking_number: str) -> str:
         if res.status_code != 200:
             return f"Tracking error ({res.status_code})"
 
-        clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
+        html = res.text
+
+        def format_event_date(event_date: str) -> str:
+            if not event_date:
+                return ""
+            try:
+                dt = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+                return dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return event_date
+
+        def format_event(latest: dict) -> str:
+            status = (
+                latest.get("status")
+                or latest.get("description")
+                or latest.get("event")
+                or latest.get("title")
+                or "Unknown"
+            )
+            event_date = (
+                latest.get("date")
+                or latest.get("eventDate")
+                or latest.get("timestamp")
+                or latest.get("createdAt")
+                or ""
+            )
+            event_date = format_event_date(event_date)
+            return f"{status}\t{event_date}" if event_date else status
+
+        def extract_events(payload: dict) -> Optional[list]:
+            candidates = [
+                payload.get("shipment", {}).get("events"),
+                payload.get("shipment", {}).get("checkpoints"),
+                payload.get("tracking", {}).get("events"),
+                payload.get("tracking", {}).get("checkpoints"),
+                payload.get("events"),
+                payload.get("checkpoints"),
+            ]
+            for candidate in candidates:
+                if isinstance(candidate, list) and candidate:
+                    return candidate
+            return None
+
+        json_pattern = re.compile(
+            r"(?:window\.__INITIAL_STATE__|var\s+(?:trackingData|shipmentData|initialData))\s*=\s*({.*?});",
+            re.DOTALL | re.IGNORECASE,
+        )
+        for match in json_pattern.finditer(html):
+            try:
+                data = json.loads(match.group(1))
+                events = extract_events(data)
+                if events:
+                    return format_event(events[0])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+
+        events_pattern = re.compile(r"\"(?:events|checkpoints)\"\s*:\s*(\[[^\]]+?\])", re.DOTALL | re.IGNORECASE)
+        for events_match in events_pattern.finditer(html):
+            try:
+                events = json.loads(events_match.group(1))
+                if isinstance(events, list) and events:
+                    return format_event(events[0])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+
+        clean_html = re.sub(r"<(script|style).*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
         rows = re.findall(r"<tr[^>]*>.*?</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
         if not rows:
             return "No tracking events found"
@@ -484,8 +549,8 @@ def check_courier_status(tracking_number: str) -> str:
 
     except requests.Timeout:
         return "Tracking check timed out"
-    except Exception:
-        return "Tracking check failed"
+    except Exception as exc:
+        return f"Tracking check failed: {str(exc)[:50]}"
 
 
 # ==========================================
@@ -925,6 +990,26 @@ def format_api_limit_display() -> Tuple[str, str]:
         sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
 
     return main, sub
+
+
+def format_tracking_status_with_icon(status: str) -> str:
+    if not status or status == "Unknown":
+        return "❓ Unknown"
+
+    status_lower = status.lower()
+    if "delivered" in status_lower:
+        return f"✅ {status}"
+    if "out for delivery" in status_lower or "out-for-delivery" in status_lower:
+        return f"🚚 {status}"
+    if "in transit" in status_lower or "transit" in status_lower:
+        return f"📦 {status}"
+    if "collected" in status_lower or "picked" in status_lower:
+        return f"📬 {status}"
+    if "cancel" in status_lower or "failed" in status_lower:
+        return f"🛑 {status}"
+    if "return" in status_lower and "sender" in status_lower:
+        return f"↩️ {status}"
+    return f"📍 {status}"
 
 
 def toggle_filter(name: str):
@@ -1419,6 +1504,109 @@ def main():
             font-weight: 800;
           }
 
+          /* Responsive filter tiles */
+          @media (max-width: 768px) {
+            [data-testid="column"] {
+              min-width: 100% !important;
+              flex: 0 0 100% !important;
+            }
+            .status-tile {
+              width: 85% !important;
+            }
+            .title-wrap h1 {
+              font-size: 2.2rem !important;
+            }
+            .subtitle-bar {
+              font-size: 0.85rem !important;
+              flex-wrap: wrap;
+              gap: 6px !important;
+            }
+          }
+
+          @media (min-width: 769px) and (max-width: 1024px) {
+            [data-testid="column"] {
+              min-width: 50% !important;
+              flex: 0 0 50% !important;
+            }
+            .status-tile {
+              width: 80% !important;
+            }
+          }
+
+          @media (min-width: 1025px) {
+            .status-tile {
+              width: 70%;
+            }
+          }
+
+          .card {
+            min-height: 140px;
+            margin-bottom: 12px;
+          }
+
+          .status-button div.stButton > button {
+            margin-top: 6px !important;
+            margin-bottom: 6px !important;
+          }
+
+          .refresh-row {
+            margin-top: 4px !important;
+            padding: 6px 0 4px 0;
+            gap: 8px;
+          }
+
+          .count-banner {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+          }
+
+          .card:hover .count-banner {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+          }
+
+          .card.selected {
+            outline: 2px solid rgba(34, 197, 94, 0.6);
+            outline-offset: 2px;
+          }
+
+          .card.selected::before {
+            content: "✓";
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            width: 24px;
+            height: 24px;
+            background: #22c55e;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 900;
+            color: white;
+            box-shadow: 0 4px 12px rgba(34, 197, 94, 0.5);
+            z-index: 10;
+          }
+
+          [data-testid="stDataFrame"] tbody tr:nth-child(even) {
+            background: rgba(255, 255, 255, 0.02) !important;
+          }
+
+          [data-testid="stDataFrame"] tbody tr:hover {
+            background: rgba(59, 130, 246, 0.08) !important;
+            cursor: pointer;
+          }
+
+          [data-testid="stDataFrame"] th {
+            background: rgba(15, 23, 42, 0.82) !important;
+            color: #f1f5f9 !important;
+            font-weight: 700 !important;
+            text-transform: uppercase !important;
+            font-size: 13px !important;
+            letter-spacing: 0.5px !important;
+            border-bottom: 2px solid rgba(148, 163, 184, 0.3) !important;
+          }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -1591,6 +1779,7 @@ def main():
         shipment_id = shipments[0].get("shipmentId") if shipments else None
 
         local_tracking_status = rma.get("_local_courier_status") or "Unknown"
+        local_tracking_status_display = format_tracking_status_with_icon(local_tracking_status)
         local_tracking_status_lower = local_tracking_status.lower()
         track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
@@ -1651,7 +1840,7 @@ def main():
                     "Order": order_name,
                     "Current Status": status,
                     "Tracking Number": track_link_url,
-                    "Tracking Status": local_tracking_status,
+                    "Tracking Status": local_tracking_status_display,
                     "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
                     "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
                     "Received date": str(received_iso)[:10] if received_iso else "N/A",
