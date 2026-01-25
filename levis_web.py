@@ -17,10 +17,11 @@ from typing import Optional, Tuple, Dict, Callable, Set
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
 # ==========================================
 # 1. CONFIGURATION
@@ -40,6 +41,14 @@ SYNC_OVERLAP_MINUTES = 5
 
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 PRIMARY_STATUS_TILES = {"Pending", "Approved", "Received", "No Tracking", "Flagged"}
+COURIER_STATUS_OPTIONS = [
+    "Submitted To Courier",
+    "Routing delivery",
+    "Delivered",
+    "Courier Cancelled",
+    "Unknown",
+    "No tracking number",
+]
 
 RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
@@ -260,73 +269,67 @@ def upsert_rma(
     max_retries = 3
     for attempt in range(max_retries):
         with DB_LOCK:
+            conn = None
             try:
                 conn = sqlite3.connect(DB_FILE, timeout=20)
                 conn.execute("PRAGMA busy_timeout = 20000")
-            except sqlite3.OperationalError as exc:
-                if attempt < max_retries - 1:
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
-                logger.error("Failed to connect to DB after %s attempts: %s", max_retries, exc)
-                raise
+                c = conn.cursor()
+                now_iso = _iso_utc(_now_utc())
 
-            c = conn.cursor()
-            now_iso = _iso_utc(_now_utc())
+                c.execute(
+                    "SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=?",
+                    (str(rma_id),),
+                )
+                row = c.fetchone()
+                existing_cstat = row[0] if row else None
+                existing_cchk = row[1] if row else None
+                existing_received = row[2] if row else None
 
-            c.execute(
-                "SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=?",
-                (str(rma_id),),
-            )
-            row = c.fetchone()
-            existing_cstat = row[0] if row else None
-            existing_cchk = row[1] if row else None
-            existing_received = row[2] if row else None
+                if courier_status is None:
+                    courier_status = existing_cstat
+                if courier_checked_iso is None:
+                    courier_checked_iso = existing_cchk
 
-            if courier_status is None:
-                courier_status = existing_cstat
-            if courier_checked_iso is None:
-                courier_checked_iso = existing_cchk
+                received_seen = existing_received
+                if status == "Received" and not existing_received:
+                    received_seen = now_iso
 
-            received_seen = existing_received
-            if status == "Received" and not existing_received:
-                received_seen = now_iso
-
-            c.execute(
-                """
-                INSERT OR REPLACE INTO rmas
-                (rma_id, store_url, status, created_at, json_data, last_fetched,
-                 courier_status, courier_last_checked, received_first_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(rma_id),
-                    STORE_URL,
-                    status,
-                    created_at,
-                    json.dumps(payload),
-                    now_iso,
-                    courier_status,
-                    courier_checked_iso,
-                    received_seen,
-                ),
-            )
-            try:
+                c.execute(
+                    """
+                    INSERT OR REPLACE INTO rmas
+                    (rma_id, store_url, status, created_at, json_data, last_fetched,
+                     courier_status, courier_last_checked, received_first_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(rma_id),
+                        STORE_URL,
+                        status,
+                        created_at,
+                        json.dumps(payload),
+                        now_iso,
+                        courier_status,
+                        courier_checked_iso,
+                        received_seen,
+                    ),
+                )
                 conn.commit()
-                conn.close()
                 break
             except sqlite3.OperationalError as exc:
-                conn.close()
                 if attempt < max_retries - 1:
                     logger.warning(
-                        "DB commit failed for RMA %s, retry %s/%s",
+                        "DB upsert failed for RMA %s, retry %s/%s",
                         rma_id,
                         attempt + 1,
                         max_retries,
                     )
                     time.sleep(0.1 * (attempt + 1))
                     continue
-                logger.error("Failed to commit RMA %s after %s attempts: %s", rma_id, max_retries, exc)
+                logger.error("Failed to upsert RMA %s after %s attempts: %s", rma_id, max_retries, exc)
                 raise
+            finally:
+                if conn is not None:
+                    conn.close()
 
 
 def delete_rmas(rma_ids):
@@ -1556,7 +1559,6 @@ def main():
 
           .card.selected .status-button div.stButton > button {
             border: 2.5px solid #22c55e !important;
-            border-color: #22c55e !important;
             background: rgba(34, 197, 94, 0.12) !important;
             box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15) !important;
           }
@@ -2174,11 +2176,9 @@ def main():
         with c3:
             multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
         with c4:
-            tracking_opts = []
-            if not df_view.empty and "Tracking Status" in df_view.columns:
-                tracking_opts = sorted(
-                    [x for x in df_view["Tracking Status"].dropna().unique().tolist() if x and x != "N/A"]
-                )
+            tracking_opts = [
+                format_tracking_status_with_icon(status) for status in COURIER_STATUS_OPTIONS
+            ]
             multi_select_with_state("Tracking status", tracking_opts, "tracking_status_multi")
         with c5:
             req_dates = []
