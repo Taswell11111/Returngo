@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
+from returngo_api import api_url, RMA_COMMENT_PATH
 
 # ==========================================
 # 1. CONFIGURATION
@@ -284,7 +285,7 @@ def fetch_all_pages(session, headers, status):
     cursor = None
     while True:
         try:
-            base_url = f"https://api.returngo.ai/rmas?status={status}&pagesize=50"
+            base_url = f"{api_url('/rmas')}?status={status}&pagesize=50"
             url = f"{base_url}&cursor={cursor}" if cursor else base_url
             res = session.get(url, headers=headers, timeout=15)
             if res.status_code != 200: break
@@ -308,7 +309,7 @@ def fetch_rma_detail(args):
     session = get_session()
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
     try:
-        res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=15)
+        res = session.get(api_url(f"/rma/{rma_id}"), headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
             fresh_sum = data.get('rmaSummary', {})
@@ -384,9 +385,9 @@ def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
         "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null"
     }
     try:
-        res = session.put(f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, json=payload, timeout=10)
+        res = session.put(api_url(f"/shipment/{shipment_id}"), headers=headers, json=payload, timeout=10)
         if res.status_code == 200:
-            fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
+            fresh_res = session.get(api_url(f"/rma/{rma_id}"), headers=headers, timeout=10)
             if fresh_res.status_code == 200:
                 fresh_data = fresh_res.json()
                 summary = fresh_data.get('rmaSummary', {})
@@ -400,15 +401,16 @@ def push_comment_update(rma_id, comment_text, store_url):
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
     payload = { "text": comment_text, "isPublic": False }
     try:
-        res = session.post(f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, json=payload, timeout=10)
+        res = session.post(api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, json=payload, timeout=10)
         if res.status_code in [200, 201]:
-             fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
+             fresh_res = session.get(api_url(f"/rma/{rma_id}"), headers=headers, timeout=10)
              if fresh_res.status_code == 200:
                  fresh_data = fresh_res.json()
                  summary = fresh_data.get('rmaSummary', {})
                  save_rma_to_db(rma_id, store_url, summary.get('status', 'Approved'), summary.get('createdAt'), fresh_data)
-             return True, "Success"
-        return False, f"API Error {res.status_code}"
+                 return True, "Success"
+             return False, f"Detail fetch failed {fresh_res.status_code}: {fresh_res.text}"
+        return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e: return False, str(e)
 
 # ==========================================
@@ -420,6 +422,9 @@ if 'filter_state' not in st.session_state:
 if st.session_state.get('show_toast'):
     st.toast("✅ API Sync Complete!", icon="🔄")
     st.session_state['show_toast'] = False
+if st.session_state.get('show_update_toast'):
+    st.toast("✅ UI refreshed from database.", icon="🔄")
+    st.session_state['show_update_toast'] = False
 
 @st.dialog("Update Tracking")
 def show_update_tracking_dialog(record):
@@ -471,7 +476,16 @@ with col1:
     st.title("Bounty Apparel ReturnGo RMAs 🔄️")
     search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
 with col2:
-    if st.button("🔄 Sync All Data", type="primary"): perform_sync()
+    sync_col, update_col = st.columns(2)
+    with sync_col:
+        if st.button("🔄 Sync All Data", type="primary"):
+            perform_sync()
+    with update_col:
+        if st.button("🔄 Update All", type="secondary"):
+            st.cache_data.clear()
+            st.session_state.pop("main_table", None)
+            st.session_state['show_update_toast'] = True
+            st.rerun()
     if st.button("🗑️ Reset Cache", type="secondary"):
         if clear_db():
             st.cache_data.clear()
