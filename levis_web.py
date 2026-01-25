@@ -874,7 +874,7 @@ def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
     return min(stamps) if stamps else None
 
 
-def perform_sync(statuses=None, *, full=False):
+def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     status_msg = st.empty()
     status_msg.info("⏳ Connecting to ReturnGO...")
 
@@ -949,7 +949,8 @@ def perform_sync(statuses=None, *, full=False):
         load_open_rmas.clear()
     except Exception:
         st.error("Failed to clear open-RMA cache")
-    st.rerun()
+    if rerun:
+        st.rerun()
 
 
 def force_refresh_rma_ids(rma_ids, scope_label: str):
@@ -1403,7 +1404,7 @@ def inject_command_center_css():
         }
 
         .tile-label {
-            font-size: 0.75rem;
+            font-size: 0.875rem;
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.1em;
@@ -1531,7 +1532,7 @@ def inject_command_center_css():
             display: flex;
             align-items: center;
             gap: 4px;
-            font-size: 0.7rem;
+            font-size: 0.825rem;
             color: var(--cc-text-secondary);
             margin-top: 8px;
             justify-content: flex-end;
@@ -1722,6 +1723,12 @@ FILTERS: Dict[str, Dict[str, object]] = {
         "scope": "FILTER_CourierCancelled",
         "fn": lambda d: d["is_cc"] == True,
     },
+    "Approved - Delivered": {
+        "icon": "📬",
+        "count_key": "ApprovedDelivered",
+        "scope": "FILTER_ApprovedDelivered",
+        "fn": lambda d: d["is_ad"] == True,
+    },
     "Resolution Actioned": {
         "icon": "💳",
         "count_key": "ResolutionActioned",
@@ -1733,6 +1740,46 @@ FILTERS: Dict[str, Dict[str, object]] = {
         "count_key": "NoResolutionActioned",
         "scope": "FILTER_NoResolutionActioned",
         "fn": lambda d: d["is_nra"] == True,
+    },
+}
+
+API_OPERATIONS = {
+    "Sync: Pending Requests": {
+        "type": "status_sync",
+        "statuses": ["Pending"],
+        "scope": "Pending",
+    },
+    "Sync: Approved - Submitted": {
+        "type": "filter_sync",
+        "statuses": ["Approved"],
+        "scope": "FILTER_ApprovedSubmitted",
+        "filter_name": "Approved - Submitted",
+    },
+    "Sync: Approved - In Transit": {
+        "type": "filter_sync",
+        "statuses": ["Approved"],
+        "scope": "FILTER_ApprovedInTransit",
+        "filter_name": "Approved - In Transit",
+    },
+    "Sync: Received": {
+        "type": "status_sync",
+        "statuses": ["Received"],
+        "scope": "Received",
+    },
+    "Sync: All Open (Pending, Approved, Received)": {
+        "type": "status_sync",
+        "statuses": ACTIVE_STATUSES,
+        "scope": "ALL_OPEN",
+    },
+    "RMA Details (/rma/{id})": {
+        "type": "rma_detail",
+        "requires_context": True,
+    },
+    "Batch Refresh Courier Status": {
+        "type": "batch_courier",
+    },
+    "Export to CSV": {
+        "type": "export_csv",
     },
 }
 
@@ -1936,36 +1983,32 @@ def render_api_action_bar():
     st.markdown("<div class='api-action-bar'>", unsafe_allow_html=True)
     st.markdown("<div class='api-action-bar-title'>🔌 API Operations</div>", unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns([2, 2, 1])
+    col1, col2 = st.columns([3, 1])
 
     with col1:
         api_endpoint = st.selectbox(
             "Select Operation",
-            options=[
-                "List RMAs (/rmas)",
-                "RMA Details (/rma/{id})",
-                "Update Shipment (/shipment/{id})",
-                "Post Comment (/rma/{id}/comment)",
-                "Batch Refresh Courier Status",
-                "Export to CSV",
-            ],
+            options=list(API_OPERATIONS.keys()),
             key="api_endpoint_selector",
             label_visibility="collapsed",
         )
 
     with col2:
-        if any(term in api_endpoint for term in ("Details", "Update", "Comment")):
+        operation = API_OPERATIONS.get(api_endpoint, {})
+        if operation.get("requires_context"):
             st.text_input(
-                "RMA/Shipment ID",
+                "RMA ID",
                 key="api_context_input",
                 placeholder="Enter ID...",
                 label_visibility="collapsed",
             )
         else:
-            st.empty()
+            if st.button("⚡ Execute", key="api_execute_btn", type="primary", use_container_width=True):
+                execute_api_operation(api_endpoint, "")
+                return
 
-    with col3:
-        if st.button("⚡ Execute", key="api_execute_btn", type="primary", use_container_width=True):
+    if operation.get("requires_context"):
+        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", use_container_width=True):
             execute_api_operation(api_endpoint, st.session_state.get("api_context_input", ""))
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1975,11 +2018,34 @@ def execute_api_operation(endpoint: str, context: str = ""):
     """Execute the selected API operation."""
     global df_view
 
-    if "List RMAs" in endpoint:
-        perform_sync()
+    operation = API_OPERATIONS.get(endpoint)
+    if not operation:
+        st.error(f"Unknown operation: {endpoint}")
         return
 
-    if "RMA Details" in endpoint:
+    op_type = operation.get("type")
+
+    if op_type == "status_sync":
+        statuses = operation["statuses"]
+        perform_sync(statuses=statuses, full=False)
+        return
+
+    if op_type == "filter_sync":
+        statuses = operation["statuses"]
+        filter_name = operation.get("filter_name")
+
+        with st.spinner(f"Syncing {filter_name}..."):
+            perform_sync(statuses=statuses, full=False, rerun=False)
+
+            if filter_name and filter_name in FILTERS:
+                matching_ids = ids_for_filter(filter_name)
+                if matching_ids:
+                    force_refresh_rma_ids(matching_ids, operation["scope"])
+                else:
+                    st.info(f"No RMAs match {filter_name} filter.")
+        return
+
+    if op_type == "rma_detail":
         if not context:
             st.error("Please enter an RMA ID")
             return
@@ -1989,25 +2055,11 @@ def execute_api_operation(endpoint: str, context: str = ""):
             st.success(f"✅ Refreshed RMA {context}")
             st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
             st.rerun()
-            return
-        st.error(f"Failed to fetch RMA {context}")
+        else:
+            st.error(f"Failed to fetch RMA {context}")
         return
 
-    if "Update Shipment" in endpoint:
-        if not context:
-            st.error("Please enter a shipment ID")
-            return
-        st.info("Shipment update requires payload input. Use the shipment editor below.")
-        return
-
-    if "Post Comment" in endpoint:
-        if not context:
-            st.error("Please enter an RMA ID")
-            return
-        st.info("Comment posting is available in the row action menu.")
-        return
-
-    if "Batch Refresh Courier" in endpoint:
+    if op_type == "batch_courier":
         if df_view.empty:
             st.warning("No data loaded. Sync dashboard first.")
             return
@@ -2022,7 +2074,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
         force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH")
         return
 
-    if "Export to CSV" in endpoint:
+    if op_type == "export_csv":
         if df_view.empty:
             st.warning("No data to export. Sync dashboard first.")
             return
@@ -2319,7 +2371,7 @@ def main():
           .sync-time-bar {
             text-align: right;
             margin: 0 0 -8px 0;
-            font-size: 0.9rem;
+            font-size: 1.025rem;
             color: rgba(226,232,240,0.9);
           }
           .reset-wrap:hover::after {
@@ -2640,6 +2692,7 @@ def main():
         "NoTracking": 0,
         "Flagged": 0,
         "CourierCancelled": 0,
+        "ApprovedDelivered": 0,
         "ResolutionActioned": 0,
         "NoResolutionActioned": 0,
     }
@@ -2788,25 +2841,52 @@ def main():
     render_api_action_bar()
     st.divider()
 
+    if not df_view.empty and "Requested date" in df_view.columns:
+        st.markdown("### 📅 Request Timeline")
+
+        timeline_df = df_view[df_view["Current Status"].isin(ACTIVE_STATUSES)].copy()
+        timeline_df["_req_date_parsed"] = pd.to_datetime(
+            timeline_df["Requested date"], errors="coerce"
+        )
+        timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
+
+        if not timeline_df.empty:
+            date_counts = (
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)
+                .size()
+                .reset_index(name="Count")
+            )
+            date_counts.columns = ["Date", "Count"]
+            st.line_chart(date_counts.set_index("Date"), height=200)
+        else:
+            st.info("No valid requested dates found for charting.")
+
+        st.write("")
+
     st.markdown("### 📊 Command Center")
     st.write("")
 
     # Row 1: Primary statuses
     r1 = st.columns(5)
     render_command_tile(r1[0], "Pending Requests", "Pending", "PENDING REQUESTS", "⏳")
-    render_command_tile(r1[1], "Approved - Submitted", "FILTER_ApprovedSubmitted", "SUBMITTED", "📬")
+    render_command_tile(
+        r1[1], "Approved - Submitted", "FILTER_ApprovedSubmitted", "SUBMITTED TO COURIER", "📬"
+    )
     render_command_tile(r1[2], "Approved - In Transit", "FILTER_ApprovedInTransit", "IN TRANSIT", "🚚")
-    render_command_tile(r1[3], "Received", "Received", "AT WAREHOUSE", "📦")
-    render_command_tile(r1[4], "No Tracking", "FILTER_NoTracking", "NO LABEL", "🚫")
+    render_command_tile(r1[3], "Received", "Received", "RECEIVED / AT WAREHOUSE", "📦")
+    render_command_tile(r1[4], "No Tracking", "FILTER_NoTracking", "NO TRACKING NUMBER", "🚫")
 
     st.write("")
 
     # Row 2: Secondary statuses
-    r2 = st.columns(4)
+    r2 = st.columns(5)
     render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "URGENT ACTION", "🚩")
     render_command_tile(r2[1], "Courier Cancelled", "FILTER_CourierCancelled", "CANCELLED", "🛑")
-    render_command_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned", "RESOLVED", "💳")
-    render_command_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned", "PENDING REFUND", "⏸️")
+    render_command_tile(
+        r2[2], "Approved - Delivered", "FILTER_ApprovedDelivered", "APPROVED > DELIVERED", "📬"
+    )
+    render_command_tile(r2[3], "Resolution Actioned", "FILTER_ResolutionActioned", "RESOLVED", "💳")
+    render_command_tile(r2[4], "No Resolution Actioned", "FILTER_NoResolutionActioned", "PENDING REFUND", "⏸️")
 
     st.write("")
 
