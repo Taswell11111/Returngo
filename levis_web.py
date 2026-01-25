@@ -848,29 +848,36 @@ def has_tracking_update_comment(comment_texts: list[str]) -> bool:
     return False
 
 
-def failure_labels(
+def failure_flags(
     comment_texts: list[str],
     *,
     status: str,
     approved_iso: str,
     has_tracking: bool,
-) -> str:
-    failures = []
+) -> tuple[bool, bool, bool, str]:
     joined = " ".join(comment_texts).lower()
-    if "refund failed" in joined:
-        failures.append("refund_failure")
-    if "missing required media" in joined:
-        failures.append("upload_failed")
+    has_refund_failure = "refund failed" in joined
+    has_upload_failed = "missing required media" in joined
+    has_shipment_failure = False
+
     if status == "Approved" and not has_tracking and approved_iso:
         try:
             approved_dt = datetime.fromisoformat(approved_iso)
             if approved_dt.tzinfo is None:
                 approved_dt = approved_dt.replace(tzinfo=timezone.utc)
             if (_now_utc() - approved_dt) >= timedelta(hours=1):
-                failures.append("shipment_failure")
+                has_shipment_failure = True
         except Exception:
             pass
-    return ", ".join(failures)
+
+    labels = []
+    if has_refund_failure:
+        labels.append("refund_failure")
+    if has_upload_failed:
+        labels.append("upload_failed")
+    if has_shipment_failure:
+        labels.append("shipment_failure")
+    return has_refund_failure, has_upload_failed, has_shipment_failure, ", ".join(labels)
 
 
 def parse_yyyy_mm_dd(s: str) -> Optional[datetime]:
@@ -936,7 +943,11 @@ def clear_all_filters():
     st.session_state.status_multi = []
     st.session_state.res_multi = []
     st.session_state.actioned_multi = []
+    st.session_state.tracking_status_multi = []
     st.session_state.req_dates_selected = []
+    st.session_state.failure_refund = False
+    st.session_state.failure_upload = False
+    st.session_state.failure_shipment = False
 
 
 def update_data_table_log(rows: list):
@@ -1400,6 +1411,13 @@ def main():
             background: rgba(59, 130, 246, 0.18) !important;
             border-color: rgba(59,130,246,0.35) !important;
           }
+          .rows-count {
+            font-size: 18px;
+            font-weight: 700;
+          }
+          .rows-count .value {
+            font-weight: 800;
+          }
 
         </style>
         """,
@@ -1461,8 +1479,16 @@ def main():
         st.session_state.res_multi = []
     if "actioned_multi" not in st.session_state:
         st.session_state.actioned_multi = []
+    if "tracking_status_multi" not in st.session_state:
+        st.session_state.tracking_status_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
+    if "failure_refund" not in st.session_state:
+        st.session_state.failure_refund = False
+    if "failure_upload" not in st.session_state:
+        st.session_state.failure_upload = False
+    if "failure_shipment" not in st.session_state:
+        st.session_state.failure_shipment = False
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1540,6 +1566,11 @@ def main():
         "ResolutionActioned": 0,
         "NoResolutionActioned": 0,
     }
+    failure_counts = {
+        "refund_failure": 0,
+        "upload_failed": 0,
+        "shipment_failure": 0,
+    }
 
     search_query = st.session_state.get("search_query_input", "")
     search_query_lower = search_query.lower().strip()
@@ -1559,7 +1590,7 @@ def main():
         track_str = ", ".join(track_nums) if track_nums else ""
         shipment_id = shipments[0].get("shipmentId") if shipments else None
 
-        local_tracking_status = rma.get("_local_courier_status", "") or ""
+        local_tracking_status = rma.get("_local_courier_status") or "Unknown"
         local_tracking_status_lower = local_tracking_status.lower()
         track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
@@ -1580,7 +1611,7 @@ def main():
         is_ra = actioned
         is_nra = (status == "Received") and (not actioned)
         is_tracking_updated = "Yes" if has_tracking_update_comment(comment_texts) else "No"
-        failures = failure_labels(
+        has_refund_failure, has_upload_failed, has_shipment_failure, failures = failure_flags(
             comment_texts_lower,
             status=status,
             approved_iso=str(approved_iso) if approved_iso else "",
@@ -1601,6 +1632,12 @@ def main():
             counts["ResolutionActioned"] += 1
         if is_nra:
             counts["NoResolutionActioned"] += 1
+        if has_refund_failure:
+            failure_counts["refund_failure"] += 1
+        if has_upload_failed:
+            failure_counts["upload_failed"] += 1
+        if has_shipment_failure:
+            failure_counts["shipment_failure"] += 1
 
         if not search_active or (
             search_query_lower in str(rma_id).lower()
@@ -1623,6 +1660,9 @@ def main():
                     "Resolution actioned": actioned_label,
                     "Is_tracking_updated": is_tracking_updated,
                     "failures": failures,
+                    "has_refund_failure": has_refund_failure,
+                    "has_upload_failed": has_upload_failed,
+                    "has_shipment_failure": has_shipment_failure,
                     "DisplayTrack": track_str,
                     "shipment_id": shipment_id,
                     "full_data": rma,
@@ -1679,7 +1719,7 @@ def main():
 
     # Extra filter bar/drop (under search)
     with st.expander("Additional filters", expanded=True):
-        c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 3, 1], vertical_alignment="center")
+        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 1], vertical_alignment="center")
 
         def multi_select_with_state(label: str, options: list, key: str):
             old = st.session_state.get(key, [])
@@ -1700,6 +1740,13 @@ def main():
         with c3:
             multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
         with c4:
+            tracking_opts = []
+            if not df_view.empty and "Tracking Status" in df_view.columns:
+                tracking_opts = sorted(
+                    [x for x in df_view["Tracking Status"].dropna().unique().tolist() if x and x != "N/A"]
+                )
+            multi_select_with_state("Tracking status", tracking_opts, "tracking_status_multi")
+        with c5:
             req_dates = []
             if not df_view.empty and "Requested date" in df_view.columns:
                 req_dates = sorted(
@@ -1707,8 +1754,26 @@ def main():
                     reverse=True,
                 )
             multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
-        with c5:
+        with c6:
             st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters)
+
+        st.markdown("**Failure filters**")
+        f1, f2, f3, _ = st.columns([1.3, 1.3, 1.3, 3], vertical_alignment="center")
+        with f1:
+            st.checkbox(
+                f"refund_failure ({failure_counts['refund_failure']})",
+                key="failure_refund",
+            )
+        with f2:
+            st.checkbox(
+                f"upload_failed ({failure_counts['upload_failed']})",
+                key="failure_upload",
+            )
+        with f3:
+            st.checkbox(
+                f"shipment_failure ({failure_counts['shipment_failure']})",
+                key="failure_shipment",
+            )
 
     st.divider()
 
@@ -1725,7 +1790,17 @@ def main():
     status_multi = st.session_state.get("status_multi", [])
     res_multi = st.session_state.get("res_multi", [])
     actioned_multi = st.session_state.get("actioned_multi", [])
+    tracking_status_multi = st.session_state.get("tracking_status_multi", [])
     req_dates_selected = st.session_state.get("req_dates_selected", [])
+    failure_selected = [
+        label
+        for label, key in (
+            ("refund_failure", "failure_refund"),
+            ("upload_failed", "failure_upload"),
+            ("shipment_failure", "failure_shipment"),
+        )
+        if st.session_state.get(key)
+    ]
 
     if status_multi:
         display_df = display_df[display_df["Current Status"].isin(status_multi)]
@@ -1737,8 +1812,19 @@ def main():
             display_df = display_df[display_df["Resolution actioned"] != "No"]
         elif actioned_set == {"No"}:
             display_df = display_df[display_df["Resolution actioned"] == "No"]
+    if tracking_status_multi:
+        display_df = display_df[display_df["Tracking Status"].isin(tracking_status_multi)]
     if req_dates_selected:
         display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
+    if failure_selected:
+        failure_mask = pd.Series(False, index=display_df.index)
+        if st.session_state.get("failure_refund"):
+            failure_mask |= display_df["has_refund_failure"]
+        if st.session_state.get("failure_upload"):
+            failure_mask |= display_df["has_upload_failed"]
+        if st.session_state.get("failure_shipment"):
+            failure_mask |= display_df["has_shipment_failure"]
+        display_df = display_df[failure_mask]
 
     if display_df.empty:
         st.info("No matching records found.")
@@ -1865,7 +1951,10 @@ def main():
 
     count_col, action_col = st.columns([5, 3], vertical_alignment="center")
     with count_col:
-        st.markdown(f"**Rows in table:** {total_rows}")
+        st.markdown(
+            f"<div class='rows-count'>Rows in table: <span class='value'>{total_rows}</span></div>",
+            unsafe_allow_html=True,
+        )
     with action_col:
         st.markdown("<div class='data-table-actions'>", unsafe_allow_html=True)
         log_col, copy_col = st.columns([1, 1])
