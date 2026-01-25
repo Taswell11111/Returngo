@@ -1289,21 +1289,398 @@ def header_last_sync_display(scopes: list) -> str:
     return ts.astimezone().strftime("%H:%M")
 
 
+def format_time_ago(last_sync_ts: Optional[datetime]) -> str:
+    if not last_sync_ts:
+        return "Never"
+    time_ago = (_now_utc() - last_sync_ts).total_seconds()
+    if time_ago < 60:
+        return f"{int(time_ago)}s ago"
+    if time_ago < 3600:
+        return f"{int(time_ago / 60)}m ago"
+    return f"{int(time_ago / 3600)}h ago"
+
+
+def inject_command_center_css():
+    st.markdown(
+        """
+        <style>
+        /* ═══════════════════════════════════════════════════════════
+           COMMAND CENTER CORE THEME
+           ═══════════════════════════════════════════════════════════ */
+
+        :root {
+            --cc-primary: #3b82f6;
+            --cc-success: #22c55e;
+            --cc-warning: #f59e0b;
+            --cc-danger: #ef4444;
+            --cc-surface: rgba(17, 24, 39, 0.6);
+            --cc-surface-hover: rgba(31, 41, 55, 0.8);
+            --cc-border: rgba(148, 163, 184, 0.15);
+            --cc-glow: rgba(59, 130, 246, 0.3);
+            --cc-text-primary: #f1f5f9;
+            --cc-text-secondary: #94a3b8;
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           GLASSMORPHIC TILE SYSTEM
+           ═══════════════════════════════════════════════════════════ */
+
+        .command-tile {
+            position: relative;
+            background: linear-gradient(
+                135deg,
+                var(--cc-surface) 0%,
+                rgba(30, 41, 59, 0.4) 100%
+            );
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 1px solid var(--cc-border);
+            border-radius: 16px;
+            padding: 24px 20px;
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow:
+                0 4px 6px -1px rgba(0, 0, 0, 0.1),
+                0 2px 4px -1px rgba(0, 0, 0, 0.06),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+            overflow: hidden;
+        }
+
+        .command-tile::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--tile-accent), transparent);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .command-tile:hover {
+            transform: translateY(-4px);
+            border-color: var(--tile-accent);
+            box-shadow:
+                0 20px 25px -5px rgba(0, 0, 0, 0.2),
+                0 10px 10px -5px rgba(0, 0, 0, 0.04),
+                0 0 0 1px var(--tile-accent),
+                0 0 30px -5px var(--tile-accent);
+        }
+
+        .command-tile:hover::before {
+            opacity: 1;
+        }
+
+        /* Tile variants */
+        .command-tile.pending { --tile-accent: var(--cc-warning); }
+        .command-tile.approved { --tile-accent: var(--cc-success); }
+        .command-tile.received { --tile-accent: var(--cc-primary); }
+        .command-tile.flagged { --tile-accent: var(--cc-danger); }
+        .command-tile.selected {
+            border-color: var(--tile-accent);
+            background: linear-gradient(
+                135deg,
+                var(--cc-surface-hover) 0%,
+                rgba(30, 41, 59, 0.7) 100%
+            );
+            box-shadow:
+                0 0 0 2px var(--tile-accent),
+                0 0 40px -10px var(--tile-accent);
+        }
+
+        /* Pulse animation for urgent tiles */
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 0 0 var(--tile-accent); }
+            50% { box-shadow: 0 0 0 8px transparent; }
+        }
+
+        .command-tile.urgent {
+            animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           HERO COUNT & TYPOGRAPHY
+           ═══════════════════════════════════════════════════════════ */
+
+        .tile-count {
+            font-size: 3rem;
+            font-weight: 800;
+            line-height: 1;
+            color: var(--cc-text-primary);
+            margin: 0 0 8px 0;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.02em;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .tile-label {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--cc-text-secondary);
+            margin: 0 0 12px 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .tile-label-icon {
+            font-size: 1rem;
+            filter: drop-shadow(0 0 8px var(--tile-accent));
+        }
+
+        .tile-divider {
+            width: 100%;
+            height: 1px;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                var(--tile-accent) 50%,
+                transparent
+            );
+            margin: 12px 0;
+            opacity: 0.3;
+        }
+
+        .tile-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.7rem;
+            color: var(--cc-text-secondary);
+            margin-top: 12px;
+        }
+
+        .tile-time {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .tile-status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--tile-accent);
+            animation: pulse-dot 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           API ACTION BAR
+           ═══════════════════════════════════════════════════════════ */
+
+        .api-action-bar {
+            background: var(--cc-surface);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--cc-border);
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin: 24px 0;
+            box-shadow:
+                0 4px 6px -1px rgba(0, 0, 0, 0.1),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+        }
+
+        .api-action-bar-title {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--cc-text-secondary);
+            margin-bottom: 12px;
+        }
+
+        /* Style Streamlit selectbox in action bar */
+        .api-action-bar [data-baseweb="select"] {
+            background: rgba(15, 23, 42, 0.8) !important;
+            border: 1px solid var(--cc-border) !important;
+            border-radius: 8px !important;
+        }
+
+        .api-action-bar [data-baseweb="select"]:hover {
+            border-color: var(--cc-primary) !important;
+            box-shadow: 0 0 0 1px var(--cc-primary) !important;
+        }
+
+        .api-action-bar button[kind="primary"] {
+            background: linear-gradient(135deg, var(--cc-primary), #2563eb) !important;
+            border: none !important;
+            border-radius: 8px !important;
+            padding: 10px 24px !important;
+            font-weight: 600 !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.05em !important;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3) !important;
+            transition: all 0.2s ease !important;
+        }
+
+        .api-action-bar button[kind="primary"]:hover {
+            transform: translateY(-2px) !important;
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4) !important;
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           RESPONSIVE GRID SYSTEM
+           ═══════════════════════════════════════════════════════════ */
+
+        @media (max-width: 768px) {
+            .command-tile {
+                padding: 20px 16px;
+            }
+
+            .tile-count {
+                font-size: 2.5rem;
+            }
+
+            .tile-label {
+                font-size: 0.7rem;
+            }
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           STREAMLIT DOM OVERRIDES (Surgical targeting)
+           ═══════════════════════════════════════════════════════════ */
+
+        /* Hide default Streamlit button styling in tiles */
+        .command-tile div[data-testid="stButton"] > button {
+            all: unset;
+            width: 100%;
+            padding: 10px 16px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--cc-border);
+            border-radius: 8px;
+            color: var(--cc-text-primary);
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            text-align: center;
+            display: block;
+        }
+
+        .command-tile div[data-testid="stButton"] > button:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: var(--tile-accent);
+            transform: translateY(-1px);
+        }
+
+        .command-tile .tile-meta div[data-testid="stButton"] > button {
+            width: auto;
+            padding: 6px 10px;
+            font-size: 0.7rem;
+            letter-spacing: 0.03em;
+        }
+
+        /* Remove margins from Streamlit columns inside tiles */
+        .command-tile [data-testid="column"] {
+            padding: 0 !important;
+        }
+
+        .command-tile .stMarkdown {
+            margin: 0 !important;
+        }
+
+        /* ═══════════════════════════════════════════════════════════
+           UTILITIES
+           ═══════════════════════════════════════════════════════════ */
+
+        .fade-in {
+            animation: fadeIn 0.6s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # ==========================================
 # 12. FILTER DEFINITIONS (multi-select)
 # ==========================================
 FilterFn = Callable[[pd.DataFrame], pd.Series]
 
 FILTERS: Dict[str, Dict[str, object]] = {
-    "Pending": {"icon": "⏳", "count_key": "Pending", "scope": "Pending", "fn": lambda d: d["Current Status"] == "Pending"},
-    "Approved": {"icon": "✅", "count_key": "Approved", "scope": "Approved", "fn": lambda d: d["Current Status"] == "Approved"},
-    "Received": {"icon": "📦", "count_key": "Received", "scope": "Received", "fn": lambda d: d["Current Status"] == "Received"},
-    "No Tracking": {"icon": "🚫", "count_key": "NoTracking", "scope": "FILTER_NoTracking", "fn": lambda d: d["is_nt"] == True},
-    "Flagged": {"icon": "🚩", "count_key": "Flagged", "scope": "FILTER_Flagged", "fn": lambda d: d["is_fg"] == True},
-    "Courier Cancelled": {"icon": "🛑", "count_key": "CourierCancelled", "scope": "FILTER_CourierCancelled", "fn": lambda d: d["is_cc"] == True},
-    "Approved > Delivered": {"icon": "📬", "count_key": "ApprovedDelivered", "scope": "FILTER_ApprovedDelivered", "fn": lambda d: d["is_ad"] == True},
-    "Resolution Actioned": {"icon": "💳", "count_key": "ResolutionActioned", "scope": "FILTER_ResolutionActioned", "fn": lambda d: d["is_ra"] == True},
-    "No Resolution Actioned": {"icon": "⏸️", "count_key": "NoResolutionActioned", "scope": "FILTER_NoResolutionActioned", "fn": lambda d: d["is_nra"] == True},
+    "Pending": {
+        "icon": "⏳",
+        "count_key": "Pending",
+        "scope": "Pending",
+        "semantic_label": "Needs Review",
+        "fn": lambda d: d["Current Status"] == "Pending",
+    },
+    "Approved": {
+        "icon": "✅",
+        "count_key": "Approved",
+        "scope": "Approved",
+        "semantic_label": "In Transit",
+        "fn": lambda d: d["Current Status"] == "Approved",
+    },
+    "Received": {
+        "icon": "📦",
+        "count_key": "Received",
+        "scope": "Received",
+        "semantic_label": "At Warehouse",
+        "fn": lambda d: d["Current Status"] == "Received",
+    },
+    "No Tracking": {
+        "icon": "🚫",
+        "count_key": "NoTracking",
+        "scope": "FILTER_NoTracking",
+        "semantic_label": "No Label",
+        "fn": lambda d: d["is_nt"] == True,
+    },
+    "Flagged": {
+        "icon": "🚩",
+        "count_key": "Flagged",
+        "scope": "FILTER_Flagged",
+        "semantic_label": "Urgent Action",
+        "fn": lambda d: d["is_fg"] == True,
+    },
+    "Courier Cancelled": {
+        "icon": "🛑",
+        "count_key": "CourierCancelled",
+        "scope": "FILTER_CourierCancelled",
+        "semantic_label": "Cancelled",
+        "fn": lambda d: d["is_cc"] == True,
+    },
+    "Approved > Delivered": {
+        "icon": "📬",
+        "count_key": "ApprovedDelivered",
+        "scope": "FILTER_ApprovedDelivered",
+        "semantic_label": "Delivered",
+        "fn": lambda d: d["is_ad"] == True,
+    },
+    "Resolution Actioned": {
+        "icon": "💳",
+        "count_key": "ResolutionActioned",
+        "scope": "FILTER_ResolutionActioned",
+        "semantic_label": "Resolved",
+        "fn": lambda d: d["is_ra"] == True,
+    },
+    "No Resolution Actioned": {
+        "icon": "⏸️",
+        "count_key": "NoResolutionActioned",
+        "scope": "FILTER_NoResolutionActioned",
+        "semantic_label": "Pending Refund",
+        "fn": lambda d: d["is_nra"] == True,
+    },
 }
 
 
@@ -1345,50 +1722,198 @@ def ids_for_filter(name: str) -> list:
 
 
 # ==========================================
-# 13. FILTER TILE UI (selected border highlight)
+# 13. COMMAND CENTER TILE UI
 # ==========================================
-def render_filter_tile(col, name: str, refresh_scope: str):
+def render_command_tile(
+    col,
+    name: str,
+    refresh_scope: str,
+    semantic_label: Optional[str] = None,
+    icon: Optional[str] = None,
+    variant: str = "default",
+):
+    """
+    Render a glassmorphic command center tile.
+
+    Args:
+        col: Streamlit column to render into
+        name: Filter name (e.g., "Pending")
+        refresh_scope: Scope key for sync operations
+        semantic_label: Human-readable action label (e.g., "Needs Review")
+        icon: Emoji icon
+        variant: CSS class variant (pending|approved|received|flagged)
+    """
     cfg = FILTERS[name]
-    icon = cfg["icon"]  # type: ignore
     count_key = cfg["count_key"]  # type: ignore
+    semantic_label = semantic_label or str(cfg.get("semantic_label", name)).upper()
+    icon = icon or str(cfg.get("icon", ""))
 
     active: Set[str] = st.session_state.active_filters  # type: ignore
     selected = name in active
+    is_urgent = name in {"Flagged", "No Tracking"} or (
+        name == "Approved" and counts.get("NoTracking", 0) > 10
+    )
 
     count_val = counts.get(count_key, 0)
-    updated_display = header_last_sync_display([refresh_scope])
-
-    label = f"{icon} {name.upper()}"
+    last_sync_ts = get_last_sync(refresh_scope)
+    time_ago_str = format_time_ago(last_sync_ts)
 
     with col:
-        card_class = "card selected" if selected else "card"
-        st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
-        # Keep the count + controls in a shared-width wrapper for consistent alignment.
-        st.markdown("<div class='status-tile'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='count-banner'>{count_val}</div>", unsafe_allow_html=True)
-        st.markdown("<div class='status-button'>", unsafe_allow_html=True)
-        if st.button(label, key=f"flt_{name}", width="stretch"):
-            toggle_filter(name)
-        st.markdown("</div>", unsafe_allow_html=True)
-        # Streamlit-native refresh row for predictable spacing (no button borders).
-        st.markdown("<div class='refresh-row'>", unsafe_allow_html=True)
-        if st.button("Refresh", key=f"ref_{name}", width="content"):
-            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+        tile_classes = ["command-tile", variant, "fade-in"]
+        if selected:
+            tile_classes.append("selected")
+        if is_urgent:
+            tile_classes.append("urgent")
+
+        st.markdown(f"<div class='{' '.join(tile_classes)}'>", unsafe_allow_html=True)
+        st.markdown(f"<div class='tile-count'>{count_val}</div>", unsafe_allow_html=True)
         st.markdown(
-            f"<span class='updated-time'>Updated: {updated_display}</span>",
+            f"<div class='tile-label'>"
+            f"<span class='tile-label-icon'>{icon}</span>"
+            f"<span>{semantic_label}</span>"
+            f"</div>",
             unsafe_allow_html=True,
         )
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+
+        if st.button(
+            f"{'✓ ' if selected else ''}View Details",
+            key=f"tile_{name}",
+            use_container_width=True,
+        ):
+            toggle_filter(name)
+
+        st.markdown("<div class='tile-divider'></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='tile-meta'>"
+            f"<div class='tile-time'>"
+            f"<span class='tile-status-dot'></span>"
+            f"<span>{time_ago_str}</span>"
+            f"</div>"
+            f"<div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("⟳", key=f"ref_{name}", help=f"Refresh {name}"):
+            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
 
         st.markdown("</div></div>", unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_api_action_bar():
+    """Render the centralized API operation control panel."""
+    st.markdown("<div class='api-action-bar'>", unsafe_allow_html=True)
+    st.markdown("<div class='api-action-bar-title'>🔌 API Operations</div>", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([2, 2, 1])
+
+    with col1:
+        api_endpoint = st.selectbox(
+            "Select Operation",
+            options=[
+                "List RMAs (/rmas)",
+                "RMA Details (/rma/{id})",
+                "Update Shipment (/shipment/{id})",
+                "Post Comment (/rma/{id}/comment)",
+                "Batch Refresh Courier Status",
+                "Export to CSV",
+            ],
+            key="api_endpoint_selector",
+            label_visibility="collapsed",
+        )
+
+    with col2:
+        if any(term in api_endpoint for term in ("Details", "Update", "Comment")):
+            st.text_input(
+                "RMA/Shipment ID",
+                key="api_context_input",
+                placeholder="Enter ID...",
+                label_visibility="collapsed",
+            )
+        else:
+            st.empty()
+
+    with col3:
+        if st.button("⚡ Execute", key="api_execute_btn", type="primary", use_container_width=True):
+            execute_api_operation(api_endpoint, st.session_state.get("api_context_input", ""))
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def execute_api_operation(endpoint: str, context: str = ""):
+    """Execute the selected API operation."""
+    global df_view
+
+    if "List RMAs" in endpoint:
+        perform_sync()
+        return
+
+    if "RMA Details" in endpoint:
+        if not context:
+            st.error("Please enter an RMA ID")
+            return
+        with st.spinner(f"Fetching RMA {context}..."):
+            rma_data = fetch_rma_detail(context, force=True)
+        if rma_data:
+            st.success(f"✅ Refreshed RMA {context}")
+            st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+            st.rerun()
+            return
+        st.error(f"Failed to fetch RMA {context}")
+        return
+
+    if "Update Shipment" in endpoint:
+        if not context:
+            st.error("Please enter a shipment ID")
+            return
+        st.info("Shipment update requires payload input. Use the shipment editor below.")
+        return
+
+    if "Post Comment" in endpoint:
+        if not context:
+            st.error("Please enter an RMA ID")
+            return
+        st.info("Comment posting is available in the row action menu.")
+        return
+
+    if "Batch Refresh Courier" in endpoint:
+        if df_view.empty:
+            st.warning("No data loaded. Sync dashboard first.")
+            return
+
+        rmas_with_tracking = df_view[df_view["DisplayTrack"] != ""].copy()
+        rma_ids = rmas_with_tracking["_rma_id_text"].tolist()
+
+        if not rma_ids:
+            st.info("No RMAs with tracking numbers found.")
+            return
+
+        force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH")
+        return
+
+    if "Export to CSV" in endpoint:
+        if df_view.empty:
+            st.warning("No data to export. Sync dashboard first.")
+            return
+
+        csv = df_view.to_csv(index=False)
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name=f"returngo_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+        return
+
+    st.info(f"Operation '{endpoint}' not yet implemented.")
 
 
 def main():
     global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts
 
     st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
+    inject_command_center_css()
 
     # --- Preserve scroll position across reruns (page scroll) ---
     components.html(
@@ -2115,22 +2640,29 @@ def main():
                 f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
             )
 
+    st.divider()
+    render_api_action_bar()
+    st.divider()
+
+    st.markdown("### 📊 Command Center")
+    st.write("")
+
     # Row 1
     r1 = st.columns(5)
-    render_filter_tile(r1[0], "Pending", "Pending")
-    render_filter_tile(r1[1], "Approved", "Approved")
-    render_filter_tile(r1[2], "Received", "Received")
-    render_filter_tile(r1[3], "No Tracking", "FILTER_NoTracking")
-    render_filter_tile(r1[4], "Flagged", "FILTER_Flagged")
+    render_command_tile(r1[0], "Pending", "Pending", variant="pending")
+    render_command_tile(r1[1], "Approved", "Approved", variant="approved")
+    render_command_tile(r1[2], "Received", "Received", variant="received")
+    render_command_tile(r1[3], "No Tracking", "FILTER_NoTracking", variant="flagged")
+    render_command_tile(r1[4], "Flagged", "FILTER_Flagged", variant="flagged")
 
     st.write("")
 
     # Row 2
     r2 = st.columns(4)
-    render_filter_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled")
-    render_filter_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered")
-    render_filter_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned")
-    render_filter_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned")
+    render_command_tile(r2[0], "Courier Cancelled", "FILTER_CourierCancelled", variant="flagged")
+    render_command_tile(r2[1], "Approved > Delivered", "FILTER_ApprovedDelivered", variant="approved")
+    render_command_tile(r2[2], "Resolution Actioned", "FILTER_ResolutionActioned", variant="approved")
+    render_command_tile(r2[3], "No Resolution Actioned", "FILTER_NoResolutionActioned", variant="pending")
 
     st.write("")
 
