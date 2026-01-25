@@ -461,14 +461,21 @@ def check_courier_status(tracking_number: str) -> str:
         return ""
 
     try:
-        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        urls = []
         headers = {"User-Agent": "Mozilla/5.0"}
         if PARCEL_NINJA_TOKEN:
             headers["Authorization"] = f"Bearer {PARCEL_NINJA_TOKEN}"
-        session = get_parcel_session()
-        res = session.get(url, headers=headers, timeout=10)
+            urls.append(f"https://optimise.parcelninja.com/shipment/track/{tracking_number}")
+        urls.append(f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}")
 
-        if res.status_code == 200:
+        session = get_parcel_session()
+        res = None
+        for url in urls:
+            res = session.get(url, headers=headers, timeout=10)
+            if res.status_code != 404:
+                break
+
+        if res and res.status_code == 200:
             try:
                 data = res.json()
                 payload = data.get("data") if isinstance(data, dict) and data.get("data") else data
@@ -521,10 +528,12 @@ def check_courier_status(tracking_number: str) -> str:
                     return kw
             return "Unknown"
 
-        if res.status_code == 404:
+        if res and res.status_code == 404:
             return "Tracking Not Found"
 
-        return f"Error {res.status_code}"
+        if res:
+            return f"Error {res.status_code}"
+        return "Unknown"
 
     except Exception:
         return "Check Failed"
@@ -926,9 +935,9 @@ def format_api_limit_display() -> Tuple[str, str]:
 def toggle_filter(name: str):
     s: Set[str] = st.session_state.active_filters  # type: ignore
     if name in s:
-        s.remove(name)
+        s.clear()
     else:
-        s.add(name)
+        s = {name}
     st.session_state.active_filters = s  # type: ignore
     st.rerun()
 
@@ -1055,21 +1064,29 @@ def render_filter_tile(col, name: str, refresh_scope: str):
     selected = name in active
 
     count_val = counts.get(count_key, 0)
+    updated_display = header_last_sync_display([refresh_scope])
 
     label = f"{icon} {name.upper()}"
 
     with col:
         card_class = "card selected" if selected else "card"
         st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
-        # Count pill inside the tile for quick scanning.
-        st.markdown(f"<div class='count-pill'>{count_val}</div>", unsafe_allow_html=True)
+        # Keep the count + controls in a shared-width wrapper for consistent alignment.
+        st.markdown("<div class='status-tile'>", unsafe_allow_html=True)
+        st.markdown(f"<div class='count-banner'>{count_val}</div>", unsafe_allow_html=True)
         st.markdown("<div class='status-button'>", unsafe_allow_html=True)
         if st.button(label, key=f"flt_{name}", use_container_width=True):
             toggle_filter(name)
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("<div class='refresh-button'>", unsafe_allow_html=True)
+        # Streamlit-native refresh row for predictable spacing (no button borders).
+        st.markdown("<div class='refresh-row'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
             force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+        st.markdown(
+            f"<span class='updated-time'>Updated: {updated_display}</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1181,29 +1198,60 @@ def main():
             flex: 1;
           }
 
-          .count-pill {
-            position: absolute;
-            top: -12px;
-            left: 12px;
-            width: 34px;
-            height: 34px;
-            border-radius: 999px;
+          .status-tile {
+            width: 70%;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+          }
+          /* Remove Streamlit block spacing between count, button, and refresh rows. */
+          .status-tile .stMarkdown,
+          .status-tile div[data-testid="stButton"] {
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+          }
+          .status-tile > div {
+            margin-top: 0 !important;
+            margin-bottom: 0 !important;
+          }
+          .status-tile div[data-testid="stButton"] {
+            padding: 0 !important;
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+          }
+
+          .count-banner {
+            width: 100%;
+            height: 40px;
+            border-radius: 10px;
             display: flex;
             align-items: center;
             justify-content: center;
             font-weight: 800;
-            font-size: 1.1rem;
+            font-size: 1.35rem;
             color: #ffffff;
-            background: rgba(15, 23, 42, 0.72);
+            background: rgba(148, 163, 184, 0.22);
             border: 1px solid rgba(148, 163, 184, 0.25);
+            margin-bottom: 0;
+          }
+
+          .card.selected .count-banner {
+            background: #22c55e;
+            border-color: #22c55e;
           }
 
           .status-button {
             position: relative;
-            padding-top: 6px;
+            padding-top: 0;
+            margin-bottom: 0;
+          }
+          .status-button div.stButton {
+            margin-bottom: 0 !important;
           }
           .status-button div.stButton > button {
-            width: 70% !important;
+            width: 100% !important;
             background: rgba(15, 23, 42, 0.82) !important;
             border: 1px solid rgba(148, 163, 184, 0.25) !important;
             color: #e5e7eb !important;
@@ -1211,27 +1259,30 @@ def main():
             border-radius: 10px !important;
             padding: 8px 12px !important;
             text-transform: uppercase !important;
-            margin: 0 auto !important;
+            margin: 0 !important;
             white-space: normal !important;
           }
 
-          .card.selected .status-button div.stButton > button {
-            background: #39ff14 !important;
-            border: 2px solid #39ff14 !important;
-            color: #0b0f14 !important;
-            box-shadow: 0 0 0 2px rgba(57, 255, 20, 0.35) !important;
-          }
-
-          /* Refresh link under each tile */
-          .refresh-button {
-            margin-top: -10px;
+          /* Refresh row under each tile */
+          .refresh-row {
             display: flex;
-            justify-content: center;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            /* Pull the Refresh row flush under the status button. */
+            margin-top: -6px;
+            padding-top: 0;
           }
-          .refresh-button div.stButton {
+          .refresh-row div.stButton {
             margin: 0 !important;
           }
-          .refresh-button div.stButton > button {
+          .refresh-row div[data-testid="stButton"] {
+            padding: 0 !important;
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+          }
+          .refresh-row div.stButton > button {
             width: auto !important;
             padding: 0 !important;
             border: none !important;
@@ -1244,9 +1295,14 @@ def main():
             line-height: 1 !important;
             margin: 0 !important;
           }
-          .refresh-button div.stButton > button:hover {
+          .refresh-row div.stButton > button:hover {
             color: #e2e8f0 !important;
             transform: none !important;
+          }
+          .updated-time {
+            font-size: 12px;
+            color: rgba(226, 232, 240, 0.9);
+            white-space: nowrap;
           }
 
           /* Sticky container */
