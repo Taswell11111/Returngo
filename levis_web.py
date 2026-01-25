@@ -933,22 +933,6 @@ def toggle_filter(name: str):
     st.rerun()
 
 
-def toggle_status_filter(name: str):
-    # Keep a single primary status selected at a time for highlight + filter.
-    s: Set[str] = st.session_state.active_filters  # type: ignore
-    current = st.session_state.get("selected_status")
-    if current == name:
-        s.discard(name)
-        st.session_state.selected_status = None
-    else:
-        for status in PRIMARY_STATUS_TILES:
-            s.discard(status)
-        s.add(name)
-        st.session_state.selected_status = name
-    st.session_state.active_filters = s  # type: ignore
-    st.rerun()
-
-
 def clear_all_filters():
     st.session_state.active_filters = set()  # type: ignore
     st.session_state.search_query_input = ""
@@ -956,7 +940,6 @@ def clear_all_filters():
     st.session_state.res_multi = []
     st.session_state.actioned_multi = []
     st.session_state.req_dates_selected = []
-    st.session_state.selected_status = None
 
 
 def update_data_table_log(rows: list):
@@ -1069,7 +1052,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
     count_key = cfg["count_key"]  # type: ignore
 
     active: Set[str] = st.session_state.active_filters  # type: ignore
-    selected = (st.session_state.get("selected_status") == name) if name in PRIMARY_STATUS_TILES else (name in active)
+    selected = name in active
 
     count_val = counts.get(count_key, 0)
 
@@ -1082,10 +1065,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         st.markdown(f"<div class='count-pill'>{count_val}</div>", unsafe_allow_html=True)
         st.markdown("<div class='status-button'>", unsafe_allow_html=True)
         if st.button(label, key=f"flt_{name}", use_container_width=True):
-            if name in PRIMARY_STATUS_TILES:
-                toggle_status_filter(name)
-            else:
-                toggle_filter(name)
+            toggle_filter(name)
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<div class='refresh-button'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
@@ -1183,17 +1163,17 @@ def main():
           /* Cards */
           .card {
             position: relative;
-            background: rgba(17, 24, 39, 0.70);
-            border: 1px solid rgba(148, 163, 184, 0.18);
+            background: transparent;
+            border: none;
             border-radius: 14px;
-            padding: 20px 12px 4px 12px;
-            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            padding: 0;
+            box-shadow: none;
             display: flex;
             flex-direction: column;
           }
 
           .card.selected {
-            background: rgba(34,197,94,0.22);
+            background: transparent;
           }
 
           .tile-inner {
@@ -1203,8 +1183,8 @@ def main():
 
           .count-pill {
             position: absolute;
-            top: 8px;
-            left: 10px;
+            top: -12px;
+            left: 12px;
             width: 34px;
             height: 34px;
             border-radius: 999px;
@@ -1212,25 +1192,39 @@ def main():
             align-items: center;
             justify-content: center;
             font-weight: 800;
-            font-size: 0.95rem;
+            font-size: 1.1rem;
             color: #ffffff;
             background: rgba(15, 23, 42, 0.72);
             border: 1px solid rgba(148, 163, 184, 0.25);
           }
 
+          .status-button {
+            position: relative;
+            padding-top: 6px;
+          }
           .status-button div.stButton > button {
-            width: 100% !important;
+            width: 70% !important;
             background: rgba(15, 23, 42, 0.82) !important;
             border: 1px solid rgba(148, 163, 184, 0.25) !important;
             color: #e5e7eb !important;
             box-shadow: none !important;
             border-radius: 10px !important;
             padding: 8px 12px !important;
+            text-transform: uppercase !important;
+            margin: 0 auto !important;
+            white-space: normal !important;
+          }
+
+          .card.selected .status-button div.stButton > button {
+            background: #39ff14 !important;
+            border: 2px solid #39ff14 !important;
+            color: #0b0f14 !important;
+            box-shadow: 0 0 0 2px rgba(57, 255, 20, 0.35) !important;
           }
 
           /* Refresh link under each tile */
           .refresh-button {
-            margin-top: 0;
+            margin-top: -10px;
             display: flex;
             justify-content: center;
           }
@@ -1296,6 +1290,17 @@ def main():
             padding: 4px 8px !important;
             font-size: 12px !important;
             width: 50% !important;
+          }
+          .sync-dashboard-btn button {
+            min-height: 4rem !important;
+            padding: 0.9rem 1.2rem !important;
+            text-transform: uppercase !important;
+          }
+          .sync-time-bar {
+            text-align: right;
+            margin: 0 0 -8px 0;
+            font-size: 0.9rem;
+            color: rgba(226,232,240,0.9);
           }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
@@ -1378,9 +1383,22 @@ def main():
             if (anchor.parentElement) anchor.parentElement.classList.add("sticky-top");
           }
 
+          function styleSyncDashboardButton() {
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach((button) => {
+              if (button.textContent && button.textContent.trim().includes('Sync Dashboard')) {
+                const wrapper = button.closest('[data-testid="stButton"]');
+                if (wrapper) wrapper.classList.add('sync-dashboard-btn');
+              }
+            });
+          }
+
           applySticky();
+          styleSyncDashboardButton();
           setTimeout(applySticky, 250);
           setTimeout(applySticky, 800);
+          setTimeout(styleSyncDashboardButton, 250);
+          setTimeout(styleSyncDashboardButton, 800);
         </script>
         """,
         height=0,
@@ -1401,8 +1419,6 @@ def main():
         st.session_state.actioned_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
-    if "selected_status" not in st.session_state:
-        st.session_state.selected_status = None
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
