@@ -933,22 +933,6 @@ def toggle_filter(name: str):
     st.rerun()
 
 
-def toggle_status_filter(name: str):
-    # Keep a single primary status selected at a time for highlight + filter.
-    s: Set[str] = st.session_state.active_filters  # type: ignore
-    current = st.session_state.get("selected_status")
-    if current == name:
-        s.discard(name)
-        st.session_state.selected_status = None
-    else:
-        for status in PRIMARY_STATUS_TILES:
-            s.discard(status)
-        s.add(name)
-        st.session_state.selected_status = name
-    st.session_state.active_filters = s  # type: ignore
-    st.rerun()
-
-
 def clear_all_filters():
     st.session_state.active_filters = set()  # type: ignore
     st.session_state.search_query_input = ""
@@ -956,7 +940,6 @@ def clear_all_filters():
     st.session_state.res_multi = []
     st.session_state.actioned_multi = []
     st.session_state.req_dates_selected = []
-    st.session_state.selected_status = None
 
 
 def update_data_table_log(rows: list):
@@ -1069,7 +1052,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
     count_key = cfg["count_key"]  # type: ignore
 
     active: Set[str] = st.session_state.active_filters  # type: ignore
-    selected = (st.session_state.get("selected_status") == name) if name in PRIMARY_STATUS_TILES else (name in active)
+    selected = name in active
 
     count_val = counts.get(count_key, 0)
 
@@ -1082,10 +1065,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
         st.markdown(f"<div class='count-pill'>{count_val}</div>", unsafe_allow_html=True)
         st.markdown("<div class='status-button'>", unsafe_allow_html=True)
         if st.button(label, key=f"flt_{name}", use_container_width=True):
-            if name in PRIMARY_STATUS_TILES:
-                toggle_status_filter(name)
-            else:
-                toggle_filter(name)
+            toggle_filter(name)
         st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("<div class='refresh-button'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
@@ -1203,8 +1183,8 @@ def main():
 
           .count-pill {
             position: absolute;
-            top: -30px;
-            left: 10px;
+            top: -12px;
+            left: 12px;
             width: 34px;
             height: 34px;
             border-radius: 999px;
@@ -1218,6 +1198,10 @@ def main():
             border: 1px solid rgba(148, 163, 184, 0.25);
           }
 
+          .status-button {
+            position: relative;
+            padding-top: 6px;
+          }
           .status-button div.stButton > button {
             width: 70% !important;
             background: rgba(15, 23, 42, 0.82) !important;
@@ -1233,13 +1217,14 @@ def main():
 
           .card.selected .status-button div.stButton > button {
             background: #39ff14 !important;
-            border-color: #39ff14 !important;
+            border: 2px solid #39ff14 !important;
             color: #0b0f14 !important;
+            box-shadow: 0 0 0 2px rgba(57, 255, 20, 0.35) !important;
           }
 
           /* Refresh link under each tile */
           .refresh-button {
-            margin-top: -2px;
+            margin-top: -10px;
             display: flex;
             justify-content: center;
           }
@@ -1307,8 +1292,15 @@ def main():
             width: 50% !important;
           }
           .sync-dashboard-btn button {
-            min-height: calc(2rem + 2px) !important;
+            min-height: 4rem !important;
+            padding: 0.9rem 1.2rem !important;
             text-transform: uppercase !important;
+          }
+          .sync-time-bar {
+            text-align: right;
+            margin: 0 0 -8px 0;
+            font-size: 0.9rem;
+            color: rgba(226,232,240,0.9);
           }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
@@ -1427,8 +1419,6 @@ def main():
         st.session_state.actioned_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
-    if "selected_status" not in st.session_state:
-        st.session_state.selected_status = None
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
