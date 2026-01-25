@@ -789,8 +789,9 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
     try:
         res = rg_request("PUT", api_url(f"/shipment/{shipment_id}"), headers=headers, timeout=15, json_body=payload)
         if res.status_code == 200:
-            fetch_rma_detail(rma_id, force=True)
-            return True, "Success"
+            if fetch_rma_detail(rma_id, force=True):
+                return True, "Success"
+            return False, "Tracking updated, but failed to refresh RMA details."
         return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
         return False, str(e)
