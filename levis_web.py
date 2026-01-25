@@ -455,14 +455,14 @@ def check_courier_status(tracking_number: str) -> str:
             for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                 if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                     return kw
-            return "Unknown"
+            return "other"
 
         if res and res.status_code == 404:
             return "Tracking Not Found"
 
         if res:
             return f"Error {res.status_code}"
-        return "Unknown"
+        return "status code errror"
 
     except Exception:
         return "Check Failed"
