@@ -45,12 +45,6 @@ if not MY_API_KEY:
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
 
-# IMPORTANT: move this token into secrets/env if you can.
-try:
-    PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
-except Exception:
-    PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
-
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
@@ -498,28 +492,16 @@ init_db()
 # ==========================================
 
 def check_courier_status(tracking_number: str) -> str:
-    if not tracking_number or not PARCEL_NINJA_TOKEN:
+    if not tracking_number:
         return "Unknown"
 
     try:
-        url = f"https://optimise.parcelninja.com/shipment/track/{tracking_number}"
-        headers = {"User-Agent": "Mozilla/5.0", "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}"}
+        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
         final_status = "Unknown"
 
         if res.status_code == 200:
-            # JSON first
-            try:
-                data = res.json()
-                if isinstance(data, dict) and data.get("history"):
-                    final_status = data["history"][0].get("status") or data["history"][0].get("description")
-                else:
-                    final_status = data.get("status") or data.get("currentStatus") or "Unknown"
-                return final_status or "Unknown"
-            except Exception:
-                pass
-
-            # HTML fallback
             content = res.text
             clean_html = re.sub(r"<(script|style).*?</\1>", "", content, flags=re.DOTALL | re.IGNORECASE)
             history_section = re.search(r"<table[^>]*?tracking-history.*?>(.*?)</table>", clean_html, re.DOTALL | re.IGNORECASE)
