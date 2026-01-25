@@ -8,12 +8,15 @@ import os
 import threading
 import time
 import re
+import logging
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set
 from returngo_api import api_url, RMA_COMMENT_PATH
+
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # 1. CONFIGURATION
@@ -430,7 +433,71 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 # ==========================================
 # 4. COURIER STATUS
 # ==========================================
-def check_courier_status(tracking_number: str) -> str:
+def _extract_json_object(html: str, start_pos: int) -> Optional[str]:
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start_pos, len(html)):
+        char = html[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start_pos : i + 1]
+
+        if depth < 0:
+            return None
+
+    return None
+
+
+def _extract_json_array(html: str, start_pos: int) -> Optional[str]:
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start_pos, len(html)):
+        char = html[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return html[start_pos : i + 1]
+
+        if depth < 0:
+            return None
+
+    return None
+
+
+def check_courier_status_web_scraping(tracking_number: str) -> str:
     if not tracking_number:
         return "No tracking number"
 
@@ -450,7 +517,89 @@ def check_courier_status(tracking_number: str) -> str:
         if res.status_code != 200:
             return f"Tracking error ({res.status_code})"
 
-        clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
+        html = res.text
+
+        def format_event_date(date_str: str) -> str:
+            if not date_str:
+                return ""
+            try:
+                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                return dt.strftime("%Y-%m-%d %H:%M")
+            except (ValueError, TypeError):
+                return str(date_str)[:16]
+
+        def format_event(event: dict) -> str:
+            status = (
+                event.get("status")
+                or event.get("description")
+                or event.get("event")
+                or event.get("statusDescription")
+                or "Unknown"
+            )
+            date_str = (
+                event.get("date")
+                or event.get("eventDate")
+                or event.get("timestamp")
+                or event.get("datetime")
+                or ""
+            )
+            formatted_date = format_event_date(date_str)
+            return f"{status}\t{formatted_date}" if formatted_date else status
+
+        def extract_events(data: dict) -> Optional[list]:
+            paths = [
+                ["shipment", "events"],
+                ["shipment", "checkpoints"],
+                ["tracking", "events"],
+                ["tracking", "checkpoints"],
+                ["data", "events"],
+                ["data", "checkpoints"],
+                ["events"],
+                ["checkpoints"],
+            ]
+
+            for path in paths:
+                obj = data
+                for key in path:
+                    obj = obj.get(key) if isinstance(obj, dict) else None
+                    if obj is None:
+                        break
+                if isinstance(obj, list) and obj:
+                    return obj
+            return None
+
+        var_pattern = re.compile(
+            r"(?:window\.__INITIAL_STATE__|(?:var|let|const)\s+(?:trackingData|shipmentData|initialData))\s*=\s*(\{)",
+            re.IGNORECASE,
+        )
+
+        for match in var_pattern.finditer(html):
+            json_start = match.start(1)
+            json_str = _extract_json_object(html, json_start)
+            if not json_str:
+                continue
+            try:
+                data = json.loads(json_str)
+                events = extract_events(data)
+                if events:
+                    return format_event(events[-1])
+            except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                continue
+
+        array_pattern = re.compile(r'"(?:events|checkpoints)"\s*:\s*(\[)', re.IGNORECASE)
+        for match in array_pattern.finditer(html):
+            array_start = match.start(1)
+            array_str = _extract_json_array(html, array_start)
+            if not array_str:
+                continue
+            try:
+                events = json.loads(array_str)
+                if isinstance(events, list) and events:
+                    return format_event(events[-1])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+
+        clean_html = re.sub(r"<(script|style).*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
         rows = re.findall(r"<tr[^>]*>.*?</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
         if not rows:
             return "No tracking events found"
@@ -461,31 +610,75 @@ def check_courier_status(tracking_number: str) -> str:
 
         for row_html in rows:
             cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
-            cleaned_cells = [clean_text(c) for c in cells]
-            cleaned_cells = [c for c in cleaned_cells if c]
-            if not cleaned_cells:
-                continue
-            if len(cleaned_cells) >= 2:
-                if re.search(r"\d", cleaned_cells[0]):
-                    return "\t".join(cleaned_cells[:2])
-            else:
-                if re.search(r"\d", cleaned_cells[0]):
-                    return cleaned_cells[0]
+            cleaned_cells = [clean_text(c) for c in cells if clean_text(c)]
+            if len(cleaned_cells) >= 2 and re.search(r"\d", cleaned_cells[0]):
+                return "\t".join(cleaned_cells[:2])
 
         for row_html in rows:
             cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
-            cleaned_cells = [clean_text(c) for c in cells]
-            cleaned_cells = [c for c in cleaned_cells if c]
-            if not cleaned_cells:
-                continue
-            return "\t".join(cleaned_cells[:2]) if len(cleaned_cells) >= 2 else cleaned_cells[0]
+            cleaned_cells = [clean_text(c) for c in cells if clean_text(c)]
+            if cleaned_cells:
+                return "\t".join(cleaned_cells[:2]) if len(cleaned_cells) >= 2 else cleaned_cells[0]
 
         return "No tracking events found"
 
     except requests.Timeout:
+        logger.warning("Timeout checking tracking for %s", tracking_number)
         return "Tracking check timed out"
+    except requests.ConnectionError as exc:
+        logger.error("Connection error for %s: %s", tracking_number, exc)
+        return "Tracking service unavailable"
+    except requests.RequestException as exc:
+        logger.error("Request failed for %s: %s", tracking_number, exc, exc_info=True)
+        return "Tracking request failed (ERR_REQ)"
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid JSON from ParcelNinja for %s: %s", tracking_number, exc)
+        return "Tracking data invalid (ERR_JSON)"
     except Exception:
-        return "Tracking check failed"
+        logger.exception("Unexpected tracking error for %s", tracking_number)
+        return "Tracking check failed (ERR_UNKNOWN)"
+
+
+def check_courier_status(tracking_number: str) -> str:
+    if not tracking_number:
+        return "No tracking number"
+
+    if PARCEL_NINJA_TOKEN:
+        try:
+            url = f"https://api.parcelninja.com/v1/tracking/{tracking_number}"
+            session = get_parcel_session()
+            headers = {
+                "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}",
+                "Content-Type": "application/json",
+                "User-Agent": "LevisReturnGO/1.0",
+            }
+            res = session.get(url, headers=headers, timeout=10)
+
+            if res.status_code == 200:
+                data = res.json()
+                events = data.get("events") or data.get("checkpoints") or []
+                if events:
+                    latest = events[-1]
+                    status = latest.get("status") or latest.get("description") or "Unknown"
+                    date = latest.get("date") or latest.get("timestamp") or ""
+                    if date:
+                        try:
+                            dt = datetime.fromisoformat(date.replace("Z", "+00:00"))
+                            date = dt.strftime("%Y-%m-%d %H:%M")
+                        except ValueError:
+                            pass
+                    return f"{status}\t{date}" if date else status
+                return "No tracking events found"
+            if res.status_code == 401:
+                logger.warning("ParcelNinja API token invalid, falling back to web scraping")
+            elif res.status_code == 404:
+                return "Tracking not found (404)"
+            else:
+                logger.error("ParcelNinja API error %s, falling back", res.status_code)
+        except Exception as exc:
+            logger.error("ParcelNinja API failed: %s, falling back to web scraping", exc)
+
+    return check_courier_status_web_scraping(tracking_number)
 
 
 # ==========================================
@@ -925,6 +1118,28 @@ def format_api_limit_display() -> Tuple[str, str]:
         sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
 
     return main, sub
+
+
+def format_tracking_status_with_icon(status: str) -> str:
+    if not status or status == "Unknown":
+        return "❓ Unknown"
+
+    status_lower = status.lower()
+    if "return" in status_lower and "sender" in status_lower:
+        return f"↩️ {status}"
+
+    status_patterns = [
+        ("🛑", ["cancel", "failed", "exception", "rejected"]),
+        ("✅", ["delivered"]),
+        ("🚚", ["out for delivery", "out-for-delivery"]),
+        ("📬", ["collected", "picked"]),
+        ("📦", ["in transit", "transit", "on the way"]),
+    ]
+    for icon, keywords in status_patterns:
+        if any(keyword in status_lower for keyword in keywords):
+            return f"{icon} {status}"
+
+    return f"📍 {status}"
 
 
 def toggle_filter(name: str):
@@ -1419,6 +1634,110 @@ def main():
             font-weight: 800;
           }
 
+          /* Responsive filter tiles */
+          @media (max-width: 768px) {
+            [data-testid="column"] {
+              min-width: 100% !important;
+              flex: 0 0 100% !important;
+            }
+            .status-tile {
+              width: 85% !important;
+            }
+            .title-wrap h1 {
+              font-size: 2.2rem !important;
+            }
+            .subtitle-bar {
+              font-size: 0.85rem !important;
+              flex-wrap: wrap;
+              gap: 6px !important;
+            }
+          }
+
+          @media (min-width: 769px) and (max-width: 1024px) {
+            [data-testid="column"] {
+              min-width: 50% !important;
+              flex: 0 0 50% !important;
+            }
+            .status-tile {
+              width: 80% !important;
+            }
+          }
+
+          @media (min-width: 1025px) {
+            .status-tile {
+              width: 70%;
+            }
+          }
+
+          .card {
+            position: relative;
+            min-height: 140px;
+            margin-bottom: 12px;
+          }
+
+          .status-button div.stButton > button {
+            margin-top: 6px !important;
+            margin-bottom: 6px !important;
+          }
+
+          .refresh-row {
+            margin-top: 4px !important;
+            padding: 6px 0 4px 0;
+            gap: 8px;
+          }
+
+          .count-banner {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+          }
+
+          .card:hover .count-banner {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+          }
+
+          .card.selected {
+            outline: 2px solid rgba(34, 197, 94, 0.6);
+            outline-offset: 2px;
+          }
+
+          .card.selected::before {
+            content: "✓";
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            width: 24px;
+            height: 24px;
+            background: #22c55e;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: 900;
+            color: white;
+            box-shadow: 0 4px 12px rgba(34, 197, 94, 0.5);
+            z-index: 10;
+          }
+
+          [data-testid="stDataFrame"] tbody tr:nth-child(even) {
+            background: rgba(255, 255, 255, 0.02) !important;
+          }
+
+          [data-testid="stDataFrame"] tbody tr:hover {
+            background: rgba(59, 130, 246, 0.08) !important;
+            cursor: pointer;
+          }
+
+          [data-testid="stDataFrame"] th {
+            background: rgba(15, 23, 42, 0.82) !important;
+            color: #f1f5f9 !important;
+            font-weight: 700 !important;
+            text-transform: uppercase !important;
+            font-size: 13px !important;
+            letter-spacing: 0.5px !important;
+            border-bottom: 2px solid rgba(148, 163, 184, 0.3) !important;
+          }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -1591,6 +1910,7 @@ def main():
         shipment_id = shipments[0].get("shipmentId") if shipments else None
 
         local_tracking_status = rma.get("_local_courier_status") or "Unknown"
+        local_tracking_status_display = format_tracking_status_with_icon(local_tracking_status)
         local_tracking_status_lower = local_tracking_status.lower()
         track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
 
@@ -1651,7 +1971,7 @@ def main():
                     "Order": order_name,
                     "Current Status": status,
                     "Tracking Number": track_link_url,
-                    "Tracking Status": local_tracking_status,
+                    "Tracking Status": local_tracking_status_display,
                     "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
                     "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
                     "Received date": str(received_iso)[:10] if received_iso else "N/A",
