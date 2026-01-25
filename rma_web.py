@@ -400,7 +400,7 @@ def push_comment_update(rma_id, comment_text, store_url):
     headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
     payload = { "text": comment_text, "isPublic": False }
     try:
-        res = session.post(f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, json=payload, timeout=10)
+        res = session.post(f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, json=payload, timeout=10)
         if res.status_code in [200, 201]:
              fresh_res = session.get(f"https://api.returngo.ai/rma/{rma_id}", headers=headers, timeout=10)
              if fresh_res.status_code == 200:

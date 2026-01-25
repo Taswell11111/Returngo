@@ -800,7 +800,7 @@ def push_comment_update(rma_id, comment_text):
     payload = {"text": comment_text, "isPublic": False}
 
     try:
-        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, timeout=15, json_body=payload)
+        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/comment", headers=headers, timeout=15, json_body=payload)
         if res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
