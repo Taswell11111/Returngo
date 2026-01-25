@@ -867,7 +867,7 @@ def failure_flags(
                 approved_dt = approved_dt.replace(tzinfo=timezone.utc)
             if (_now_utc() - approved_dt) >= timedelta(hours=1):
                 has_shipment_failure = True
-        except Exception:
+        except ValueError:
             pass
 
     labels = []
