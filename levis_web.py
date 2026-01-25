@@ -13,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set
+from returngo_api import api_url, RMA_COMMENT_PATH
 
 # ==========================================
 # 1. CONFIGURATION
@@ -555,7 +556,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         updated_filter = f"&rma_updated_at=gte:{_iso_utc(since_dt)}"
 
     while True:
-        base_url = f"https://api.returngo.ai/rmas?pagesize=500&status={status_param}{updated_filter}"
+        base_url = f"{api_url('/rmas')}?pagesize=500&status={status_param}{updated_filter}"
         url = f"{base_url}&cursor={cursor}" if cursor else base_url
 
         res = rg_request("GET", url, timeout=20)
@@ -634,7 +635,7 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
     if (not force) and cached and not should_refresh_detail(rma_id):
         return cached[0]
 
-    url = f"https://api.returngo.ai/rma/{rma_id}"
+    url = api_url(f"/rma/{rma_id}")
     res = rg_request("GET", url, timeout=20)
     if res.status_code != 200:
         return cached[0] if cached else None
@@ -786,7 +787,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
     }
 
     try:
-        res = rg_request("PUT", f"https://api.returngo.ai/shipment/{shipment_id}", headers=headers, timeout=15, json_body=payload)
+        res = rg_request("PUT", api_url(f"/shipment/{shipment_id}"), headers=headers, timeout=15, json_body=payload)
         if res.status_code == 200:
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
@@ -800,7 +801,7 @@ def push_comment_update(rma_id, comment_text):
     payload = {"text": comment_text, "isPublic": False}
 
     try:
-        res = rg_request("POST", f"https://api.returngo.ai/rma/{rma_id}/note", headers=headers, timeout=15, json_body=payload)
+        res = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
         if res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
