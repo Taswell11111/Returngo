@@ -803,8 +803,9 @@ def push_comment_update(rma_id, comment_text):
     try:
         res = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
         if res.status_code in (200, 201):
-            fetch_rma_detail(rma_id, force=True)
-            return True, "Success"
+            if fetch_rma_detail(rma_id, force=True):
+                return True, "Success"
+            return False, "Comment posted, but failed to refresh RMA details."
         return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
         return False, str(e)
