@@ -1,4 +1,3 @@
-
 import streamlit as st
 import streamlit.components.v1 as components
 import sqlite3
@@ -249,7 +248,7 @@ def init_db():
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
 
-        # 1) Ensure rmas exists (base columns)
+        # RMAs cache
         c.execute("""
             CREATE TABLE IF NOT EXISTS rmas (
                 rma_id TEXT PRIMARY KEY,
@@ -258,24 +257,13 @@ def init_db():
                 created_at TEXT,
                 json_data TEXT,
                 last_fetched TEXT,
-                courier_status TEXT
+                courier_status TEXT,
+                courier_last_checked TEXT,
+                received_first_seen TEXT
             )
         """)
 
-        # 2) Migrate rmas: add missing columns (safe to run repeatedly)
-        existing_cols = {row[1] for row in c.execute("PRAGMA table_info(rmas)").fetchall()}
-
-        def add_col(col_name: str, col_type: str):
-            if col_name not in existing_cols:
-                try:
-                    c.execute(f"ALTER TABLE rmas ADD COLUMN {col_name} {col_type}")
-                except Exception:
-                    pass
-
-        add_col("courier_last_checked", "TEXT")
-        add_col("received_first_seen", "TEXT")
-
-        # 3) Ensure sync_logs exists with new schema
+        # Sync logs (new schema)
         c.execute("""
             CREATE TABLE IF NOT EXISTS sync_logs (
                 scope TEXT PRIMARY KEY,
@@ -283,30 +271,30 @@ def init_db():
             )
         """)
 
-        # 4) Migrate old sync_logs schema if it exists
-        sync_cols = {row[1] for row in c.execute("PRAGMA table_info(sync_logs)").fetchall()}
+        # MIGRATE old sync_logs schema if needed
+        cols = {row[1] for row in c.execute("PRAGMA table_info(sync_logs)").fetchall()}
+        has_old = ("status" in cols) or ("last_sync" in cols)
+        has_new = ("scope" in cols) and ("last_sync_iso" in cols)
 
-        # If it somehow exists in old format (status/last_sync), rebuild as new
-        if ("status" in sync_cols) or ("last_sync" in sync_cols):
+        if not has_new and has_old:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS sync_logs_new (
+                    scope TEXT PRIMARY KEY,
+                    last_sync_iso TEXT
+                )
+            """)
             try:
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS sync_logs_new (
-                        scope TEXT PRIMARY KEY,
-                        last_sync_iso TEXT
-                    )
-                """)
                 c.execute("""
                     INSERT OR REPLACE INTO sync_logs_new (scope, last_sync_iso)
                     SELECT status, last_sync FROM sync_logs
                 """)
-                c.execute("DROP TABLE sync_logs")
-                c.execute("ALTER TABLE sync_logs_new RENAME TO sync_logs")
             except Exception:
                 pass
+            c.execute("DROP TABLE sync_logs")
+            c.execute("ALTER TABLE sync_logs_new RENAME TO sync_logs")
 
         conn.commit()
         conn.close()
-
 
 
 def clear_db():
