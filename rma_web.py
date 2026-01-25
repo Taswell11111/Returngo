@@ -24,11 +24,6 @@ try:
 except (FileNotFoundError, KeyError):
     MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
 
-try:
-    PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
-except (FileNotFoundError, KeyError):
-    PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
-
 if not MY_API_KEY:
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
@@ -225,26 +220,12 @@ def check_courier_status(tracking_number, rma_id=None):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         }
-        if PARCEL_NINJA_TOKEN:
-            headers['Authorization'] = f'Bearer {PARCEL_NINJA_TOKEN}'
         res = requests.get(url, headers=headers, params={"WaybillNo": tracking_number}, timeout=10)
         final_status = "Unknown"
         
         if res.status_code == 200:
             content = res.text
-            # 1. Try JSON First
-            try:
-                data = res.json()
-                if 'history' in data and len(data['history']) > 0:
-                    final_status = data['history'][0].get('status') or data['history'][0].get('description')
-                else:
-                    final_status = data.get('status') or data.get('currentStatus')
-                if final_status:
-                     if rma_id: update_courier_status_in_db(rma_id, final_status)
-                     return final_status
-            except: pass 
-
-            # 2. Regex First Data Row Parsing
+            # Regex-first data row parsing
             clean_html = re.sub(r'<(script|style).*?</\1>', '', content, flags=re.DOTALL | re.IGNORECASE)
             history_section = re.search(r'<table[^>]*?tracking-history.*?>(.*?)</table>', clean_html, re.DOTALL | re.IGNORECASE)
             if not history_section:
