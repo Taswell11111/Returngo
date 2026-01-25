@@ -19,6 +19,7 @@ from returngo_api import api_url, RMA_COMMENT_PATH
 # 1. CONFIGURATION
 # ==========================================
 MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
+PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
@@ -432,14 +433,85 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number:
         return "Unknown"
+    def _event_status_text(event: dict) -> str:
+        if not isinstance(event, dict):
+            return ""
+        for key in (
+            "status",
+            "description",
+            "statusDescription",
+            "eventDescription",
+            "event",
+            "checkpointStatus",
+            "currentStatus",
+        ):
+            val = event.get(key)
+            if isinstance(val, dict):
+                val = val.get("description") or val.get("status") or val.get("text")
+            if val:
+                return str(val).strip()
+        return ""
+
+    def _event_timestamp(event: dict) -> str:
+        if not isinstance(event, dict):
+            return ""
+        for key in ("datetime", "date", "timestamp", "eventTime", "createdAt", "time"):
+            val = event.get(key)
+            if val:
+                return str(val).strip()
+        return ""
 
     try:
+        urls = []
         headers = {"User-Agent": "Mozilla/5.0"}
-        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
-        session = get_parcel_session()
-        res = session.get(url, headers=headers, timeout=10)
+        if PARCEL_NINJA_TOKEN:
+            headers["Authorization"] = f"Bearer {PARCEL_NINJA_TOKEN}"
+            urls.append(f"https://optimise.parcelninja.com/shipment/track/{tracking_number}")
+        urls.append(f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}")
 
-        if res.status_code == 200:
+        session = get_parcel_session()
+        res = None
+        for url in urls:
+            res = session.get(url, headers=headers, timeout=10)
+            if res.status_code != 404:
+                break
+
+        if res and res.status_code == 200:
+            try:
+                data = res.json()
+                payload = data.get("data") if isinstance(data, dict) and data.get("data") else data
+                if isinstance(payload, dict):
+                    history = (
+                        payload.get("history")
+                        or payload.get("events")
+                        or payload.get("trackingHistory")
+                        or payload.get("trackingEvents")
+                        or []
+                    )
+                    if isinstance(history, dict):
+                        history = history.get("events") or history.get("history") or []
+                    if isinstance(history, list) and history:
+                        for event in reversed(history):
+                            status = _event_status_text(event)
+                            if status:
+                                ts = _event_timestamp(event)
+                                return f"{ts} {status}".strip() if ts else status
+                    status = (
+                        payload.get("currentStatus")
+                        or payload.get("status")
+                        or payload.get("statusDescription")
+                        or payload.get("description")
+                    )
+                    if isinstance(status, dict):
+                        status = status.get("description") or status.get("status") or status.get("text")
+                    if status:
+                        return str(status).strip()
+                if isinstance(data, dict):
+                    status = data.get("currentStatus") or data.get("status") or data.get("description")
+                    if status:
+                        return str(status).strip()
+            except Exception:
+                pass
 
             clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
             row_match = re.search(
@@ -455,14 +527,14 @@ def check_courier_status(tracking_number: str) -> str:
             for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
                 if re.search(re.escape(kw), clean_html, re.IGNORECASE):
                     return kw
-            return "other"
+            return "Unknown"
 
         if res and res.status_code == 404:
             return "Tracking Not Found"
 
         if res:
             return f"Error {res.status_code}"
-        return "status code errror"
+        return "Unknown"
 
     except Exception:
         return "Check Failed"
@@ -726,7 +798,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
 
 def push_comment_update(rma_id, comment_text):
     headers = {**rg_headers(), "Content-Type": "application/json"}
-    payload = {"htmlText": comment_text}
+    payload = {"text": comment_text, "isPublic": False}
 
     try:
         res = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
@@ -1023,7 +1095,7 @@ def render_filter_tile(col, name: str, refresh_scope: str):
 
 
 def main():
-    global MY_API_KEY, df_view, counts
+    global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts
 
     st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
 
@@ -1050,6 +1122,11 @@ def main():
     if not MY_API_KEY:
         st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
         st.stop()
+
+    try:
+        PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
+    except Exception:
+        PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", PARCEL_NINJA_TOKEN)
 
     # ==========================================
     # 1b. STYLING + STICKY HEADER
