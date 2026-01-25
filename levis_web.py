@@ -1785,27 +1785,21 @@ def deduplicate_filtered_rmas(df: pd.DataFrame) -> pd.DataFrame:
 
     def get_last_fetched_ts(row: pd.Series) -> datetime:
         try:
-            full_data = row.get("full_data", {})
-            if not full_data:
-                return datetime.min.replace(tzinfo=timezone.utc)
-
-            rma_id = row.get("_rma_id_text")
-            if not rma_id:
-                return datetime.min.replace(tzinfo=timezone.utc)
-
-            cached = get_rma(rma_id)
-            if cached and len(cached) >= 2:
-                last_fetched_iso = cached[1]
+            # Prioritize the pre-fetched timestamp from the DataFrame
+            last_fetched_iso = row.get("_last_fetched_iso")
+            if last_fetched_iso:
                 try:
                     return datetime.fromisoformat(last_fetched_iso)
-                except Exception:
+                except (ValueError, TypeError):
                     pass
 
+            # Fallback to requested date if the primary timestamp is missing
             req_date = row.get("Requested date", "")
             if req_date and req_date != "N/A":
                 try:
-                    return datetime.fromisoformat(req_date[:10])
-                except Exception:
+                    # Parse only the date part and make it timezone-aware for safe comparison
+                    return datetime.fromisoformat(req_date[:10]).replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
                     pass
 
             return datetime.min.replace(tzinfo=timezone.utc)
