@@ -432,112 +432,55 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 # ==========================================
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number:
-        return "Unknown"
-    def _event_status_text(event: dict) -> str:
-        if not isinstance(event, dict):
-            return ""
-        for key in (
-            "status",
-            "description",
-            "statusDescription",
-            "eventDescription",
-            "event",
-            "checkpointStatus",
-            "currentStatus",
-        ):
-            val = event.get(key)
-            if isinstance(val, dict):
-                val = val.get("description") or val.get("status") or val.get("text")
-            if val:
-                return str(val).strip()
-        return ""
-
-    def _event_timestamp(event: dict) -> str:
-        if not isinstance(event, dict):
-            return ""
-        for key in ("datetime", "date", "timestamp", "eventTime", "createdAt", "time"):
-            val = event.get(key)
-            if val:
-                return str(val).strip()
-        return ""
+        return "No tracking number"
 
     try:
-        urls = []
-        headers = {"User-Agent": "Mozilla/5.0"}
-        if PARCEL_NINJA_TOKEN:
-            headers["Authorization"] = f"Bearer {PARCEL_NINJA_TOKEN}"
-            urls.append(f"https://optimise.parcelninja.com/shipment/track/{tracking_number}")
-        urls.append(f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}")
-
+        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
         session = get_parcel_session()
-        res = None
-        for url in urls:
-            res = session.get(url, headers=headers, timeout=10)
-            if res.status_code != 404:
-                break
+        res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
 
-        if res and res.status_code == 200:
-            try:
-                data = res.json()
-                payload = data.get("data") if isinstance(data, dict) and data.get("data") else data
-                if isinstance(payload, dict):
-                    history = (
-                        payload.get("history")
-                        or payload.get("events")
-                        or payload.get("trackingHistory")
-                        or payload.get("trackingEvents")
-                        or []
-                    )
-                    if isinstance(history, dict):
-                        history = history.get("events") or history.get("history") or []
-                    if isinstance(history, list) and history:
-                        for event in reversed(history):
-                            status = _event_status_text(event)
-                            if status:
-                                ts = _event_timestamp(event)
-                                return f"{ts} {status}".strip() if ts else status
-                    status = (
-                        payload.get("currentStatus")
-                        or payload.get("status")
-                        or payload.get("statusDescription")
-                        or payload.get("description")
-                    )
-                    if isinstance(status, dict):
-                        status = status.get("description") or status.get("status") or status.get("text")
-                    if status:
-                        return str(status).strip()
-                if isinstance(data, dict):
-                    status = data.get("currentStatus") or data.get("status") or data.get("description")
-                    if status:
-                        return str(status).strip()
-            except Exception:
-                pass
+        if res.status_code == 404:
+            return "Tracking not found (404)"
+        if res.status_code in (401, 403):
+            return "Tracking blocked/unauthorised (401/403)"
+        if res.status_code == 429:
+            return "Tracking rate limited (429)"
+        if 500 <= res.status_code <= 599:
+            return "Tracking service error (5xx)"
+        if res.status_code != 200:
+            return f"Tracking error ({res.status_code})"
 
-            clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
-            row_match = re.search(
-                r"<tr[^>]*>\s*<td[^>]*>\s*([^<]+?)\s*</td>\s*<td[^>]*>\s*([^<]+?)\s*</td>",
-                clean_html,
-                flags=re.IGNORECASE | re.DOTALL,
-            )
-            if row_match:
-                date_text = re.sub(r"\s+", " ", row_match.group(1)).strip()
-                status_text = re.sub(r"\s+", " ", row_match.group(2)).strip()
-                return f"{date_text} {status_text}".strip()
+        clean_html = re.sub(r"<(script|style).*?</\1>", "", res.text, flags=re.DOTALL | re.IGNORECASE)
+        rows = re.findall(r"<tr[^>]*>.*?</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
+        if not rows:
+            return "No tracking events found"
 
-            for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
-                if re.search(re.escape(kw), clean_html, re.IGNORECASE):
-                    return kw
-            return "Unknown"
+        first_row = rows[0]
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", first_row, flags=re.IGNORECASE | re.DOTALL)
+        if not cells:
+            return "No tracking events found"
 
-        if res and res.status_code == 404:
-            return "Tracking Not Found"
+        def clean_text(value: str) -> str:
+            text = re.sub(r"<[^>]+>", " ", value)
+            return re.sub(r"\s+", " ", text).strip()
 
-        if res:
-            return f"Error {res.status_code}"
-        return "Unknown"
+        status_text = ""
+        if len(cells) >= 2:
+            status_text = clean_text(cells[1])
+        else:
+            status_text = clean_text(cells[0])
+        if status_text:
+            return status_text
 
+        for kw in ["Courier Cancelled", "Booked Incorrectly", "Delivered", "Out For Delivery"]:
+            if re.search(re.escape(kw), clean_html, re.IGNORECASE):
+                return kw
+        return "No tracking events found"
+
+    except requests.Timeout:
+        return "Tracking check timed out"
     except Exception:
-        return "Check Failed"
+        return "Tracking check failed"
 
 
 # ==========================================
