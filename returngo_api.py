@@ -3,4 +3,5 @@ RMA_COMMENT_PATH = "/rma/{rma_id}/comment"
 
 
 def api_url(path: str) -> str:
-    return f"{BASE_URL}{path}"
+    normalized = path.lstrip("/")
+    return f"{BASE_URL}/{normalized}"

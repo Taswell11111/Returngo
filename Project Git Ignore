@@ -184,3 +184,4 @@ Local Project Data (Specific to your project)
 *.db
 levis_cache.db
 rma_cache.db
+scraping_results

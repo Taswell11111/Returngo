@@ -489,6 +489,7 @@ with col2:
     with update_col:
         if st.button("🔄 Update All", type="secondary"):
             st.cache_data.clear()
+            st.cache_resource.clear()
             st.session_state.pop("main_table", None)
             st.session_state['show_update_toast'] = True
             st.rerun()

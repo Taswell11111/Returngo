@@ -744,7 +744,7 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         "status": "LabelCreated",
         "carrierName": "CourierGuy",
         "trackingNumber": tracking_number,
-        "trackingURL": f"https://optimise.parcelninja.com/shipment/track/{tracking_number}",
+        "trackingURL": f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}",
         "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
     }
 
