@@ -1316,8 +1316,8 @@ def inject_command_center_css():
             --cc-success: #22c55e;
             --cc-warning: #f59e0b;
             --cc-danger: #ef4444;
-            --cc-surface: rgba(17, 24, 39, 0.6);
-            --cc-surface-hover: rgba(31, 41, 55, 0.8);
+            --cc-surface: rgba(15, 23, 42, 0.35);
+            --cc-surface-hover: rgba(31, 41, 55, 0.6);
             --cc-border-neutral: rgba(148, 163, 184, 0.15);
             --cc-border-active: #22c55e;
             --cc-glow: rgba(34, 197, 94, 0.4);
@@ -1399,7 +1399,7 @@ def inject_command_center_css():
             font-weight: 800;
             line-height: 1;
             color: var(--cc-text-primary);
-            margin: 0 0 4px 0;
+            margin: 0;
             font-variant-numeric: tabular-nums;
             letter-spacing: -0.02em;
             text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
@@ -1457,6 +1457,14 @@ def inject_command_center_css():
             box-sizing: border-box;
         }
 
+        .command-tile div[data-testid="stButton"] > button:focus,
+        .command-tile div[data-testid="stButton"] > button:focus-visible,
+        .command-tile div[data-testid="stButton"] > button:active {
+            outline: none;
+            border-color: var(--cc-border-active);
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+        }
+
         /* Hover state - green border preview */
         .command-tile div[data-testid="stButton"] > button:hover {
             background: rgba(34, 197, 94, 0.08);
@@ -1484,17 +1492,23 @@ def inject_command_center_css():
         .tile-header-row {
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
+            align-items: center;
+            gap: 12px;
             margin-bottom: 4px;
         }
 
         .tile-count-wrapper {
-            flex: 1;
+            flex: 0 0 50%;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
 
         .tile-refresh-btn {
-            flex-shrink: 0;
-            margin-left: 12px;
+            flex: 0 0 50%;
+            display: flex;
+            justify-content: flex-end;
         }
 
         .tile-refresh-btn div[data-testid="stButton"] {
@@ -1533,11 +1547,10 @@ def inject_command_center_css():
         .tile-time {
             display: flex;
             align-items: center;
-            gap: 4px;
-            font-size: 0.825rem;
+            gap: 6px;
+            font-size: 0.8rem;
             color: var(--cc-text-secondary);
-            margin-top: 8px;
-            justify-content: flex-end;
+            white-space: nowrap;
         }
 
         .tile-status-dot {
@@ -1570,8 +1583,13 @@ def inject_command_center_css():
                 flex-direction: column;
             }
 
+            .tile-count-wrapper,
             .tile-refresh-btn {
-                margin-left: 0;
+                flex: 0 0 100%;
+                width: 100%;
+            }
+
+            .tile-refresh-btn {
                 margin-top: 8px;
                 align-self: flex-end;
             }
@@ -1957,6 +1975,13 @@ def render_command_tile(
         st.markdown("<div class='tile-header-row'>", unsafe_allow_html=True)
         st.markdown("<div class='tile-count-wrapper'>", unsafe_allow_html=True)
         st.markdown(f"<div class='tile-count'>{count_val}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='tile-time'>"
+            f"<span class='tile-status-dot'></span>"
+            f"<span>Updated {time_ago_str}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("<div class='tile-refresh-btn'>", unsafe_allow_html=True)
@@ -1983,14 +2008,6 @@ def render_command_tile(
             toggle_filter(name)
 
         st.markdown("<div class='tile-divider'></div>", unsafe_allow_html=True)
-
-        st.markdown(
-            f"<div class='tile-time'>"
-            f"<span class='tile-status-dot'></span>"
-            f"<span>Updated {time_ago_str}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2426,29 +2443,6 @@ def main():
             box-shadow: 0 10px 22px rgba(0,0,0,0.25);
             z-index: 5;
           }
-          .sync-time-pill {
-            display: inline-flex;
-            align-items: baseline;
-            gap: 8px;
-            padding: 6px 12px;
-            border-radius: 999px;
-            background: rgba(15, 23, 42, 0.72);
-            border: 1px solid rgba(148,163,184,0.22);
-            color: rgba(226,232,240,0.95);
-            font-size: 0.78rem;
-            font-weight: 700;
-            margin-bottom: 8px;
-          }
-          .sync-time-pill .label {
-            color: rgba(148,163,184,0.9);
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-          }
-          .sync-time-pill .value {
-            color: #e2e8f0;
-            font-weight: 800;
-          }
           .data-table-actions {
             display: flex;
             justify-content: flex-end;
@@ -2778,7 +2772,7 @@ def main():
         is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
         actioned = is_resolution_actioned(rma, comment_texts_lower)
         actioned_label = resolution_actioned_label(rma)
-        is_ra = actioned
+        is_ra = (actioned_label != "No") and is_ad
         is_nra = (status == "Received") and (not actioned)
         is_tracking_updated = "Yes" if has_tracking_update_comment(comment_texts) else "No"
         has_refund_failure, has_upload_failed, has_shipment_failure, failures = failure_flags(
@@ -2917,13 +2911,19 @@ def main():
 
     # Row 2: Secondary statuses
     r2 = st.columns(5)
-    render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "URGENT ACTION", "🚩")
+    render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "FLAGGED", "🚩")
     render_command_tile(r2[1], "Courier Cancelled", "FILTER_CourierCancelled", "CANCELLED", "🛑")
     render_command_tile(
         r2[2], "Approved - Delivered", "FILTER_ApprovedDelivered", "APPROVED > DELIVERED", "📬"
     )
     render_command_tile(r2[3], "Resolution Actioned", "FILTER_ResolutionActioned", "RESOLVED", "💳")
-    render_command_tile(r2[4], "No Resolution Actioned", "FILTER_NoResolutionActioned", "PENDING REFUND", "⏸️")
+    render_command_tile(
+        r2[4],
+        "No Resolution Actioned",
+        "FILTER_NoResolutionActioned",
+        "PENDING RESOLUTION",
+        "⏸️",
+    )
 
     st.write("")
 
