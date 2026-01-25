@@ -1708,7 +1708,7 @@ FILTERS: Dict[str, Dict[str, object]] = {
         "icon": "🚫",
         "count_key": "NoTracking",
         "scope": "FILTER_NoTracking",
-        "fn": lambda d: d["is_nt"] == True,
+        "fn": lambda d: d["is_nt"],
     },
     "Flagged": {
         "icon": "🚩",
