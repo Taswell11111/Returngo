@@ -1225,8 +1225,10 @@ def toggle_filter(name: str):
     s: Set[str] = set(st.session_state.active_filters)  # type: ignore
     if name in s:
         s.remove(name)
+        logger.info("Filter deselected: %s", name)
     else:
         s.add(name)
+        logger.info("Filter selected: %s", name)
     st.session_state.active_filters = s  # type: ignore
     st.rerun()
 
@@ -1347,13 +1349,13 @@ def inject_command_center_css():
             overflow: hidden;
         }
 
-        /* Active tile gets subtle glow border */
+        /* Selected tiles keep neutral borders (highlight only on action button) */
         .command-tile.selected {
-            border-color: var(--cc-border-active);
+            border-color: var(--cc-border-neutral);
             box-shadow:
                 0 4px 6px -1px rgba(0, 0, 0, 0.1),
-                0 0 0 1px var(--cc-border-active),
-                0 0 20px -5px var(--cc-glow);
+                0 2px 4px -1px rgba(0, 0, 0, 0.06),
+                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
         }
 
         .command-tile:hover {
@@ -1385,7 +1387,7 @@ def inject_command_center_css():
         }
 
         .command-tile.urgent.selected {
-            animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+            animation: none;
         }
 
         /* ═══════════════════════════════════════════════════════════
@@ -1616,6 +1618,21 @@ def inject_command_center_css():
             margin-bottom: 12px;
         }
 
+        .api-action-bar.compact {
+            padding: 12px 14px;
+            margin: 12px 0 0 0;
+        }
+
+        .api-action-bar.compact .api-action-bar-title {
+            font-size: 0.6rem;
+            margin-bottom: 8px;
+        }
+
+        .api-action-bar.compact button[kind="primary"] {
+            padding: 8px 14px !important;
+            font-size: 0.75rem !important;
+        }
+
         .api-action-bar [data-baseweb="select"] {
             background: rgba(15, 23, 42, 0.8) !important;
             border: 1px solid var(--cc-border-neutral) !important;
@@ -1715,31 +1732,31 @@ FILTERS: Dict[str, Dict[str, object]] = {
         "icon": "🚩",
         "count_key": "Flagged",
         "scope": "FILTER_Flagged",
-        "fn": lambda d: d["is_fg"] == True,
+        "fn": lambda d: d["is_fg"],
     },
     "Courier Cancelled": {
         "icon": "🛑",
         "count_key": "CourierCancelled",
         "scope": "FILTER_CourierCancelled",
-        "fn": lambda d: d["is_cc"] == True,
+        "fn": lambda d: d["is_cc"],
     },
     "Approved - Delivered": {
         "icon": "📬",
         "count_key": "ApprovedDelivered",
         "scope": "FILTER_ApprovedDelivered",
-        "fn": lambda d: d["is_ad"] == True,
+        "fn": lambda d: d["is_ad"],
     },
     "Resolution Actioned": {
         "icon": "💳",
         "count_key": "ResolutionActioned",
         "scope": "FILTER_ResolutionActioned",
-        "fn": lambda d: d["is_ra"] == True,
+        "fn": lambda d: d["is_ra"],
     },
     "No Resolution Actioned": {
         "icon": "⏸️",
         "count_key": "NoResolutionActioned",
         "scope": "FILTER_NoResolutionActioned",
-        "fn": lambda d: d["is_nra"] == True,
+        "fn": lambda d: d["is_nra"],
     },
 }
 
@@ -1978,12 +1995,14 @@ def render_command_tile(
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_api_action_bar():
+def render_api_action_bar(*, compact: bool = False):
     """Render the centralized API operation control panel."""
-    st.markdown("<div class='api-action-bar'>", unsafe_allow_html=True)
+    wrapper_class = "api-action-bar compact" if compact else "api-action-bar"
+    st.markdown(f"<div class='{wrapper_class}'>", unsafe_allow_html=True)
     st.markdown("<div class='api-action-bar-title'>🔌 API Operations</div>", unsafe_allow_html=True)
 
-    col1, col2 = st.columns([3, 1])
+    column_ratio = [2, 1] if compact else [3, 1]
+    col1, col2 = st.columns(column_ratio)
 
     with col1:
         api_endpoint = st.selectbox(
@@ -2018,31 +2037,48 @@ def execute_api_operation(endpoint: str, context: str = ""):
     """Execute the selected API operation."""
     global df_view
 
+    logger.info("Executing API operation: %s (context: %s)", endpoint, context or "none")
+
     operation = API_OPERATIONS.get(endpoint)
     if not operation:
         st.error(f"Unknown operation: {endpoint}")
+        logger.error("Unknown API operation: %s", endpoint)
         return
 
     op_type = operation.get("type")
+    if not op_type:
+        st.error(f"Operation '{endpoint}' has no type defined in API_OPERATIONS")
+        logger.error("Operation '%s' missing type field", endpoint)
+        return
 
     if op_type == "status_sync":
-        statuses = operation["statuses"]
+        statuses = operation.get("statuses")
+        if not statuses:
+            st.error(f"Operation '{endpoint}' missing required 'statuses' field")
+            return
         perform_sync(statuses=statuses, full=False)
         return
 
     if op_type == "filter_sync":
-        statuses = operation["statuses"]
+        statuses = operation.get("statuses")
         filter_name = operation.get("filter_name")
+        scope = operation.get("scope")
 
-        with st.spinner(f"Syncing {filter_name}..."):
+        if not statuses:
+            st.error(f"Operation '{endpoint}' missing required 'statuses' field")
+            return
+
+        with st.spinner(f"Syncing {filter_name or 'filter'}..."):
             perform_sync(statuses=statuses, full=False, rerun=False)
 
-            if filter_name and filter_name in FILTERS:
+            if filter_name and filter_name in FILTERS and scope:
                 matching_ids = ids_for_filter(filter_name)
                 if matching_ids:
-                    force_refresh_rma_ids(matching_ids, operation["scope"])
+                    force_refresh_rma_ids(matching_ids, scope)
                 else:
                     st.info(f"No RMAs match {filter_name} filter.")
+            elif filter_name and filter_name in FILTERS and not scope:
+                st.error(f"Operation '{endpoint}' missing required 'scope' field")
         return
 
     if op_type == "rma_detail":
@@ -2088,7 +2124,8 @@ def execute_api_operation(endpoint: str, context: str = ""):
         )
         return
 
-    st.info(f"Operation '{endpoint}' not yet implemented.")
+    st.error(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'")
+    logger.error("Unknown operation type '%s' for endpoint '%s'", op_type, endpoint)
 
 
 def main():
@@ -2675,6 +2712,7 @@ def main():
             else:
                 st.warning("No database file to reset.")
         st.markdown("</div>", unsafe_allow_html=True)
+        render_api_action_bar(compact=True)
 
     st.write("")
 
@@ -2838,12 +2876,11 @@ def main():
             )
 
     st.divider()
-    render_api_action_bar()
-    st.divider()
 
-    if not df_view.empty and "Requested date" in df_view.columns:
+    if not df_view.empty and "Requested date" in df_view.columns and "Current Status" in df_view.columns:
         st.markdown("### 📅 Request Timeline")
 
+        # Filter to open statuses (defensive: df_view may include non-active if search/filters applied)
         timeline_df = df_view[df_view["Current Status"].isin(ACTIVE_STATUSES)].copy()
         timeline_df["_req_date_parsed"] = pd.to_datetime(
             timeline_df["Requested date"], errors="coerce"
@@ -2857,7 +2894,7 @@ def main():
                 .reset_index(name="Count")
             )
             date_counts.columns = ["Date", "Count"]
-            st.line_chart(date_counts.set_index("Date"), height=200)
+            st.line_chart(date_counts.set_index("Date"), height=300)
         else:
             st.info("No valid requested dates found for charting.")
 
