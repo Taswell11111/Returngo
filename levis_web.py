@@ -31,6 +31,7 @@ RG_RPS = 2
 SYNC_OVERLAP_MINUTES = 5
 
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
+PRIMARY_STATUS_TILES = {"Pending", "Approved", "Received", "No Tracking", "Flagged"}
 
 RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
@@ -115,7 +116,8 @@ def get_parcel_session() -> requests.Session:
 
 
 def rg_headers() -> dict:
-    return {"x-api-key": MY_API_KEY, "x-shop-name": STORE_URL}
+    # ReturnGO accepts the API key in either casing; include both for comment POST parity.
+    return {"x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
 
 
 def update_rate_limit_info(headers: dict):
@@ -430,6 +432,34 @@ def get_last_sync(scope: str) -> Optional[datetime]:
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number:
         return "Unknown"
+    def _event_status_text(event: dict) -> str:
+        if not isinstance(event, dict):
+            return ""
+        for key in (
+            "status",
+            "description",
+            "statusDescription",
+            "eventDescription",
+            "event",
+            "checkpointStatus",
+            "currentStatus",
+        ):
+            val = event.get(key)
+            if isinstance(val, dict):
+                val = val.get("description") or val.get("status") or val.get("text")
+            if val:
+                return str(val).strip()
+        return ""
+
+    def _event_timestamp(event: dict) -> str:
+        if not isinstance(event, dict):
+            return ""
+        for key in ("datetime", "date", "timestamp", "eventTime", "createdAt", "time"):
+            val = event.get(key)
+            if val:
+                return str(val).strip()
+        return ""
+
     try:
         url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -441,12 +471,37 @@ def check_courier_status(tracking_number: str) -> str:
         if res.status_code == 200:
             try:
                 data = res.json()
-                if isinstance(data, dict) and data.get("history"):
-                    s0 = data["history"][0]
-                    status = (s0.get("status") or s0.get("description") or "Unknown") or "Unknown"
-                    ts = (s0.get("datetime") or s0.get("date") or "").strip()
-                    return f"{ts} {status}".strip() if ts else status
-                return (data.get("status") or data.get("currentStatus") or "Unknown") or "Unknown"
+                payload = data.get("data") if isinstance(data, dict) and data.get("data") else data
+                if isinstance(payload, dict):
+                    history = (
+                        payload.get("history")
+                        or payload.get("events")
+                        or payload.get("trackingHistory")
+                        or payload.get("trackingEvents")
+                        or []
+                    )
+                    if isinstance(history, dict):
+                        history = history.get("events") or history.get("history") or []
+                    if isinstance(history, list) and history:
+                        for event in reversed(history):
+                            status = _event_status_text(event)
+                            if status:
+                                ts = _event_timestamp(event)
+                                return f"{ts} {status}".strip() if ts else status
+                    status = (
+                        payload.get("currentStatus")
+                        or payload.get("status")
+                        or payload.get("statusDescription")
+                        or payload.get("description")
+                    )
+                    if isinstance(status, dict):
+                        status = status.get("description") or status.get("status") or status.get("text")
+                    if status:
+                        return str(status).strip()
+                if isinstance(data, dict):
+                    status = data.get("currentStatus") or data.get("status") or data.get("description")
+                    if status:
+                        return str(status).strip()
             except Exception:
                 pass
 
@@ -878,6 +933,22 @@ def toggle_filter(name: str):
     st.rerun()
 
 
+def toggle_status_filter(name: str):
+    # Keep a single primary status selected at a time for highlight + filter.
+    s: Set[str] = st.session_state.active_filters  # type: ignore
+    current = st.session_state.get("selected_status")
+    if current == name:
+        s.discard(name)
+        st.session_state.selected_status = None
+    else:
+        for status in PRIMARY_STATUS_TILES:
+            s.discard(status)
+        s.add(name)
+        st.session_state.selected_status = name
+    st.session_state.active_filters = s  # type: ignore
+    st.rerun()
+
+
 def clear_all_filters():
     st.session_state.active_filters = set()  # type: ignore
     st.session_state.search_query_input = ""
@@ -885,6 +956,7 @@ def clear_all_filters():
     st.session_state.res_multi = []
     st.session_state.actioned_multi = []
     st.session_state.req_dates_selected = []
+    st.session_state.selected_status = None
 
 
 def update_data_table_log(rows: list):
@@ -995,10 +1067,9 @@ def render_filter_tile(col, name: str, refresh_scope: str):
     cfg = FILTERS[name]
     icon = cfg["icon"]  # type: ignore
     count_key = cfg["count_key"]  # type: ignore
-    scope = cfg["scope"]  # type: ignore
 
     active: Set[str] = st.session_state.active_filters  # type: ignore
-    selected = (name in active)
+    selected = (st.session_state.get("selected_status") == name) if name in PRIMARY_STATUS_TILES else (name in active)
 
     count_val = counts.get(count_key, 0)
 
@@ -1007,23 +1078,19 @@ def render_filter_tile(col, name: str, refresh_scope: str):
     with col:
         card_class = "card selected" if selected else "card"
         st.markdown(f"<div class='{card_class}'><div class='tile-inner'>", unsafe_allow_html=True)
-
-        ts = get_last_sync(str(scope))
-        ts_str = f"UPDATED: {ts.strftime('%H:%M')}" if ts else "UPDATED: -"
-        pill_html = f"""
-        <div class='updated-pill'>
-            <span class='pill-count'>{count_val}</span>
-            <span class='pill-time'>{ts_str}</span>
-        </div>
-        """
-        st.markdown(pill_html, unsafe_allow_html=True)
-
+        # Count pill inside the tile for quick scanning.
+        st.markdown(f"<div class='count-pill'>{count_val}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='status-button'>", unsafe_allow_html=True)
         if st.button(label, key=f"flt_{name}", use_container_width=True):
-            toggle_filter(name)
+            if name in PRIMARY_STATUS_TILES:
+                toggle_status_filter(name)
+            else:
+                toggle_filter(name)
         st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("<div class='refresh-link'>", unsafe_allow_html=True)
+        st.markdown("<div class='refresh-button'>", unsafe_allow_html=True)
         if st.button("Refresh", key=f"ref_{name}", use_container_width=False):
             force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+        st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown("</div></div>", unsafe_allow_html=True)
@@ -1119,81 +1186,58 @@ def main():
             background: rgba(17, 24, 39, 0.70);
             border: 1px solid rgba(148, 163, 184, 0.18);
             border-radius: 14px;
-            padding: 26px 12px 24px 12px;
+            padding: 20px 12px 4px 12px;
             box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            display: flex;
+            flex-direction: column;
           }
 
           .card.selected {
-            border: 1px solid rgba(34,197,94,0.55);
-            box-shadow: 0 10px 24px rgba(0,0,0,0.34);
-          }
-
-          .card::before {
-            content: "";
-            position: absolute;
-            left: 10px;
-            right: 10px;
-            top: 10px;
-            height: 10px;
-            border-radius: 999px;
-            background: rgba(148,163,184,0.10);
-            border: 1px solid rgba(148,163,184,0.12);
-          }
-
-          .card.selected::before {
-            background: rgba(34,197,94,0.7);
-            border-color: rgba(34,197,94,0.95);
-            box-shadow: 0 0 12px rgba(34,197,94,0.7);
+            background: rgba(34,197,94,0.22);
           }
 
           .tile-inner {
             position: relative;
+            flex: 1;
           }
 
-          /* Updated pill */
-          .updated-pill {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+          .count-pill {
             position: absolute;
-            left: 0;
-            right: 0;
-            top: 2px;
-            font-size: 0.80rem;
-            color: rgba(148,163,184,0.95);
-            padding: 4px 10px;
-            z-index: 2;
-          }
-          .pill-count {
-            font-weight: 800;
-            font-size: 0.9rem;
-            padding: 2px 8px;
+            top: 8px;
+            left: 10px;
+            width: 34px;
+            height: 34px;
             border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 0.95rem;
+            color: #ffffff;
             background: rgba(15, 23, 42, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.18);
+            border: 1px solid rgba(148, 163, 184, 0.25);
           }
-          .pill-time {
-            font-size: 0.75rem;
-          }
-          .card.selected .pill-count {
-            background: rgba(34,197,94,0.18);
-            border-color: rgba(34,197,94,0.95);
-            color: #bbf7d0;
-          }
-          .card.selected .pill-time {
-            color: #bbf7d0;
+
+          .status-button div.stButton > button {
+            width: 100% !important;
+            background: rgba(15, 23, 42, 0.82) !important;
+            border: 1px solid rgba(148, 163, 184, 0.25) !important;
+            color: #e5e7eb !important;
+            box-shadow: none !important;
+            border-radius: 10px !important;
+            padding: 8px 12px !important;
           }
 
           /* Refresh link under each tile */
-          .refresh-link {
-            position: absolute;
-            bottom: 4px;
-            left: 0;
-            right: 0;
+          .refresh-button {
+            margin-top: 0;
             display: flex;
             justify-content: center;
           }
-          .refresh-link div.stButton > button {
+          .refresh-button div.stButton {
+            margin: 0 !important;
+          }
+          .refresh-button div.stButton > button {
             width: auto !important;
             padding: 0 !important;
             border: none !important;
@@ -1201,12 +1245,13 @@ def main():
             box-shadow: none !important;
             font-size: 13px !important;
             font-style: italic !important;
-            color: #60a5fa !important;
+            color: #ffffff !important;
             text-decoration: underline !important;
             line-height: 1 !important;
+            margin: 0 !important;
           }
-          .refresh-link div.stButton > button:hover {
-            color: #93c5fd !important;
+          .refresh-button div.stButton > button:hover {
+            color: #e2e8f0 !important;
             transform: none !important;
           }
 
@@ -1250,6 +1295,7 @@ def main():
             border-color: rgba(148,163,184,0.25) !important;
             padding: 4px 8px !important;
             font-size: 12px !important;
+            width: 50% !important;
           }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
@@ -1355,6 +1401,8 @@ def main():
         st.session_state.actioned_multi = []
     if "req_dates_selected" not in st.session_state:
         st.session_state.req_dates_selected = []
+    if "selected_status" not in st.session_state:
+        st.session_state.selected_status = None
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1389,33 +1437,22 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     with h2:
-        api_col, sync_col = st.columns([1, 1.4], vertical_alignment="center")
-        with api_col:
-            api_main, api_sub = format_api_limit_display()
-            st.markdown(
-                f"""
-                <div>{api_main}</div>
-                <div>{api_sub}</div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with sync_col:
-            last_sync = st.session_state.get("last_sync_pressed")
-            last_sync_display = (
-                last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--"
-            )
-            st.markdown(
-                f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
-                st.session_state.last_sync_pressed = datetime.now()
-                perform_sync()
+        last_sync = st.session_state.get("last_sync_pressed")
+        last_sync_display = (
+            last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--"
+        )
+        st.markdown(
+            f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("🔄 Sync Dashboard", key="btn_sync_all", use_container_width=True):
+            st.session_state.last_sync_pressed = datetime.now()
+            perform_sync()
         st.markdown(
             "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
             unsafe_allow_html=True,
         )
-        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=True):
+        if st.button("🗑️ Reset Cache", key="btn_reset", use_container_width=False):
             if clear_db():
                 st.cache_data.clear()
                 st.success("Cache cleared!")
