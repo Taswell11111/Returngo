@@ -1183,17 +1183,17 @@ def main():
           /* Cards */
           .card {
             position: relative;
-            background: rgba(17, 24, 39, 0.70);
-            border: 1px solid rgba(148, 163, 184, 0.18);
+            background: transparent;
+            border: none;
             border-radius: 14px;
-            padding: 20px 12px 4px 12px;
-            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+            padding: 0;
+            box-shadow: none;
             display: flex;
             flex-direction: column;
           }
 
           .card.selected {
-            background: rgba(34,197,94,0.22);
+            background: transparent;
           }
 
           .tile-inner {
@@ -1203,7 +1203,7 @@ def main():
 
           .count-pill {
             position: absolute;
-            top: 8px;
+            top: -30px;
             left: 10px;
             width: 34px;
             height: 34px;
@@ -1212,25 +1212,34 @@ def main():
             align-items: center;
             justify-content: center;
             font-weight: 800;
-            font-size: 0.95rem;
+            font-size: 1.1rem;
             color: #ffffff;
             background: rgba(15, 23, 42, 0.72);
             border: 1px solid rgba(148, 163, 184, 0.25);
           }
 
           .status-button div.stButton > button {
-            width: 100% !important;
+            width: 70% !important;
             background: rgba(15, 23, 42, 0.82) !important;
             border: 1px solid rgba(148, 163, 184, 0.25) !important;
             color: #e5e7eb !important;
             box-shadow: none !important;
             border-radius: 10px !important;
             padding: 8px 12px !important;
+            text-transform: uppercase !important;
+            margin: 0 auto !important;
+            white-space: normal !important;
+          }
+
+          .card.selected .status-button div.stButton > button {
+            background: #39ff14 !important;
+            border-color: #39ff14 !important;
+            color: #0b0f14 !important;
           }
 
           /* Refresh link under each tile */
           .refresh-button {
-            margin-top: 0;
+            margin-top: -2px;
             display: flex;
             justify-content: center;
           }
@@ -1296,6 +1305,10 @@ def main():
             padding: 4px 8px !important;
             font-size: 12px !important;
             width: 50% !important;
+          }
+          .sync-dashboard-btn button {
+            min-height: calc(2rem + 2px) !important;
+            text-transform: uppercase !important;
           }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
@@ -1378,9 +1391,22 @@ def main():
             if (anchor.parentElement) anchor.parentElement.classList.add("sticky-top");
           }
 
+          function styleSyncDashboardButton() {
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach((button) => {
+              if (button.textContent && button.textContent.trim().includes('Sync Dashboard')) {
+                const wrapper = button.closest('[data-testid="stButton"]');
+                if (wrapper) wrapper.classList.add('sync-dashboard-btn');
+              }
+            });
+          }
+
           applySticky();
+          styleSyncDashboardButton();
           setTimeout(applySticky, 250);
           setTimeout(applySticky, 800);
+          setTimeout(styleSyncDashboardButton, 250);
+          setTimeout(styleSyncDashboardButton, 800);
         </script>
         """,
         height=0,
