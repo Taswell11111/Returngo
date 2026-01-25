@@ -17,6 +17,10 @@ from typing import Optional, Tuple, Dict, Callable, Set
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 # ==========================================
 # 1. CONFIGURATION
@@ -253,50 +257,76 @@ def upsert_rma(
     courier_status: Optional[str] = None,
     courier_checked_iso: Optional[str] = None,
 ):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        now_iso = _iso_utc(_now_utc())
+    max_retries = 3
+    for attempt in range(max_retries):
+        with DB_LOCK:
+            try:
+                conn = sqlite3.connect(DB_FILE, timeout=20)
+                conn.execute("PRAGMA busy_timeout = 20000")
+            except sqlite3.OperationalError as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                logger.error("Failed to connect to DB after %s attempts: %s", max_retries, exc)
+                raise
 
-        c.execute(
-            "SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=?",
-            (str(rma_id),),
-        )
-        row = c.fetchone()
-        existing_cstat = row[0] if row else None
-        existing_cchk = row[1] if row else None
-        existing_received = row[2] if row else None
+            c = conn.cursor()
+            now_iso = _iso_utc(_now_utc())
 
-        if courier_status is None:
-            courier_status = existing_cstat
-        if courier_checked_iso is None:
-            courier_checked_iso = existing_cchk
+            c.execute(
+                "SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=?",
+                (str(rma_id),),
+            )
+            row = c.fetchone()
+            existing_cstat = row[0] if row else None
+            existing_cchk = row[1] if row else None
+            existing_received = row[2] if row else None
 
-        received_seen = existing_received
-        if status == "Received" and not existing_received:
-            received_seen = now_iso
+            if courier_status is None:
+                courier_status = existing_cstat
+            if courier_checked_iso is None:
+                courier_checked_iso = existing_cchk
 
-        c.execute(
-            """
-            INSERT OR REPLACE INTO rmas
-            (rma_id, store_url, status, created_at, json_data, last_fetched,
-             courier_status, courier_last_checked, received_first_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(rma_id),
-                STORE_URL,
-                status,
-                created_at,
-                json.dumps(payload),
-                now_iso,
-                courier_status,
-                courier_checked_iso,
-                received_seen,
-            ),
-        )
-        conn.commit()
-        conn.close()
+            received_seen = existing_received
+            if status == "Received" and not existing_received:
+                received_seen = now_iso
+
+            c.execute(
+                """
+                INSERT OR REPLACE INTO rmas
+                (rma_id, store_url, status, created_at, json_data, last_fetched,
+                 courier_status, courier_last_checked, received_first_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(rma_id),
+                    STORE_URL,
+                    status,
+                    created_at,
+                    json.dumps(payload),
+                    now_iso,
+                    courier_status,
+                    courier_checked_iso,
+                    received_seen,
+                ),
+            )
+            try:
+                conn.commit()
+                conn.close()
+                break
+            except sqlite3.OperationalError as exc:
+                conn.close()
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "DB commit failed for RMA %s, retry %s/%s",
+                        rma_id,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                logger.error("Failed to commit RMA %s after %s attempts: %s", rma_id, max_retries, exc)
+                raise
 
 
 def delete_rmas(rma_ids):
@@ -327,7 +357,11 @@ def delete_rmas(rma_ids):
                     "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
                     [(i, STORE_URL) for i in normalized_ids],
                 )
+                if "cache_version" in st.session_state:
+                    st.session_state.cache_version += 1
+                logger.info("Deleted %s RMAs from cache", len(normalized_ids))
         except sqlite3.DatabaseError as e:
+            logger.error("Failed to delete RMAs: %s", e)
             st.error(f"Failed to delete RMAs: {e}")
             raise
 
@@ -387,8 +421,8 @@ def db_mtime() -> float:
         return 0.0
 
 
-@st.cache_data(show_spinner=False)
-def load_open_rmas(_db_mtime: float):
+@st.cache_data(show_spinner=False, ttl=60)
+def load_open_rmas(_db_mtime: float, _cache_buster: str):
     return get_all_open_from_db()
 
 
@@ -499,14 +533,17 @@ def _extract_json_array(html: str, start_pos: int) -> Optional[str]:
 
 def check_courier_status_web_scraping(tracking_number: str) -> str:
     if not tracking_number:
+        logger.debug("check_courier_status_web_scraping: No tracking number provided")
         return "No tracking number"
 
     try:
         url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        logger.debug("Fetching courier status for %s from %s", tracking_number, url)
         session = get_parcel_session()
         res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
 
         if res.status_code == 404:
+            logger.warning("Tracking not found for %s (404)", tracking_number)
             return "Tracking not found (404)"
         if res.status_code in (401, 403):
             return "Tracking blocked/unauthorised (401/403)"
@@ -612,6 +649,7 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
             cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
             cleaned_cells = [clean_text(c) for c in cells if clean_text(c)]
             if len(cleaned_cells) >= 2 and re.search(r"\d", cleaned_cells[0]):
+                logger.info("Found tracking status for %s: %s", tracking_number, cleaned_cells[0])
                 return "\t".join(cleaned_cells[:2])
 
         for row_html in rows:
@@ -620,6 +658,15 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
             if cleaned_cells:
                 return "\t".join(cleaned_cells[:2]) if len(cleaned_cells) >= 2 else cleaned_cells[0]
 
+        status_keywords = ["collected", "delivered", "transit", "delayed", "exception", "returned"]
+        date_pattern = re.compile(r"\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}")
+        for keyword in status_keywords:
+            match = re.search(rf"({keyword}[^<>]*?({date_pattern.pattern})?)", clean_html, re.IGNORECASE)
+            if match:
+                logger.info("Fallback status extraction for %s: %s", tracking_number, match.group(1))
+                return match.group(1).strip()
+
+        logger.warning("No tracking events found for %s in HTML response", tracking_number)
         return "No tracking events found"
 
     except requests.Timeout:
@@ -743,6 +790,19 @@ def should_refresh_detail(rma_id: str) -> bool:
     return (_now_utc() - last_dt) > timedelta(hours=CACHE_EXPIRY_HOURS)
 
 
+def should_refresh_courier(rma_payload: dict) -> bool:
+    cached_checked = rma_payload.get("_local_courier_checked")
+    if not cached_checked:
+        return True
+    try:
+        last_chk = datetime.fromisoformat(cached_checked)
+        if last_chk.tzinfo is None:
+            last_chk = last_chk.replace(tzinfo=timezone.utc)
+        return (_now_utc() - last_chk) > timedelta(hours=COURIER_REFRESH_HOURS)
+    except Exception:
+        return True
+
+
 def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[str]]:
     shipments = rma_payload.get("shipments", []) or []
     track_no = None
@@ -751,21 +811,16 @@ def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[st
             track_no = s.get("trackingNumber")
             break
     if not track_no:
-        return None, None
+        return "No tracking number", None
 
     cached_status = rma_payload.get("_local_courier_status")
     cached_checked = rma_payload.get("_local_courier_checked")
 
-    if cached_checked:
-        try:
-            last_chk = datetime.fromisoformat(cached_checked)
-            if last_chk.tzinfo is None:
-                last_chk = last_chk.replace(tzinfo=timezone.utc)
-            if (_now_utc() - last_chk) <= timedelta(hours=COURIER_REFRESH_HOURS):
-                return cached_status, cached_checked
-        except Exception:
-            pass
+    if not should_refresh_courier(rma_payload):
+        logger.debug("Using cached courier status for tracking %s: %s", track_no, cached_status)
+        return cached_status, cached_checked
 
+    logger.info("Refreshing courier status for tracking number: %s", track_no)
     status = check_courier_status(track_no)
     checked_iso = _iso_utc(_now_utc())
     return status, checked_iso
@@ -844,7 +899,19 @@ def perform_sync(statuses=None, *, full=False):
         for stt in ACTIVE_STATUSES:
             local_active_ids |= get_local_ids_for_status(stt)
         stale = local_active_ids - api_ids
+        logger.info("Removing %s stale RMAs no longer in active statuses", len(stale))
         delete_rmas(stale)
+    elif full:
+        with DB_LOCK:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT rma_id FROM rmas WHERE store_url=?", (STORE_URL,))
+            all_local_ids = {r[0] for r in c.fetchall()}
+            conn.close()
+        stale_full = all_local_ids - api_ids
+        if stale_full:
+            logger.info("Full sync: removing %s RMAs not in API response", len(stale_full))
+            delete_rmas(stale_full)
 
     # If incremental, force-refresh details for returned IDs (they changed)
     if since_dt is not None:
@@ -872,6 +939,7 @@ def perform_sync(statuses=None, *, full=False):
     for s in statuses:
         set_last_sync(s, now)
 
+    st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
     st.session_state["show_toast"] = True
     status_msg.success("✅ Sync Complete!")
     try:
@@ -905,6 +973,7 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
     bar.empty()
 
     set_last_sync(scope_label, _now_utc())
+    st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
     st.session_state["show_toast"] = True
     msg.success("✅ Refresh Complete!")
     try:
@@ -1121,8 +1190,14 @@ def format_api_limit_display() -> Tuple[str, str]:
 
 
 def format_tracking_status_with_icon(status: str) -> str:
-    if not status or status == "Unknown":
+    if not status:
         return "❓ Unknown"
+
+    if status == "Unknown":
+        return "❓ Unknown"
+
+    if status == "No tracking number":
+        return "🚫 No tracking number"
 
     status_lower = status.lower()
     if "return" in status_lower and "sender" in status_lower:
@@ -1452,8 +1527,9 @@ def main():
           }
 
           .card.selected .count-banner {
-            background: #22c55e;
-            border-color: #22c55e;
+            background: rgba(34, 197, 94, 0.18);
+            border-color: rgba(34, 197, 94, 0.4);
+            color: #22c55e;
           }
 
           .status-button {
@@ -1475,6 +1551,23 @@ def main():
             text-transform: uppercase !important;
             margin: 0 !important;
             white-space: normal !important;
+            transition: all 0.2s ease !important;
+          }
+
+          .card.selected .status-button div.stButton > button {
+            border: 2.5px solid #22c55e !important;
+            border-color: #22c55e !important;
+            background: rgba(34, 197, 94, 0.12) !important;
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15) !important;
+          }
+
+          .status-button div.stButton > button:hover {
+            border-color: rgba(148, 163, 184, 0.45) !important;
+            transform: translateY(-1px);
+          }
+
+          .card.selected .status-button div.stButton > button:hover {
+            border-color: #22c55e !important;
           }
 
           /* Refresh row under each tile */
@@ -1696,27 +1789,7 @@ def main():
           }
 
           .card.selected {
-            outline: 2px solid rgba(34, 197, 94, 0.6);
-            outline-offset: 2px;
-          }
-
-          .card.selected::before {
-            content: "✓";
-            position: absolute;
-            top: -8px;
-            right: -8px;
-            width: 24px;
-            height: 24px;
-            background: #22c55e;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            font-weight: 900;
-            color: white;
-            box-shadow: 0 4px 12px rgba(34, 197, 94, 0.5);
-            z-index: 10;
+            background: transparent;
           }
 
           [data-testid="stDataFrame"] tbody tr:nth-child(even) {
@@ -1808,6 +1881,8 @@ def main():
         st.session_state.failure_upload = False
     if "failure_shipment" not in st.session_state:
         st.session_state.failure_shipment = False
+    if "cache_version" not in st.session_state:
+        st.session_state.cache_version = 0
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -1846,6 +1921,17 @@ def main():
         last_sync_display = (
             last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--"
         )
+        with RATE_LIMIT_LOCK:
+            remaining = RATE_LIMIT_INFO.get("remaining")
+            limit = RATE_LIMIT_INFO.get("limit")
+        if remaining is not None and limit is not None:
+            try:
+                remain_int = int(remaining)
+                limit_int = int(limit)
+                if remain_int < limit_int * 0.2:
+                    st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
+            except (ValueError, TypeError):
+                pass
         st.markdown(
             f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
             unsafe_allow_html=True,
@@ -1871,7 +1957,7 @@ def main():
     # ==========================================
     # 11. LOAD + PROCESS OPEN RMAs
     # ==========================================
-    raw_data = load_open_rmas(db_mtime())
+    raw_data = load_open_rmas(db_mtime(), str(st.session_state.cache_version))
     processed_rows = []
 
     counts = {
@@ -1896,6 +1982,7 @@ def main():
     search_active = bool(search_query_lower)
     today = datetime.now().date()
 
+    rmas_needing_courier_refresh = []
     for rma in raw_data:
         summary = rma.get("rmaSummary", {}) or {}
         shipments = rma.get("shipments", []) or []
@@ -1937,6 +2024,9 @@ def main():
             approved_iso=str(approved_iso) if approved_iso else "",
             has_tracking=bool(track_nums),
         )
+
+        if track_nums and should_refresh_courier(rma):
+            rmas_needing_courier_refresh.append((rma_id, rma, requested_iso, status))
 
         if status in ("Pending", "Approved", "Received"):
             counts[status] += 1
@@ -1998,6 +2088,30 @@ def main():
 
     df_view = pd.DataFrame(processed_rows)
     update_data_table_log(processed_rows)
+
+    if rmas_needing_courier_refresh:
+        def refresh_courier_batch():
+            for rma_id, rma_payload, requested_iso, status in rmas_needing_courier_refresh:
+                try:
+                    courier_status, courier_checked = maybe_refresh_courier(rma_payload)
+                    if courier_status:
+                        upsert_rma(
+                            rma_id=str(rma_id),
+                            status=status,
+                            created_at=requested_iso or "",
+                            payload=rma_payload,
+                            courier_status=courier_status,
+                            courier_checked_iso=courier_checked,
+                        )
+                except Exception as exc:
+                    logger.warning("Background courier refresh failed for %s: %s", rma_id, exc)
+
+        refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
+        refresh_thread.start()
+        if len(rmas_needing_courier_refresh) > 5:
+            st.info(
+                f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
+            )
 
     # Row 1
     r1 = st.columns(5)
