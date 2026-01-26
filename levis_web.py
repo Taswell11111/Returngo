@@ -55,8 +55,7 @@ COURIER_STATUS_OPTIONS = [
     "In Transit",
     "Delivered",
     "Courier Cancelled",
-    "Tracking Not Found",
-    "Unknown",
+    "No tracking number",
     ]
 
 RATE_LIMIT_HIT = threading.Event()
@@ -911,13 +910,16 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     status_msg.info(f"⏳ Syncing {total} records...")
 
     if total > 0:
+        successful_fetches = 0
+        failed_fetches = 0
         bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             futures = [ex.submit(fetch_rma_detail, rid, force=force) for rid in to_fetch]
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 done = i + 1
                 bar.progress(done / total, text=f"Syncing: {done}/{total}")
-                result = future.result() # Get the result (or exception)
+                # Get the result (or exception)
+                result = future.result()
                 if result is not None: successful_fetches += 1
                 else: failed_fetches += 1
         bar.empty()
@@ -3221,7 +3223,7 @@ def main():
         st.toast("Copied table to clipboard.", icon="📋")
 
     def highlight_missing_tracking(row: pd.Series):
-        if row.get("Current Status") == "Approved" and not row.get("Tracking Number"):
+        if row.get("Current Status") == "Approved" and not row.get("DisplayTrack"):
             return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(display_cols)
         return [""] * len(display_cols)
 
