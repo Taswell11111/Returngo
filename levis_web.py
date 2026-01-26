@@ -27,7 +27,6 @@ if not logging.getLogger().hasHandlers():
 # 1. CONFIGURATION
 # ==========================================
 MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
-PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", "")
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
@@ -692,41 +691,6 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number:
         return "No tracking number"
-
-    if PARCEL_NINJA_TOKEN:
-        try:
-            url = f"https://api.parcelninja.com/v1/tracking/{tracking_number}"
-            session = get_parcel_session()
-            headers = {
-                "Authorization": f"Bearer {PARCEL_NINJA_TOKEN}",
-                "Content-Type": "application/json",
-                "User-Agent": "LevisReturnGO/1.0",
-            }
-            res = session.get(url, headers=headers, timeout=10)
-
-            if res.status_code == 200:
-                data = res.json()
-                events = data.get("events") or data.get("checkpoints") or []
-                if events:
-                    latest = events[-1]
-                    status = latest.get("status") or latest.get("description") or "Unknown"
-                    date = latest.get("date") or latest.get("timestamp") or ""
-                    if date:
-                        try:
-                            dt = datetime.fromisoformat(date.replace("Z", "+00:00"))
-                            date = dt.strftime("%Y-%m-%d %H:%M")
-                        except ValueError:
-                            pass
-                    return f"{status}\t{date}" if date else status
-                return "No tracking events found"
-            if res.status_code == 401:
-                logger.warning("ParcelNinja API token invalid, falling back to web scraping")
-            elif res.status_code == 404:
-                return "Tracking not found (404)"
-            else:
-                logger.error("ParcelNinja API error %s, falling back", res.status_code)
-        except Exception as exc:
-            logger.error("ParcelNinja API failed: %s, falling back to web scraping", exc)
 
     return check_courier_status_web_scraping(tracking_number)
 
