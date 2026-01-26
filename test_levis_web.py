@@ -911,13 +911,16 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     status_msg.info(f"⏳ Syncing {total} records...")
 
     if total > 0:
+        successful_fetches = 0
+        failed_fetches = 0
         bar = st.progress(0, text="Downloading Details...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             futures = [ex.submit(fetch_rma_detail, rid, force=force) for rid in to_fetch]
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 done = i + 1
                 bar.progress(done / total, text=f"Syncing: {done}/{total}")
-                result = future.result() # Get the result (or exception)
+                # Get the result (or exception)
+                result = future.result()
                 if result is not None: successful_fetches += 1
                 else: failed_fetches += 1
         bar.empty()
