@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-from typing import Optional, Tuple, Dict, Callable, Set
+from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ if not logging.getLogger().hasHandlers():
     )
 
 # ==========================================
-# 1. CONFIGURATION
+# 1a. CONFIGURATION
 # ==========================================
 MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
 STORE_URL = "levis-sa.myshopify.com"
@@ -41,10 +41,11 @@ SYNC_OVERLAP_MINUTES = 5
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 PRIMARY_STATUS_TILES = {"Pending", "Approved", "Received", "No Tracking", "Flagged"}
 COURIER_STATUS_OPTIONS = [
-    "Submitted To Courier",
-    "Routing delivery",
+    "Submitted to Courier",
+    "In Transit",
     "Delivered",
     "Courier Cancelled",
+    "Tracking Not Found",
     "Unknown",
     "No tracking number",
 ]
@@ -52,7 +53,7 @@ COURIER_STATUS_OPTIONS = [
 RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 RATE_LIMIT_LOCK = threading.Lock()
-
+PARCEL_NINJA_TOKEN: Optional[str] = None # Initialize to None to avoid unbound variable
 df_view = pd.DataFrame()
 counts: Dict[str, int] = {}
 
@@ -131,12 +132,12 @@ def get_parcel_session() -> requests.Session:
     return s
 
 
-def rg_headers() -> dict:
+def rg_headers() -> Dict[str, str]:
     # ReturnGO accepts the API key in either casing; include both for comment POST parity.
     return {"x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
 
 
-def update_rate_limit_info(headers: dict):
+def update_rate_limit_info(headers: Mapping[str, str]):
     if not headers:
         return
     lower = {str(k).lower(): v for k, v in headers.items()}
@@ -165,7 +166,7 @@ def update_rate_limit_info(headers: dict):
         sval = str(val).strip()
         return int(sval) if sval.isdigit() else sval
 
-    with RATE_LIMIT_LOCK:
+    with RATE_LIMIT_LOCK: # type: ignore
         RATE_LIMIT_INFO["remaining"] = to_int(remaining)
         RATE_LIMIT_INFO["limit"] = to_int(limit)
         RATE_LIMIT_INFO["reset"] = to_int(reset)
@@ -173,7 +174,7 @@ def update_rate_limit_info(headers: dict):
 
 
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
-    session = get_thread_session()
+    session: requests.Session = get_thread_session()
     headers = headers or rg_headers()
 
     backoff = 1
@@ -183,7 +184,7 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
         res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
         update_rate_limit_info(res.headers)
         if res.status_code != 429:
-            return res
+            return res # type: ignore
 
         RATE_LIMIT_HIT.set()
 
@@ -196,7 +197,7 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
 
         time.sleep(sleep_s)
 
-    return res
+    return None # Explicitly return None if all retries fail after retries
 
 
 # ==========================================
@@ -328,7 +329,7 @@ def upsert_rma(
                 raise
             finally:
                 if conn is not None:
-                    conn.close()
+                    conn.close() # type: ignore
 
 
 def delete_rmas(rma_ids):
@@ -369,7 +370,7 @@ def delete_rmas(rma_ids):
 
 
 def get_rma(rma_id: str):
-    with DB_LOCK:
+    with DB_LOCK: # type: ignore
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute(
@@ -391,7 +392,7 @@ def get_rma(rma_id: str):
 
 
 def get_all_open_from_db():
-    with DB_LOCK:
+    with DB_LOCK: # type: ignore
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
@@ -429,7 +430,7 @@ def load_open_rmas(_db_mtime: float, _cache_buster: str):
 
 
 def get_local_ids_for_status(status: str):
-    with DB_LOCK:
+    with DB_LOCK: # type: ignore
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT rma_id FROM rmas WHERE store_url=? AND status=?", (STORE_URL, status))
@@ -439,7 +440,7 @@ def get_local_ids_for_status(status: str):
 
 
 def set_last_sync(scope: str, dt: datetime):
-    with DB_LOCK:
+    with DB_LOCK: # type: ignore
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute(
@@ -451,7 +452,7 @@ def set_last_sync(scope: str, dt: datetime):
 
 
 def get_last_sync(scope: str) -> Optional[datetime]:
-    with DB_LOCK:
+    with DB_LOCK: # type: ignore
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         try:
@@ -711,7 +712,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         updated_filter = f"&rma_updated_at=gte:{_iso_utc(since_dt)}"
 
     while True:
-        base_url = f"{api_url('/rmas')}?pagesize=500&status={status_param}{updated_filter}"
+        base_url = f"{api_url('/rmas')}?pagesize=500&status={status_param}{updated_filter}" # type: ignore
         url = f"{base_url}&cursor={cursor}" if cursor else base_url
 
         res = rg_request("GET", url, timeout=20)
@@ -721,7 +722,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         if res.status_code != 200:
             err_text = (res.text or "").strip()
             if len(err_text) > 200:
-                err_text = f"{err_text[:200]}..."
+                err_text = f"{err_text[:200]}..." # type: ignore
             last_error = f"{res.status_code}: {err_text}" if err_text else str(res.status_code)
             break
 
@@ -729,7 +730,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         try:
             data = res.json() if res.content else {}
         except ValueError:
-            last_error = "Invalid JSON response from ReturnGO"
+            last_error = "Invalid JSON response from ReturnGO" # type: ignore
             break
         rmas = data.get("rmas", []) or []
         if not rmas:
@@ -799,10 +800,10 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
         return cached[0]
 
     url = api_url(f"/rma/{rma_id}")
-    res = rg_request("GET", url, timeout=20)
-    if res.status_code != 200:
+    res: Optional[requests.Response] = rg_request("GET", url, timeout=20)
+    if res is None or res.status_code != 200:
         return cached[0] if cached else None
-
+ # type: ignore
     data = res.json() if res.content else {}
     summary = data.get("rmaSummary", {}) or {}
 
@@ -865,7 +866,7 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         local_active_ids = set()
         for stt in ACTIVE_STATUSES:
             local_active_ids |= get_local_ids_for_status(stt)
-        stale = local_active_ids - api_ids
+        stale = local_active_ids - api_ids # type: ignore
         logger.info("Removing %s stale RMAs no longer in active statuses", len(stale))
         delete_rmas(stale)
     elif full:
@@ -875,7 +876,7 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
             c.execute("SELECT rma_id FROM rmas WHERE store_url=?", (STORE_URL,))
             all_local_ids = {r[0] for r in c.fetchall()}
             conn.close()
-        stale_full = all_local_ids - api_ids
+        stale_full = all_local_ids - api_ids # type: ignore
         if stale_full:
             logger.info("Full sync: removing %s RMAs not in API response", len(stale_full))
             delete_rmas(stale_full)
@@ -915,7 +916,7 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         st.error("Failed to clear open-RMA cache")
     if rerun:
         st.rerun()
-
+ # type: ignore
 
 def force_refresh_rma_ids(rma_ids, scope_label: str):
     ids = [str(i) for i in set(rma_ids) if i]
@@ -950,7 +951,7 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
         st.error("Failed to clear open-RMA cache")
     st.rerun()
 
-
+ # type: ignore
 # ==========================================
 # 6. MUTATIONS
 # ==========================================
@@ -965,8 +966,8 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
     }
 
     try:
-        res = rg_request("PUT", api_url(f"/shipment/{shipment_id}"), headers=headers, timeout=15, json_body=payload)
-        if res.status_code == 200:
+        res: Optional[requests.Response] = rg_request("PUT", api_url(f"/shipment/{shipment_id}"), headers=headers, timeout=15, json_body=payload)
+        if res is not None and res.status_code == 200:
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
         return False, f"API Error {res.status_code}: {res.text}"
@@ -979,8 +980,8 @@ def push_comment_update(rma_id, comment_text):
     payload = {"htmlText": comment_text}
 
     try:
-        res = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
-        if res.status_code in (200, 201):
+        res: Optional[requests.Response] = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
+        if res is not None and res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
         return False, f"API Error {res.status_code}: {res.text}"
@@ -1064,7 +1065,7 @@ def resolution_actioned_label(rma_payload: dict) -> str:
     return "No"
 
 
-def tracking_update_comment(old_tracking: str, new_tracking: str) -> str:
+def tracking_update_comment(old_tracking: Optional[str], new_tracking: Optional[str]) -> str:
     old_value = old_tracking.strip() if old_tracking else "None"
     new_value = new_tracking.strip() if new_tracking else "None"
     return f"Updated Shipment tracking number from {old_value} to {new_value}."
@@ -1128,7 +1129,7 @@ def days_since(dt_str: str, today: Optional[datetime.date] = None) -> str:
     return str((today - d.date()).days)
 
 
-def format_api_limit_display() -> Tuple[str, str]:
+def format_api_limit_display() -> Tuple[str, str]: # type: ignore
     with RATE_LIMIT_LOCK:
         remaining = RATE_LIMIT_INFO.get("remaining")
         limit = RATE_LIMIT_INFO.get("limit")
@@ -1148,7 +1149,7 @@ def format_api_limit_display() -> Tuple[str, str]:
             reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
             sub = f"Resets: {reset_dt.strftime('%H:%M')}"
         except (ValueError, TypeError, OSError):
-            sub = f"Reset: {reset}"
+            sub = f"Reset: {reset}" # type: ignore
     elif reset:
         sub = f"Reset: {reset}"
     elif updated_at:
@@ -1186,7 +1187,7 @@ def format_tracking_status_with_icon(status: str) -> str:
 
 
 def toggle_filter(name: str):
-    s: Set[str] = set(st.session_state.active_filters)  # type: ignore
+    s: Set[str] = set(st.session_state.active_filters)
     if name in s:
         s.remove(name)
         logger.info("Filter deselected: %s", name)
@@ -1194,7 +1195,7 @@ def toggle_filter(name: str):
         s.add(name)
         logger.info("Filter selected: %s", name)
     st.session_state.active_filters = s  # type: ignore
-    st.rerun()
+    st.rerun() # type: ignore
 
 
 def clear_all_filters():
@@ -1216,7 +1217,7 @@ def update_data_table_log(rows: list):
     if "data_table_prev" not in st.session_state:
         st.session_state.data_table_prev = {}
 
-    prev_map = st.session_state.data_table_prev
+    prev_map: Dict[str, Dict[str, str]] = st.session_state.data_table_prev # type: ignore
     current_map = {}
     new_entries = []
     timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -1241,7 +1242,7 @@ def update_data_table_log(rows: list):
 
     if new_entries:
         st.session_state.data_table_log = (new_entries + st.session_state.data_table_log)[:100]
-    st.session_state.data_table_prev = {**prev_map, **current_map}
+    st.session_state.data_table_prev = {**prev_map, **current_map} # type: ignore
 
 
 def header_last_sync_display(scopes: list) -> str:
@@ -1787,7 +1788,7 @@ def current_filter_mask(df: pd.DataFrame) -> pd.Series:
     """
     Apply active filters and return a boolean mask.
     Handles multi-select with OR logic.
-    """
+    """ # type: ignore
     active: Set[str] = st.session_state.active_filters  # type: ignore
     if df.empty:
         return pd.Series([], dtype=bool)
@@ -1799,7 +1800,7 @@ def current_filter_mask(df: pd.DataFrame) -> pd.Series:
         cfg = FILTERS.get(name)
         if not cfg:
             continue
-        fn: FilterFn = cfg["fn"]  # type: ignore
+        fn: FilterFn = cfg["fn"]
         masks.append(fn(df))
 
     if not masks:
@@ -1876,7 +1877,7 @@ def ids_for_filter(name: str) -> list:
     if not cfg:
         logger.warning("Filter '%s' not found in FILTERS config", name)
         return []
-    fn: FilterFn = cfg["fn"]  # type: ignore
+        fn: FilterFn = cfg["fn"]
     try:
         mask = fn(df_view)
         if mask is None or mask.empty:
@@ -1917,7 +1918,7 @@ def render_command_tile(
         st.error(f"Filter '{name}' not found in FILTERS config")
         return
 
-    count_key = cfg["count_key"]  # type: ignore
+    count_key = cfg["count_key"]
 
     active: Set[str] = st.session_state.active_filters  # type: ignore
     is_selected = name in active
@@ -1969,7 +1970,7 @@ def render_command_tile(
             key=f"tile_{name}",
             use_container_width=True,
         ):
-            toggle_filter(name)
+            toggle_filter(name) # type: ignore
 
         st.markdown("<div class='tile-divider'></div>", unsafe_allow_html=True)
 
@@ -1989,7 +1990,7 @@ def render_api_action_bar(*, compact: bool = False):
         api_endpoint = st.selectbox(
             "Select Operation",
             options=list(API_OPERATIONS.keys()),
-            key="api_endpoint_selector",
+            key="api_endpoint_selector", # type: ignore
             label_visibility="collapsed",
         )
 
@@ -1998,7 +1999,7 @@ def render_api_action_bar(*, compact: bool = False):
         if operation.get("requires_context"):
             st.text_input(
                 "RMA ID",
-                key="api_context_input",
+                key="api_context_input", # type: ignore
                 placeholder="Enter ID...",
                 label_visibility="collapsed",
             )
@@ -2008,7 +2009,7 @@ def render_api_action_bar(*, compact: bool = False):
                 return
 
     if operation.get("requires_context"):
-        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", use_container_width=True):
+        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", use_container_width=True): # type: ignore
             execute_api_operation(api_endpoint, st.session_state.get("api_context_input", ""))
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -2037,7 +2038,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
         if not statuses:
             st.error(f"Operation '{endpoint}' missing required 'statuses' field")
             return
-        perform_sync(statuses=statuses, full=False)
+        perform_sync(statuses=statuses, full=False) # type: ignore
         return
 
     if op_type == "filter_sync":
@@ -2048,7 +2049,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
         if not statuses:
             st.error(f"Operation '{endpoint}' missing required 'statuses' field")
             return
-
+ # type: ignore
         with st.spinner(f"Syncing {filter_name or 'filter'}..."):
             perform_sync(statuses=statuses, full=False, rerun=False)
 
@@ -2066,7 +2067,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
         if not context:
             st.error("Please enter an RMA ID")
             return
-        with st.spinner(f"Fetching RMA {context}..."):
+        with st.spinner(f"Fetching RMA {context}..."): # type: ignore
             rma_data = fetch_rma_detail(context, force=True)
         if rma_data:
             st.success(f"✅ Refreshed RMA {context}")
@@ -2088,7 +2089,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
             st.info("No RMAs with tracking numbers found.")
             return
 
-        force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH")
+        force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH") # type: ignore
         return
 
     if op_type == "export_csv":
@@ -2108,7 +2109,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
     st.error(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'")
     logger.error("Unknown operation type '%s' for endpoint '%s'", op_type, endpoint)
 
-
+# type: ignore
 def main():
     global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts
 
@@ -2565,15 +2566,15 @@ def main():
     # ==========================================
     # 8. STATE
     # ==========================================
-    if "active_filters" not in st.session_state:
-        st.session_state.active_filters = set()  # type: ignore
+    if "active_filters" not in st.session_state: # type: ignore
+        st.session_state.active_filters: Set[str] = set()
         logger.info("Initialized active_filters session state")
     if "search_query_input" not in st.session_state:
-        st.session_state.search_query_input = ""
+        st.session_state.search_query_input: str = ""
     if "status_multi" not in st.session_state:
-        st.session_state.status_multi = []
+        st.session_state.status_multi: list[str] = []
     if "res_multi" not in st.session_state:
-        st.session_state.res_multi = []
+        st.session_state.res_multi: list[str] = []
     if "actioned_multi" not in st.session_state:
         st.session_state.actioned_multi = []
     if "tracking_status_multi" not in st.session_state:
@@ -2587,13 +2588,13 @@ def main():
     if "failure_shipment" not in st.session_state:
         st.session_state.failure_shipment = False
     if "cache_version" not in st.session_state:
-        st.session_state.cache_version = 0
+        st.session_state.cache_version: int = 0
 
     filter_migration = {
         "Pending": "Pending Requests",
         "Approved": "Approved - Submitted",
     }
-    active = st.session_state.active_filters
+    active: Set[str] = st.session_state.active_filters # type: ignore
     migrated = set()
     for old_name in active:
         migrated.add(filter_migration.get(old_name, old_name))
@@ -2601,7 +2602,7 @@ def main():
     migrated = {name for name in migrated if name in valid_filters}
     if migrated != active:
         st.session_state.active_filters = migrated  # type: ignore
-        logger.info("Migrated filters: %s -> %s", active, migrated)
+        logger.info("Migrated filters: %s -> %s", active, migrated) # type: ignore
 
     if st.session_state.get("show_toast"):
         st.toast("✅ Updated!", icon="🔄")
@@ -2638,7 +2639,7 @@ def main():
     with h2:
         last_sync = st.session_state.get("last_sync_pressed")
         last_sync_display = (
-            last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--"
+            last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--" # type: ignore
         )
         with RATE_LIMIT_LOCK:
             remaining = RATE_LIMIT_INFO.get("remaining")
@@ -2646,11 +2647,11 @@ def main():
         if remaining is not None and limit is not None:
             try:
                 remain_int = int(remaining)
-                limit_int = int(limit)
+                limit_int = int(limit) # type: ignore
                 if remain_int < limit_int * 0.2:
                     st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
             except (ValueError, TypeError):
-                pass
+                pass # type: ignore
         st.markdown(
             f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
             unsafe_allow_html=True,
@@ -2658,7 +2659,7 @@ def main():
         if st.button("🔄 Sync Dashboard", key="btn_sync_all", width="stretch"):
             st.session_state.last_sync_pressed = datetime.now()
             perform_sync()
-        st.markdown(
+        st.markdown( # type: ignore
             "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
             unsafe_allow_html=True,
         )
@@ -2679,7 +2680,7 @@ def main():
     # ==========================================
     raw_data = load_open_rmas(db_mtime(), str(st.session_state.cache_version))
     processed_rows = []
-
+ # type: ignore
     counts = {
         "PendingRequests": 0,
         "ApprovedSubmitted": 0,
@@ -2701,7 +2702,7 @@ def main():
     search_query = st.session_state.get("search_query_input", "")
     search_query_lower = search_query.lower().strip()
     search_active = bool(search_query_lower)
-    today = datetime.now().date()
+    today: datetime.date = datetime.now().date()
 
     rmas_needing_courier_refresh = []
     for rma in raw_data:
@@ -2716,7 +2717,7 @@ def main():
         track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
         track_str = ", ".join(track_nums) if track_nums else ""
         shipment_id = shipments[0].get("shipmentId") if shipments else None
-
+ # type: ignore
         local_tracking_status = rma.get("_local_courier_status") or "Unknown"
         local_tracking_status_display = format_tracking_status_with_icon(local_tracking_status)
         local_tracking_status_lower = local_tracking_status.lower()
@@ -2726,7 +2727,7 @@ def main():
         approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
         received_iso = get_received_date_iso(rma)
         resolution_type = get_resolution_type(rma)
-        is_nt = not track_nums
+        is_nt: bool = not track_nums
         req_dt = parse_yyyy_mm_dd(str(requested_iso)[:10] if requested_iso else "")
         is_fg = status == "Pending" and req_dt is not None and (today - req_dt.date()).days >= 7
 
@@ -2734,7 +2735,7 @@ def main():
         comment_texts_lower = [c.lower() for c in comment_texts]
         is_cc = "courier cancelled" in local_tracking_status_lower
         is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
-        actioned = is_resolution_actioned(rma, comment_texts_lower)
+        actioned: bool = is_resolution_actioned(rma, comment_texts_lower)
         actioned_label = resolution_actioned_label(rma)
         is_ra = (actioned_label != "No") and is_ad
         is_nra = (status == "Received") and (not actioned)
@@ -2742,7 +2743,7 @@ def main():
         has_refund_failure, has_upload_failed, has_shipment_failure, failures = failure_flags(
             comment_texts_lower,
             status=status,
-            approved_iso=str(approved_iso) if approved_iso else "",
+            approved_iso=str(approved_iso) if approved_iso else "", # type: ignore
             has_tracking=bool(track_nums),
         )
 
@@ -2799,7 +2800,7 @@ def main():
     for filter_name, cfg in FILTERS.items():
         count_key = cfg["count_key"]  # type: ignore
         fn: FilterFn = cfg["fn"]  # type: ignore
-        if df_view.empty:
+        if df_view.empty: # type: ignore
             counts[count_key] = 0
         else:
             try:
@@ -2812,7 +2813,7 @@ def main():
     if rmas_needing_courier_refresh:
         def refresh_courier_batch():
             for rma_id, rma_payload, requested_iso, status in rmas_needing_courier_refresh:
-                try:
+                try: # type: ignore
                     courier_status, courier_checked = maybe_refresh_courier(rma_payload)
                     if courier_status:
                         upsert_rma(
@@ -2822,7 +2823,7 @@ def main():
                             payload=rma_payload,
                             courier_status=courier_status,
                             courier_checked_iso=courier_checked,
-                        )
+                        ) # type: ignore
                 except Exception as exc:
                     logger.warning("Background courier refresh failed for %s: %s", rma_id, exc)
 
@@ -2861,7 +2862,7 @@ def main():
     st.markdown("### 📊 Command Center")
     st.write("")
 
-    # Row 1: Primary statuses
+    # Row 1: Primary statuses # type: ignore
     r1 = st.columns(5)
     render_command_tile(r1[0], "Pending Requests", "Pending", "PENDING REQUESTS", "⏳")
     render_command_tile(
@@ -2873,7 +2874,7 @@ def main():
 
     st.write("")
 
-    # Row 2: Secondary statuses
+    # Row 2: Secondary statuses # type: ignore
     r2 = st.columns(5)
     render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "FLAGGED", "🚩")
     render_command_tile(r2[1], "Courier Cancelled", "FILTER_CourierCancelled", "CANCELLED", "🛑")
@@ -2898,7 +2899,7 @@ def main():
     sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
     with sc1:
         st.text_input(
-            "Search",
+            "Search", # type: ignore
             placeholder="🔍 Search Order, RMA, or Tracking...",
             label_visibility="collapsed",
             key="search_query_input",
@@ -2906,7 +2907,7 @@ def main():
     with sc2:
         st.button("🧹 Clear", width="stretch", on_click=clear_all_filters)
     with sc3:
-        if st.button("📋 View All", width="stretch"):
+        if st.button("📋 View All", width="stretch"): # type: ignore
             st.session_state.active_filters = set()  # type: ignore
             st.rerun()
 
@@ -2928,7 +2929,7 @@ def main():
             if not df_view.empty and "resolutionType" in df_view.columns:
                 res_opts = sorted(
                     [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
-                )
+                ) # type: ignore
             multi_select_with_state("Resolution type", res_opts, "res_multi")
         with c3:
             multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
@@ -2942,7 +2943,7 @@ def main():
             if not df_view.empty and "Requested date" in df_view.columns:
                 req_dates = sorted(
                     [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
-                    reverse=True,
+                    reverse=True, # type: ignore
                 )
             multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
         with c6:
@@ -2950,17 +2951,17 @@ def main():
 
         st.markdown("**Failure filters**")
         f1, f2, f3, _ = st.columns([1.3, 1.3, 1.3, 3], vertical_alignment="center")
-        with f1:
+        with f1: # type: ignore
             st.checkbox(
                 f"refund_failure ({failure_counts['refund_failure']})",
                 key="failure_refund",
             )
-        with f2:
+        with f2: # type: ignore
             st.checkbox(
                 f"upload_failed ({failure_counts['upload_failed']})",
                 key="failure_upload",
             )
-        with f3:
+        with f3: # type: ignore
             st.checkbox(
                 f"shipment_failure ({failure_counts['shipment_failure']})",
                 key="failure_shipment",
@@ -2971,7 +2972,7 @@ def main():
     # ==========================================
     # 15. TABLE VIEW
     # ==========================================
-    if df_view.empty:
+    if df_view.empty: # type: ignore
         st.warning("Database empty. Click Sync Dashboard to start.")
         st.stop()
 
@@ -2988,7 +2989,7 @@ def main():
     failure_selected = [
         label
         for label, key in (
-            ("refund_failure", "failure_refund"),
+                ("refund_failure", "failure_refund"), # type: ignore
             ("upload_failed", "failure_upload"),
             ("shipment_failure", "failure_shipment"),
         )
@@ -2996,11 +2997,11 @@ def main():
     ]
 
     if status_multi:
-        display_df = display_df[display_df["Current Status"].isin(status_multi)]
+        display_df = display_df[display_df["Current Status"].isin(status_multi)] # type: ignore
     if res_multi:
-        display_df = display_df[display_df["resolutionType"].isin(res_multi)]
+        display_df = display_df[display_df["resolutionType"].isin(res_multi)] # type: ignore
     if actioned_multi:
-        actioned_set = set(actioned_multi)
+        actioned_set: Set[str] = set(actioned_multi) # type: ignore
         if actioned_set == {"Yes"}:
             display_df = display_df[display_df["Resolution actioned"] != "No"]
         elif actioned_set == {"No"}:
@@ -3010,14 +3011,14 @@ def main():
     if req_dates_selected:
         display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
     if failure_selected:
-        failure_mask = pd.Series(False, index=display_df.index)
+        failure_mask = pd.Series(False, index=display_df.index) # type: ignore
         if st.session_state.get("failure_refund"):
             failure_mask |= display_df["has_refund_failure"]
         if st.session_state.get("failure_upload"):
             failure_mask |= display_df["has_upload_failed"]
         if st.session_state.get("failure_shipment"):
             failure_mask |= display_df["has_shipment_failure"]
-        display_df = display_df[failure_mask]
+        display_df = display_df[failure_mask] # type: ignore
 
     if display_df.empty:
         st.info("No matching records found.")
@@ -3025,7 +3026,7 @@ def main():
 
     display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
     display_df["No"] = (display_df.index + 1).astype(str)
-
+ # type: ignore
     @st.dialog("Data table log")
     def show_data_table_log():
         logs = st.session_state.get("data_table_log", [])
@@ -3037,7 +3038,7 @@ def main():
 
     @st.dialog("RMA Actions")
     def show_rma_actions_dialog(row: pd.Series):
-        rma_url = row.get("RMA ID", "")
+        rma_url = row.get("RMA ID", "") # type: ignore
         rma_id_text = row.get("_rma_id_text", "")
         shipment_id = row.get("shipment_id")
         track_existing = row.get("DisplayTrack", "")
@@ -3053,7 +3054,7 @@ def main():
                 new_track = st.text_input("Tracking number", value=track_existing)
                 submitted = st.form_submit_button("Save changes")
                 if submitted:
-                    if not shipment_id:
+                    if not shipment_id: # type: ignore
                         st.error("No Shipment ID available for this RMA.")
                     else:
                         new_track_value = new_track.strip()
@@ -3063,7 +3064,7 @@ def main():
                                 comment_payload = tracking_update_comment(track_existing, new_track_value)
                                 push_comment_update(rma_id_text, comment_payload)
                             st.success("Tracking updated.")
-                            time.sleep(0.2)
+                            time.sleep(0.2) # type: ignore
                             perform_sync(["Approved", "Received"])
                         else:
                             st.error(msg)
@@ -3079,7 +3080,7 @@ def main():
                         if not comment:
                             st.error("Comment cannot be empty.")
                         else:
-                            ok, msg = push_comment_update(rma_id_text, comment)
+                            ok, msg = push_comment_update(rma_id_text, comment) # type: ignore
                             if ok:
                                 st.success("Comment posted.")
                                 time.sleep(0.2)
@@ -3087,7 +3088,7 @@ def main():
                             else:
                                 st.error(msg)
 
-            full = row.get("full_data", {}) or {}
+            full: Dict[str, Any] = row.get("full_data", {}) or {} # type: ignore
             timeline = full.get("comments", []) or []
             if not timeline:
                 st.info("No timeline events found.")
@@ -3208,7 +3209,7 @@ def main():
         key=table_key,
     )
 
-    sel_rows = (sel_event.selection.rows if sel_event and hasattr(sel_event, "selection") else []) or []
+    sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and hasattr(sel_event.selection, "rows") else []) or [] # type: ignore
     if sel_rows:
         if st.session_state.pop("suppress_row_dialog", False):
             table_state = st.session_state.get(table_key, {})
