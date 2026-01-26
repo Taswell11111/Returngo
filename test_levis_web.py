@@ -810,10 +810,15 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
 
     url = api_url(f"/rma/{rma_id}")
     res: Optional[requests.Response] = rg_request("GET", url, timeout=20)
-    if res is None or res.status_code != 200:
+    if res is None:
+        logger.error("Failed to fetch RMA detail for %s after retries.", rma_id)
         return cached[0] if cached else None
- # type: ignore
+    if res.status_code != 200:
+        logger.error("Failed to fetch RMA detail for %s: Status %s, Response: %s", rma_id, res.status_code, res.text)
+        return cached[0] if cached else None
+
     data = res.json() if res.content else {}
+    # type: ignore
     summary = data.get("rmaSummary", {}) or {}
 
     if cached:
@@ -822,22 +827,26 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
         data["_local_received_first_seen"] = cached[0].get("_local_received_first_seen")
 
     courier_status, courier_checked = maybe_refresh_courier(data)
-
-    upsert_rma(
-        rma_id=str(rma_id),
-        status=summary.get("status", "Unknown"),
-        created_at=summary.get("createdAt") or data.get("createdAt") or "",
-        payload=data,
-        courier_status=courier_status,
-        courier_checked_iso=courier_checked,
-    )
-
-    fresh = get_rma(str(rma_id))
-    if fresh:
-        data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
-    data["_local_courier_status"] = courier_status
-    data["_local_courier_checked"] = courier_checked
-    return data
+    
+    try:
+        upsert_rma(
+            rma_id=str(rma_id),
+            status=summary.get("status", "Unknown"),
+            created_at=summary.get("createdAt") or data.get("createdAt") or "",
+            payload=data,
+            courier_status=courier_status,
+            courier_checked_iso=courier_checked,
+        )
+        # refresh local fields for UI
+        fresh = get_rma(str(rma_id))
+        if fresh:
+            data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
+        data["_local_courier_status"] = courier_status
+        data["_local_courier_checked"] = courier_checked
+        return data
+    except Exception as e:
+        logger.error("Error upserting RMA %s to DB: %s", rma_id, e)
+        return cached[0] if cached else None # Return cached if upsert fails
 
 
 def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
@@ -908,6 +917,9 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 done = i + 1
                 bar.progress(done / total, text=f"Syncing: {done}/{total}")
+                result = future.result() # Get the result (or exception)
+                if result is not None: successful_fetches += 1
+                else: failed_fetches += 1
         bar.empty()
 
     now = _now_utc()
@@ -916,7 +928,10 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     for s in statuses:
         set_last_sync(s, now)
 
-    st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+    if failed_fetches == 0:
+        status_msg.success(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
+    else:
+        status_msg.warning(f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed.")
     st.session_state["show_toast"] = True
     status_msg.success("✅ Sync Complete!")
     try:
