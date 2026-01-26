@@ -9,7 +9,7 @@ import threading
 import time
 import re
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
@@ -23,10 +23,20 @@ if not logging.getLogger().hasHandlers():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+# Suppress the "missing ScriptRunContext" warning when running in non-Streamlit environments
+# This warning is benign if the script is not intended to be run directly by `streamlit run`.
+# The recommended way to run Streamlit apps is `streamlit run your_script.py`.
+class NoScriptRunContextWarningFilter(logging.Filter):
+    def filter(self, record):
+        return not record.getMessage().startswith("Thread 'MainThread': missing ScriptRunContext!")
+
+script_run_context_logger = logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context")
+script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
+
 # ==========================================
 # 1a. CONFIGURATION
 # ==========================================
-MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
+MY_API_KEY: Optional[str] = None
 STORE_URL = "levis-sa.myshopify.com"
 DB_FILE = "levis_cache.db"
 DB_LOCK = threading.Lock()
@@ -36,7 +46,7 @@ CACHE_EXPIRY_HOURS = 24
 COURIER_REFRESH_HOURS = 12
 MAX_WORKERS = 3
 RG_RPS = 2
-SYNC_OVERLAP_MINUTES = 5
+SYNC_OVERLAP_MINUTES = 35
 
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 PRIMARY_STATUS_TILES = {"Pending", "Approved", "Received", "No Tracking", "Flagged"}
@@ -47,11 +57,10 @@ COURIER_STATUS_OPTIONS = [
     "Courier Cancelled",
     "Tracking Not Found",
     "Unknown",
-    "No tracking number",
-]
+    ]
 
 RATE_LIMIT_HIT = threading.Event()
-RATE_LIMIT_INFO = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
+RATE_LIMIT_INFO: Dict[str, Union[int, str, datetime, None]] = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 RATE_LIMIT_LOCK = threading.Lock()
 PARCEL_NINJA_TOKEN: Optional[str] = None # Initialize to None to avoid unbound variable
 df_view = pd.DataFrame()
@@ -132,12 +141,12 @@ def get_parcel_session() -> requests.Session:
     return s
 
 
-def rg_headers() -> Dict[str, str]:
+def rg_headers() -> Dict[str, Optional[str]]:
     # ReturnGO accepts the API key in either casing; include both for comment POST parity.
     return {"x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
 
 
-def update_rate_limit_info(headers: Mapping[str, str]):
+def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
     if not headers:
         return
     lower = {str(k).lower(): v for k, v in headers.items()}
@@ -801,10 +810,15 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
 
     url = api_url(f"/rma/{rma_id}")
     res: Optional[requests.Response] = rg_request("GET", url, timeout=20)
-    if res is None or res.status_code != 200:
+    if res is None:
+        logger.error("Failed to fetch RMA detail for %s after retries.", rma_id)
         return cached[0] if cached else None
- # type: ignore
+    if res.status_code != 200:
+        logger.error("Failed to fetch RMA detail for %s: Status %s, Response: %s", rma_id, res.status_code, res.text)
+        return cached[0] if cached else None
+
     data = res.json() if res.content else {}
+    # type: ignore
     summary = data.get("rmaSummary", {}) or {}
 
     if cached:
@@ -813,22 +827,26 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
         data["_local_received_first_seen"] = cached[0].get("_local_received_first_seen")
 
     courier_status, courier_checked = maybe_refresh_courier(data)
-
-    upsert_rma(
-        rma_id=str(rma_id),
-        status=summary.get("status", "Unknown"),
-        created_at=summary.get("createdAt") or data.get("createdAt") or "",
-        payload=data,
-        courier_status=courier_status,
-        courier_checked_iso=courier_checked,
-    )
-
-    fresh = get_rma(str(rma_id))
-    if fresh:
-        data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
-    data["_local_courier_status"] = courier_status
-    data["_local_courier_checked"] = courier_checked
-    return data
+    
+    try:
+        upsert_rma(
+            rma_id=str(rma_id),
+            status=summary.get("status", "Unknown"),
+            created_at=summary.get("createdAt") or data.get("createdAt") or "",
+            payload=data,
+            courier_status=courier_status,
+            courier_checked_iso=courier_checked,
+        )
+        # refresh local fields for UI
+        fresh = get_rma(str(rma_id))
+        if fresh:
+            data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
+        data["_local_courier_status"] = courier_status
+        data["_local_courier_checked"] = courier_checked
+        return data
+    except Exception as e:
+        logger.error("Error upserting RMA %s to DB: %s", rma_id, e)
+        return cached[0] if cached else None # Return cached if upsert fails
 
 
 def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
@@ -899,6 +917,9 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 done = i + 1
                 bar.progress(done / total, text=f"Syncing: {done}/{total}")
+                result = future.result() # Get the result (or exception)
+                if result is not None: successful_fetches += 1
+                else: failed_fetches += 1
         bar.empty()
 
     now = _now_utc()
@@ -907,7 +928,10 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     for s in statuses:
         set_last_sync(s, now)
 
-    st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+    if failed_fetches == 0:
+        status_msg.success(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
+    else:
+        status_msg.warning(f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed.")
     st.session_state["show_toast"] = True
     status_msg.success("✅ Sync Complete!")
     try:
@@ -970,6 +994,8 @@ def push_tracking_update(rma_id, shipment_id, tracking_number):
         if res is not None and res.status_code == 200:
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
+        if res is None:
+            return False, "API Error: No response"
         return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
         return False, str(e)
@@ -984,6 +1010,8 @@ def push_comment_update(rma_id, comment_text):
         if res is not None and res.status_code in (200, 201):
             fetch_rma_detail(rma_id, force=True)
             return True, "Success"
+        if res is None:
+            return False, "API Error: No response"
         return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
         return False, str(e)
@@ -1014,7 +1042,7 @@ def get_received_date_iso(rma_payload: dict) -> str:
     return str(rma_payload.get("_local_received_first_seen") or "")
 
 
-def pretty_resolution(rt: str) -> str:
+def pretty_resolution(rt: Optional[str]) -> str:
     if not rt:
         return ""
     out = re.sub(r"([a-z])([A-Z])", r"\1 \2", rt).strip()
@@ -1120,7 +1148,7 @@ def parse_yyyy_mm_dd(s: str) -> Optional[datetime]:
         return None
 
 
-def days_since(dt_str: str, today: Optional[datetime.date] = None) -> str:
+def days_since(dt_str: str, today: Optional[date] = None) -> str:
     d = parse_yyyy_mm_dd(dt_str)
     if not d:
         return "N/A"
@@ -1152,7 +1180,7 @@ def format_api_limit_display() -> Tuple[str, str]: # type: ignore
             sub = f"Reset: {reset}" # type: ignore
     elif reset:
         sub = f"Reset: {reset}"
-    elif updated_at:
+    elif updated_at and isinstance(updated_at, datetime):
         sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
 
     return main, sub
@@ -1673,7 +1701,7 @@ def inject_command_center_css():
 # ==========================================
 FilterFn = Callable[[pd.DataFrame], pd.Series]
 
-FILTERS: Dict[str, Dict[str, object]] = {
+FILTERS: Dict[str, Dict[str, Any]] = {
     "Pending Requests": {
         "icon": "⏳",
         "count_key": "PendingRequests",
@@ -1877,7 +1905,7 @@ def ids_for_filter(name: str) -> list:
     if not cfg:
         logger.warning("Filter '%s' not found in FILTERS config", name)
         return []
-        fn: FilterFn = cfg["fn"]
+    fn: FilterFn = cfg["fn"]
     try:
         mask = fn(df_view)
         if mask is None or mask.empty:
@@ -2041,6 +2069,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
     if op_type == "filter_sync":
         statuses = operation.get("statuses")
         filter_name = operation.get("filter_name")
+        scope = operation.get("scope")
 
         with st.spinner(f"Syncing {filter_name}..."):
             perform_sync(statuses=statuses, full=False, rerun=False)
@@ -2106,7 +2135,7 @@ def main():
     global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts
 
     st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
-    inject_command_center_css()
+    inject_command_center_css() # This function is defined later in the file, consider moving it up or ensuring it's called after definition.
 
     # --- Preserve scroll position across reruns (page scroll) ---
     components.html(
@@ -2125,11 +2154,11 @@ def main():
     # --- ACCESS SECRETS ---
     try:
         MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-    except (FileNotFoundError, KeyError):
-        MY_API_KEY = os.environ.get("RETURNGO_API_KEY", MY_API_KEY)
+    except (FileNotFoundError, KeyError, AttributeError):
+        MY_API_KEY = None
 
     if not MY_API_KEY:
-        st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
+        st.error("API Key not found! Please set 'RETURNGO_API_KEY' in your Streamlit secrets (`.streamlit/secrets.toml`).")
         st.stop()
 
     try:
@@ -2558,15 +2587,15 @@ def main():
     # ==========================================
     # 8. STATE
     # ==========================================
-    if "active_filters" not in st.session_state: # type: ignore
-        st.session_state.active_filters: Set[str] = set()
+    if "active_filters" not in st.session_state:
+        st.session_state.active_filters = set()
         logger.info("Initialized active_filters session state")
     if "search_query_input" not in st.session_state:
-        st.session_state.search_query_input: str = ""
+        st.session_state.search_query_input = ""
     if "status_multi" not in st.session_state:
-        st.session_state.status_multi: list[str] = []
+        st.session_state.status_multi = []
     if "res_multi" not in st.session_state:
-        st.session_state.res_multi: list[str] = []
+        st.session_state.res_multi = []
     if "actioned_multi" not in st.session_state:
         st.session_state.actioned_multi = []
     if "tracking_status_multi" not in st.session_state:
@@ -2580,7 +2609,7 @@ def main():
     if "failure_shipment" not in st.session_state:
         st.session_state.failure_shipment = False
     if "cache_version" not in st.session_state:
-        st.session_state.cache_version: int = 0
+        st.session_state.cache_version = 0
 
     filter_migration = {
         "Pending": "Pending Requests",
@@ -2638,12 +2667,13 @@ def main():
             limit = RATE_LIMIT_INFO.get("limit")
         if remaining is not None and limit is not None:
             try:
-                remain_int = int(remaining)
-                limit_int = int(limit) # type: ignore
-                if remain_int < limit_int * 0.2:
-                    st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
+                if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
+                    remain_int = int(remaining)
+                    limit_int = int(limit)
+                    if remain_int < limit_int * 0.2:
+                        st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
             except (ValueError, TypeError):
-                pass # type: ignore
+                pass
         st.markdown(
             f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
             unsafe_allow_html=True,
@@ -2694,7 +2724,7 @@ def main():
     search_query = st.session_state.get("search_query_input", "")
     search_query_lower = search_query.lower().strip()
     search_active = bool(search_query_lower)
-    today: datetime.date = datetime.now().date()
+    today: date = datetime.now().date()
 
     rmas_needing_courier_refresh = []
     for rma in raw_data:
@@ -2721,7 +2751,9 @@ def main():
         resolution_type = get_resolution_type(rma)
         is_nt: bool = not track_nums
         req_dt = parse_yyyy_mm_dd(str(requested_iso)[:10] if requested_iso else "")
-        is_fg = status == "Pending" and req_dt is not None and (today - req_dt.date()).days >= 7
+        is_fg = (
+            status == "Pending" and isinstance(req_dt, datetime) and (today - req_dt.date()).days >= 7
+        )  # type: ignore
 
         comment_texts = [(c.get("htmlText", "") or "") for c in comments]
         comment_texts_lower = [c.lower() for c in comment_texts]
@@ -2840,7 +2872,7 @@ def main():
 
         if not timeline_df.empty:
             date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # pyright: ignore[reportAttributeAccessIssue]
                 .size()
                 .reset_index(name="Count")
             )
@@ -3015,6 +3047,12 @@ def main():
     if display_df.empty:
         st.info("No matching records found.")
         st.stop()
+    
+    # Defensive check: Ensure 'Requested date' column exists before sorting
+    if "Requested date" not in display_df.columns:
+        logger.error("KeyError: 'Requested date' column missing from display_df. Columns: %s", display_df.columns.tolist())
+        st.error("Internal error: 'Requested date' column is missing from the data table. Please try syncing again.")
+        st.stop()
 
     display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
     display_df["No"] = (display_df.index + 1).astype(str)
@@ -3049,7 +3087,7 @@ def main():
                     if not shipment_id: # type: ignore
                         st.error("No Shipment ID available for this RMA.")
                     else:
-                        new_track_value = new_track.strip()
+                        new_track_value = new_track.strip() if new_track else ""
                         ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track_value)
                         if ok:
                             if new_track_value != track_existing:
