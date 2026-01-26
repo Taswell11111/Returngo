@@ -2034,23 +2034,15 @@ def execute_api_operation(endpoint: str, context: str = ""):
         return
 
     if op_type == "status_sync":
-        statuses = operation.get("statuses")
-        if not statuses:
-            st.error(f"Operation '{endpoint}' missing required 'statuses' field")
-            return
-        perform_sync(statuses=statuses, full=False) # type: ignore
+        statuses = operation["statuses"]
+        perform_sync(statuses=statuses, full=False)
         return
 
     if op_type == "filter_sync":
         statuses = operation.get("statuses")
         filter_name = operation.get("filter_name")
-        scope = operation.get("scope")
 
-        if not statuses:
-            st.error(f"Operation '{endpoint}' missing required 'statuses' field")
-            return
- # type: ignore
-        with st.spinner(f"Syncing {filter_name or 'filter'}..."):
+        with st.spinner(f"Syncing {filter_name}..."):
             perform_sync(statuses=statuses, full=False, rerun=False)
 
             if filter_name and filter_name in FILTERS and scope:
