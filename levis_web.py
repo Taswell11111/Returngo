@@ -743,9 +743,11 @@ def should_refresh_detail(rma_id: str) -> bool:
     if not cached:
         return True
     _, last_fetched_iso = cached
+    if not last_fetched_iso:
+        return True
     try:
         last_dt = datetime.fromisoformat(last_fetched_iso)
-    except Exception:
+    except (ValueError, TypeError):
         return True
     if last_dt.tzinfo is None:
         last_dt = last_dt.replace(tzinfo=timezone.utc)
@@ -762,7 +764,7 @@ def should_refresh_courier(rma_payload: dict) -> bool:
         if last_chk.tzinfo is None:
             last_chk = last_chk.replace(tzinfo=timezone.utc)
         return (_now_utc() - last_chk) > timedelta(hours=COURIER_REFRESH_HOURS)
-    except Exception:
+    except (ValueError, TypeError):
         return True
 
 
