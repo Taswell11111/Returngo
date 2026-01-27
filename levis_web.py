@@ -40,6 +40,7 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 
 @st.cache_resource
 def init_database():
+    logger.info("Attempting to initialize database connection...")
     try:
         # initialize Python Connector object
         connector = Connector()
@@ -88,7 +89,10 @@ def init_database():
         st.stop()
         return None
 
-engine = init_database()
+with st.spinner("Running init_database()..."):
+    engine = init_database()
+    if engine is not None:
+        st.toast("✅ Database connection successful!")
 
 # Load secrets
 try:
