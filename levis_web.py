@@ -252,36 +252,7 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
 # ==========================================
 # 3. DATABASE
 # ==========================================
-def init_db():
-    create_rmas_table_query = text("""
-    CREATE TABLE IF NOT EXISTS rmas (
-        rma_id TEXT PRIMARY KEY,
-        store_url TEXT,
-        status TEXT,
-        created_at TIMESTAMP WITH TIME ZONE,
-        json_data JSONB,
-        last_fetched TIMESTAMP WITH TIME ZONE,
-        courier_status TEXT,
-        courier_last_checked TIMESTAMP WITH TIME ZONE,
-        received_first_seen TIMESTAMP WITH TIME ZONE
-    );
-    """)
 
-    create_sync_logs_table_query = text("""
-    CREATE TABLE IF NOT EXISTS sync_logs (
-        scope TEXT PRIMARY KEY,
-        last_sync_iso TIMESTAMP WITH TIME ZONE
-    );
-    """)
-
-    try:
-        with engine.connect() as connection:
-            connection.execute(create_rmas_table_query)
-            connection.execute(create_sync_logs_table_query)
-            connection.commit()
-    except Exception as e:
-        st.error(f"Error creating tables: {e}")
-        st.stop()
 
 
 
@@ -2189,7 +2160,7 @@ def main(): # type: ignore
         return
 
     # Now that engine is initialized, create tables if they don't exist
-    init_db()
+    init_database()
     
     # PARCEL_NINJA_TOKEN can also be accessed from st.secrets if present
     if not PARCEL_NINJA_TOKEN:
