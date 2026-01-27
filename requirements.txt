@@ -2,5 +2,5 @@ streamlit
 requests
 pandas
 sqlalchemy
-psycopg2-binary
 urllib3
+cloud-sql-python-connector[pg8000]
