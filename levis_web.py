@@ -2127,7 +2127,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
 
 
 def main(): # type: ignore
-    global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts, engine
+    global df_view, counts
 
     st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
     inject_command_center_css()
@@ -2146,25 +2146,6 @@ def main(): # type: ignore
         height=0,
     )
 
-    # --- ACCESS SECRETS & INITIALIZE DB ---
-    try:
-        conn_pg = st.connection("postgresql", type="sql")
-        engine = conn_pg.engine
-        
-        MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-        PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
-
-    except Exception as e:
-        st.error(f"Failed to connect to PostgreSQL or access secrets: {e}")
-        st.stop()
-        return
-
-    # Now that engine is initialized, create tables if they don't exist
-    init_database()
-    
-    # PARCEL_NINJA_TOKEN can also be accessed from st.secrets if present
-    if not PARCEL_NINJA_TOKEN:
-        PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", PARCEL_NINJA_TOKEN)
 
     # ==========================================
     # 1b. STYLING + STICKY HEADER
