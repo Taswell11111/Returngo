@@ -2698,8 +2698,21 @@ def main(): # type: ignore
         st.markdown("</div>", unsafe_allow_html=True)
 
         if st.button("🔬 Verify DB Schema", key="btn_verify_schema"):
-            with st.spinner("Inspecting database schema..."):
+            with st.spinner("Inspecting database..."):
                 from sqlalchemy import inspect
+
+                # Display connection info first
+                st.subheader("Connection Target (from secrets.toml):")
+                try:
+                    conn_details = {
+                        "instance_connection_name": st.secrets.connections.postgresql.instance_connection_name,
+                        "database": st.secrets.connections.postgresql.database,
+                        "username": st.secrets.connections.postgresql.username
+                    }
+                    st.json(conn_details)
+                except Exception as e:
+                    st.error(f"Could not read connection secrets from secrets.toml: {e}")
+
 
                 def get_schema_info(engine):
                     try:
@@ -2719,10 +2732,12 @@ def main(): # type: ignore
                         return {"error": f"An error occurred while inspecting the schema: {e}"}
 
                 schema_info = get_schema_info(engine)
+                
+                st.subheader("Database Schema:")
                 if "error" in schema_info:
                     st.error(schema_info["error"])
                 else:
-                    st.success("Successfully inspected database schema:")
+                    st.success("Schema inspection complete.")
                     st.json(schema_info)
 
         render_api_action_bar(compact=True)
