@@ -40,7 +40,7 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 @st.cache_resource
 def init_database():
     try:
-        engine = st.connection("postgresql", type="sql").engine
+        engine = st.connection("postgresql").engine
         # Use a single transaction to create both tables
         with engine.begin() as connection:
             connection.execute(text("""
