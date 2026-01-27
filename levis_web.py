@@ -2666,11 +2666,12 @@ def main(): # type: ignore
             unsafe_allow_html=True,
         )
         if st.button("🗑️ Reset Cache", key="btn_reset", width="content"):
-            if clear_db():
-                st.success("Database cleared!")
+            if clear_db(): # This function now truncates the PostgreSQL tables
+                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+                st.success("Database has been cleared!")
                 st.rerun()
             else:
-                st.warning("No database file to reset.")
+                st.error("Failed to clear the database.")
         st.markdown("</div>", unsafe_allow_html=True)
         render_api_action_bar(compact=True)
 
