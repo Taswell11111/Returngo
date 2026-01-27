@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, text
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
 from returngo_api import api_url, RMA_COMMENT_PATH
+from google.cloud.sql.connector import Connector
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
@@ -36,11 +37,34 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # ==========================================
 # 1a. CONFIGURATION
 # ==========================================
+
+# Cloud SQL Connector settings
+INSTANCE_CONNECTION_NAME = "freshdesk-activity-report:us-west1:sql01" 
+
 # Global variable for the SQLAlchemy engine, initialized in main()
 @st.cache_resource
 def init_database():
     try:
-        engine = st.connection("postgresql").engine
+        # initialize Python Connector object
+        connector = Connector()
+
+        # function to return the database connection object
+        def getconn():
+            conn = connector.connect(
+                INSTANCE_CONNECTION_NAME,
+                "pg8000",
+                user=st.secrets.connections.postgresql.username,
+                password=st.secrets.connections.postgresql.password,
+                db=st.secrets.connections.postgresql.database,
+            )
+            return conn
+
+        # create connection pool with 'creator' argument to our connection object
+        engine = create_engine(
+            "postgresql+pg8000://",
+            creator=getconn,
+        )
+        
         # Use a single transaction to create both tables
         with engine.begin() as connection:
             connection.execute(text("""
@@ -64,7 +88,7 @@ def init_database():
             """))
         return engine
     except Exception as e:
-        st.error(f"Application error: Could not initialize database. Please check your connection secrets. Error: {e}")
+        st.error(f"Application error: Could not initialize database. Please check your connection secrets and ensure you have authenticated with Google Cloud CLI (gcloud auth application-default login). Error: {e}")
         st.stop()
         return None
 
