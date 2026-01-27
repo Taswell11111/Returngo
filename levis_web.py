@@ -448,18 +448,17 @@ def get_last_sync(scope: str) -> Optional[datetime]:
         return None
 
 def clear_db():
-    if engine is None:
+    if engine is None: # type: ignore
         return False
     try:
-        with engine.connect() as connection:
-            connection.execute(text("DELETE FROM rmas;"))
-            connection.execute(text("DELETE FROM sync_logs;"))
-            connection.commit()
+        with engine.begin() as connection: # Use begin() for a transaction
+            connection.execute(text("TRUNCATE TABLE rmas, sync_logs;"))
         return True
     except Exception as e:
         logger.error(f"Failed to clear PostgreSQL tables: {e}")
         st.error(f"Failed to clear PostgreSQL tables: {e}")
         return False
+
 # ==========================================
 # 4. COURIER STATUS
 # ==========================================
@@ -2667,9 +2666,7 @@ def main(): # type: ignore
             unsafe_allow_html=True,
         )
         if st.button("🗑️ Reset Cache", key="btn_reset", width="content"):
-            if clear_db(): # type: ignore
-                st.cache_data.clear()
-                st.success("Cache cleared!")
+            if clear_db():
                 st.success("Database cleared!")
                 st.rerun()
             else:
