@@ -38,10 +38,6 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # 1a. CONFIGURATION
 # ==========================================
 
-# Cloud SQL Connector settings
-INSTANCE_CONNECTION_NAME = "freshdesk-activity-report:us-west1:sql01" 
-
-# Global variable for the SQLAlchemy engine, initialized in main()
 @st.cache_resource
 def init_database():
     try:
@@ -51,7 +47,7 @@ def init_database():
         # function to return the database connection object
         def getconn():
             conn = connector.connect(
-                INSTANCE_CONNECTION_NAME,
+                st.secrets.connections.postgresql.instance_connection_name,
                 "pg8000",
                 user=st.secrets.connections.postgresql.username,
                 password=st.secrets.connections.postgresql.password,
