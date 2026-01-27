@@ -929,16 +929,15 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     if total > 0:
         successful_fetches = 0
         failed_fetches = 0
-        bar = st.progress(0, text="Downloading Details...")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex: # type: ignore
-            futures = [ex.submit(fetch_rma_detail, rid, force=force) for rid in to_fetch]
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                done = i + 1
-                bar.progress(done / total, text=f"Syncing: {done}/{total}")
-                # Get the result (or exception)
-                result = future.result()
-                if result is not None: successful_fetches += 1
-                else: failed_fetches += 1
+        bar = st.progress(0, text="Downloading Details (sequentially)...")
+        for i, rid in enumerate(to_fetch):
+            done = i + 1
+            bar.progress(done / total, text=f"Syncing: {done}/{total}")
+            result = fetch_rma_detail(rid, force=force)
+            if result is not None:
+                successful_fetches += 1
+            else:
+                failed_fetches += 1
         bar.empty()
 
     now = _now_utc()
@@ -2697,6 +2696,35 @@ def main(): # type: ignore
             else:
                 st.error("Failed to clear the database.")
         st.markdown("</div>", unsafe_allow_html=True)
+
+        if st.button("🔬 Verify DB Schema", key="btn_verify_schema"):
+            with st.spinner("Inspecting database schema..."):
+                from sqlalchemy import inspect
+
+                def get_schema_info(engine):
+                    try:
+                        inspector = inspect(engine)
+                        table_names = inspector.get_table_names()
+                        if not table_names:
+                            return {"error": "No tables found in the database. The 'init_database' function may have failed or the database is empty."}
+                        
+                        schemas = {}
+                        for table_name in table_names:
+                            schemas[table_name] = []
+                            columns = inspector.get_columns(table_name)
+                            for column in columns:
+                                schemas[table_name].append(f"{column['name']} ({column['type']})")
+                        return schemas
+                    except Exception as e:
+                        return {"error": f"An error occurred while inspecting the schema: {e}"}
+
+                schema_info = get_schema_info(engine)
+                if "error" in schema_info:
+                    st.error(schema_info["error"])
+                else:
+                    st.success("Successfully inspected database schema:")
+                    st.json(schema_info)
+
         render_api_action_bar(compact=True)
 
     st.write("")
