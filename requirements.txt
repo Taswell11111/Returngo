@@ -1,7 +1,5 @@
 streamlit
-pandas
 requests
-openpyxl==3.1.5
-streamlit-aggrid
-psycopg2-binary # PostgreSQL database adapter
-sqlalchemy # Used by Streamlit's st.connection for SQL databases
+pandas
+sqlalchemy
+psycopg2-binary
