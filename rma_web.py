@@ -896,8 +896,8 @@ if not df_view.empty:
             # Access the full display_df using the index
             full_row = display_df.loc[row.name]
             if full_row.get("Status") == "Approved" and not full_row.get("DisplayTrack"):
-                return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * 10
-            return [""] * 10
+                return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
+            return [""] * len(row)
         
         styled_table = display_df[table_display_cols].style.apply(
             highlight_missing_tracking, axis=1
