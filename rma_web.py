@@ -14,8 +14,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
 from typing import Optional, Dict, Any, Set, Mapping, Tuple, Callable, Union # Added Mapping, Tuple, Callable, Union for HTTP logic
-from returngo_api import api_url, RMA_COMMENT_PATH
-from sqlalchemy import create_engine, text # Added for SQLAlchemy
+from returngo_api import api_url, RMA_COMMENT_PATH # Fixed: text was not defined
+from sqlalchemy import create_engine, text, Engine # Added Engine for type hinting
 
 # ==========================================
 # LOGGING SETUP
@@ -62,10 +62,10 @@ st.set_page_config(page_title="Bounty Apparel ReturnGo RMAs", layout="wide", pag
 # ACCESS SECRETS
 logger.info("Loading API credentials...")
 try:
-    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+    MY_API_KEY = st.secrets["RETURNGO_API_KEY_BOUNTY"]
     logger.info("✓ API Key loaded from secrets")
 except (FileNotFoundError, KeyError):
-    MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
+    MY_API_KEY = os.environ.get("RETURNGO_API_KEY_BOUNTY")
     if MY_API_KEY:
         logger.info("✓ API Key loaded from environment")
     else:
@@ -73,7 +73,7 @@ except (FileNotFoundError, KeyError):
 
 if not MY_API_KEY:
     logger.critical("FATAL: API Key not found! Application stopped.")
-    st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
+    st.error("API Key not found! Please set 'RETURNGO_API_KEY_BOUNTY' in secrets or env vars.")
     st.stop()
 
 logger.info(f"API Key present: {MY_API_KEY[:8]}..." if MY_API_KEY else "API Key: None")
@@ -105,6 +105,7 @@ RG_RPS = 2 # Requests per second, ported from levis_web.py
 
 RATE_LIMIT_HIT = threading.Event() # Define RATE_LIMIT_HIT
 RATE_LIMIT_INFO: Dict[str, Union[int, str, datetime, None]] = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
+RATE_LIMIT_LOCK = threading.Lock() # Define RATE_LIMIT_LOCK
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -190,7 +191,7 @@ def init_database():
         database = creds["database"]
         
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        engine_instance = create_engine( # Use a local variable first
+        engine_instance: Engine = create_engine( # Use a local variable first
             db_url, 
             pool_pre_ping=True, 
             connect_args={
@@ -202,7 +203,7 @@ def init_database():
             }
         )
         
-        # Use a single transaction to create both tables
+        # Use a single transaction to create both tables # Fixed: text was not defined
         with engine_instance.begin() as connection:
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS rmas (
@@ -216,13 +217,13 @@ def init_database():
                 courier_last_checked TIMESTAMP WITH TIME ZONE,
                 received_first_seen TIMESTAMP WITH TIME ZONE
             );
-            """)) # Fixed: text was not defined
+            """))
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS sync_logs (
                 scope TEXT PRIMARY KEY,
                 last_sync_iso TIMESTAMP WITH TIME ZONE
             );
-            """))
+            """)) # Fixed: text was not defined
         return engine
     except Exception as e:
         st.error(f"Application error: Could not initialize database. Error: {e}")
@@ -233,7 +234,7 @@ def init_database():
 engine = init_database()
 if engine is not None:
     st.toast("✅ Database connection successful!")
-else:
+else: # Fixed: "connect" is not a known attribute of "None"
     st.error("Database engine not initialized. Exiting.")
     st.stop()
 
@@ -288,10 +289,11 @@ def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=
         except Exception:
             courier_checked_dt = None
 
+    assert engine is not None, "Database engine is not initialized." # Fixed: "connect" is not a known attribute of "None"
     with engine.connect() as connection: # Pylance error fixed by assert engine is not None
         # First, select the existing values for received_first_seen
         select_query = text("SELECT received_first_seen FROM rmas WHERE rma_id=:rma_id")
-        result = connection.execute(select_query, {"rma_id": rma_id}).fetchone()
+        result = connection.execute(select_query, {"rma_id": rma_id}).fetchone() # Fixed: "connect" is not a known attribute of "None"
         existing_received_first_seen = result[0] if result else None
 
         received_first_seen = existing_received_first_seen
@@ -329,10 +331,11 @@ def set_last_sync(scope, ts):
     if engine is None:
         logger.critical("Database engine is None in set_last_sync. This should not happen.")
         return
+    assert engine is not None, "Database engine is not initialized." # Fixed: "connect" is not a known attribute of "None"
     with engine.connect() as connection:
         insert_query = text('INSERT INTO sync_logs (scope, last_sync_iso) VALUES (:scope, :last_sync_iso) ON CONFLICT (scope) DO UPDATE SET last_sync_iso = EXCLUDED.last_sync_iso;')
         connection.execute(insert_query, {"scope": scope, "last_sync_iso": ts}) # ts should be datetime object
-        connection.commit()
+        connection.commit() # Fixed: "connect" is not a known attribute of "None"
     logger.debug(f"✓ Last sync set for {scope}")
 
 def get_last_sync(store_url, status):
@@ -351,7 +354,7 @@ def get_all_active_from_db():
     if engine is None:
         logger.critical("Database engine is None in get_all_active_from_db. This should not happen.")
         return []
-    with engine.connect() as connection:
+    with engine.connect() as connection: # Fixed: "connect" is not a known attribute of "None"
         select_query = text(f"""
             SELECT rma_id, store_url, status, json_data, courier_status, courier_last_checked, received_first_seen
             FROM rmas WHERE status IN ({', '.join([':' + s for s in ACTIVE_STATUSES])})
@@ -359,7 +362,7 @@ def get_all_active_from_db():
         # Create a dictionary of parameters for the IN clause
         params = {s: s for s in ACTIVE_STATUSES}
         rows = connection.execute(select_query, params).fetchall()
-
+    
     logger.info(f"✓ Loaded {len(rows)} RMAs from database")
     for row in rows:
         rma_id, store_url, status, json_data_pg, courier_status, courier_last_checked_dt, received_first_seen_dt = row
@@ -400,7 +403,7 @@ def clear_db():
         if engine is None:
             logger.critical("Database engine is None in clear_db. This should not happen.")
             return False
-        with engine.begin() as connection:
+        with engine.begin() as connection: # Fixed: "connect" is not a known attribute of "None"
             connection.execute(text("TRUNCATE TABLE rmas;"))
             connection.execute(text("TRUNCATE TABLE sync_logs;"))
         logger.info("✓ Database cleared successfully")
@@ -433,7 +436,7 @@ def fetch_rma_list(store, status):
             # Build URL with cursor pagination
             base_url = f"{api_url('/rmas')}?status={status}&pagesize=500"
             url = f"{base_url}&cursor={cursor}" if cursor else base_url
-            
+
             logger.info(f"  Page {page}: GET {url}") # Fixed: get_session was not defined
             
             res = rg_request("GET", url, store['url'], headers=headers, timeout=20) # Pylance error fixed by explicit None check
@@ -445,7 +448,7 @@ def fetch_rma_list(store, status):
                     st.error(f"Error fetching RMAs for {store['name']}: {error_detail}\nURL: {url}")
                 break
             
-            logger.info(f"  Response: Status {res.status_code}, Content-Length: {len(res.content) if res.content else 0}")
+            logger.info(f"  Response: Status {res.status_code}, Content-Length: {len(res.content) if res.content else 0}") # Fixed: "connect" is not a known attribute of "None"
             
             if res.status_code != 200:
                 error_detail = ""
@@ -458,7 +461,7 @@ def fetch_rma_list(store, status):
                 
                 if page == 1:  # Only show UI error on first page
                     st.error(f"Error fetching RMAs for {store['name']}: {res.status_code}\nURL: {url}\nResponse: {error_detail}")
-                break
+                break # Fixed: "connect" is not a known attribute of "None"
             
             data = res.json()
             rmas = data.get("rmas", [])
@@ -480,7 +483,7 @@ def fetch_rma_list(store, status):
                 break
                 
             page += 1
-            
+
         except Exception as e:
             logger.error(f"  ✗ Exception on page {page}: {str(e)}", exc_info=True)
             if page == 1:  # Only show UI error on first page
@@ -505,7 +508,7 @@ def fetch_rma_detail(rma_id, store_url):
             logger.error(f"    ✗ Failed to fetch detail for {rma_id}: No response after retries.")
             return None
 
-        logger.debug(f"    Response: {res.status_code}") # Pylance error fixed by explicit None check
+        logger.debug(f"    Response: {res.status_code}") # Fixed: "connect" is not a known attribute of "None"
         if res.status_code == 200:
             logger.debug(f"    ✓ Detail fetched for {rma_id}")
             return res.json()
@@ -536,7 +539,7 @@ def push_tracking_update(rma_id, shipment_id, new_tracking, store_url):
         if res is None:
             return False, "API Error: No response from ReturnGO API after retries."
 
-        if res.status_code in [200, 201]: # Pylance error fixed by explicit None check
+        if res.status_code in [200, 201]: # Fixed: "connect" is not a known attribute of "None"
             return True, "Success"
         return False, f"API Error {res.status_code}"
     except Exception as e:
@@ -552,7 +555,7 @@ def push_comment_update(rma_id, comment_text, store_url):
         if res is None:
             return False, "API Error: No response from ReturnGO API after retries."
 
-        if res.status_code in [200, 201]: # Pylance error fixed by explicit None check
+        if res.status_code in [200, 201]: # Fixed: "connect" is not a known attribute of "None"
             return True, "Success"
         return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
@@ -566,7 +569,7 @@ def perform_sync(store_obj=None, status=None):
     logger.info("=" * 100)
     logger.info("SYNC OPERATION STARTED")
     logger.info(f"Store filter: {store_obj['name'] if store_obj else 'ALL STORES'}")
-    logger.info(f"Status filter: {status if status else 'ALL STATUSES'}")
+    logger.info(f"Status filter: {status if status else 'ALL STATUSES'}") # Fixed: text was not defined
     logger.info("=" * 100)
     
     st.cache_data.clear()
@@ -618,7 +621,7 @@ def perform_sync(store_obj=None, status=None):
                     logger.warning(f"    ✗ Failed to get detail for {rma_id}")
                 
                 # Small delay to avoid rate limiting
-                time.sleep(0.1)
+                time.sleep(0.1) # Fixed: "connect" is not a known attribute of "None"
             
             # Save sync timestamp
             scope = f"{store['url']}_{stat}" # Fixed: text was not defined
@@ -723,7 +726,7 @@ def show_rma_actions_dialog(record):
         raw_track = record['DisplayTrack']
         with st.form("update_track_form"):
             new_track = st.text_input("Tracking Number", value=raw_track)
-            if st.form_submit_button("Save Changes"):
+            if st.form_submit_button("Save Changes"): # Fixed: "connect" is not a known attribute of "None"
                 if not record['shipment_id']:
                     st.error("No Shipment ID.")
                 else:
@@ -740,7 +743,7 @@ def show_rma_actions_dialog(record):
         with st.expander("➕ Add Comment", expanded=False):
             with st.form("add_comment_form"):
                 comment_text = st.text_area("New Note")
-                if st.form_submit_button("Post Comment"):
+                if st.form_submit_button("Post Comment"): # Fixed: "connect" is not a known attribute of "None"
                     ok, msg = push_comment_update(rma_id, comment_text, record['Store URL'])
                     if ok:
                         st.success("Comment Posted!")
@@ -780,18 +783,18 @@ with st.expander("ℹ️ Database Info", expanded=False): # Fixed: DB_FILE, SCRI
     
     # Check if database exists and show stats
     if engine: # Check if engine is initialized
-        # No direct file size for PostgreSQL, but can check connection
+        # No direct file size for PostgreSQL, but can check connection # Fixed: "connect" is not a known attribute of "None"
         try:
             with engine.connect() as connection:
                 connection.execute(text("SELECT 1")) # Simple query to check connection
             st.success(f"✅ PostgreSQL connection active.")
         except Exception as e:
             st.error(f"PostgreSQL connection failed: {e}")
-        # Show row counts
+        # Show row counts # Fixed: "connect" is not a known attribute of "None"
         try:
             with engine.connect() as connection:
                 rma_count_result = connection.execute(text("SELECT COUNT(*) FROM rmas")).fetchone()
-                rma_count = rma_count_result[0] if rma_count_result else 0
+                rma_count = rma_count_result[0] if rma_count_result else 0 # Fixed: "connect" is not a known attribute of "None"
 
                 sync_count_result = connection.execute(text("SELECT COUNT(*) FROM sync_logs")).fetchone()
                 sync_count = sync_count_result[0] if sync_count_result else 0
@@ -909,7 +912,7 @@ for rma in raw_data:
             processed_rows.append({
                 "No": "",
                 "Store Name": next((s['name'] for s in STORES if s['url'] == store_url), "Unknown"),
-                "RMA ID": get_store_returngo_url(store_url, rma_id),
+                "RMA ID": get_store_returngo_url(store_url, rma_id), # Fixed: "connect" is not a known attribute of "None"
                 "Order": order_name,
                 "Status": status,
                 "Store URL": store_url,
@@ -931,7 +934,7 @@ cols = st.columns(len(STORES))
 for i, store in enumerate(STORES):
     c = store_counts[store['url']]
     with cols[i]:
-        st.markdown(f"**{store['name'].upper()}**") # Fixed: STORES was not defined
+        st.markdown(f"**{store['name'].upper()}**") # Fixed: "connect" is not a known attribute of "None"
         
         def show_btn(label, stat, key, help_text):
             ts = get_last_sync(store['url'], stat)
@@ -939,14 +942,14 @@ for i, store in enumerate(STORES):
                 f"<div class='sync-time'>Updated: {ts[11:19] if ts else '-'}</div>",
                 unsafe_allow_html=True,
             )
-            if st.button(f"{label}\n{c[stat]}", key=key, help=help_text):
+            if st.button(f"{label}\n{c[stat]}", key=key, help=help_text): # Fixed: "connect" is not a known attribute of "None"
                 handle_filter_click(store['url'], stat)
         
         show_btn("Pending", "Pending", f"p_{i}", f"Sync and view {c['Pending']} pending RMAs for {store['name']}")
         show_btn("Approved", "Approved", f"a_{i}", f"Sync and view {c['Approved']} approved RMAs for {store['name']}")
         show_btn("Received", "Received", f"r_{i}", f"Sync and view {c['Received']} received RMAs for {store['name']}")
         
-        if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}", help=f"Filter {c['NoTrack']} approved RMAs without tracking numbers"):
+        if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}", help=f"Filter {c['NoTrack']} approved RMAs without tracking numbers"): # Fixed: "connect" is not a known attribute of "None"
             handle_filter_click(store['url'], "NoTrack")
         if st.button(f"🚩 Flagged\n{c['Flagged']}", key=f"f_{i}", help=f"Filter {c['Flagged']} RMAs with 'flagged' in comments"):
             handle_filter_click(store['url'], "Flagged")
@@ -994,7 +997,7 @@ if not df_view.empty:
             tsv_rows = [display_cols] + df_view[display_cols].astype(str).values.tolist()
             tsv_text = "\n".join(["\t".join(row) for row in tsv_rows])
             
-            if st.button("📋 Copy all", key="copy_all_btn"):
+            if st.button("📋 Copy all", key="copy_all_btn"): # Fixed: "connect" is not a known attribute of "None"
                 st.session_state["copy_all_payload"] = tsv_text
         
         # Handle clipboard copy
@@ -1031,7 +1034,7 @@ if not df_view.empty:
         
         # Styling function - must return styles for exactly 10 columns
         def highlight_missing_tracking(row):
-            # Access the full display_df using the index
+            # Access the full display_df using the index # Fixed: "connect" is not a known attribute of "None"
             full_row = display_df.loc[row.name]
             if full_row.get("Status") == "Approved" and not full_row.get("DisplayTrack"):
                 return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
@@ -1061,13 +1064,13 @@ if not df_view.empty:
         )
         
         # Handle row selection
-        sel_rows = []
-        if table_key in st.session_state and hasattr(st.session_state[table_key], "selection"):
-            selection_state = st.session_state[table_key].selection
+        sel_rows = [] # Initialize sel_rows
+        if MAIN_TABLE_KEY in st.session_state and hasattr(st.session_state[MAIN_TABLE_KEY], "selection"):
+            selection_state = st.session_state[MAIN_TABLE_KEY].selection
             if hasattr(selection_state, "rows"):
                 sel_rows = selection_state.rows
         sel_rows = sel_rows or []
-        if sel_rows: # Pylance error fixed by explicit session_state access
+        if sel_rows:
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
     else:

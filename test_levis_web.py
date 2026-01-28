@@ -2156,12 +2156,12 @@ def main():
 
     # --- ACCESS SECRETS ---
     try:
-        MY_API_KEY = st.secrets["RETURNGO_API_KEY_BOUNTY"]
+        MY_API_KEY = st.secrets["RETURNGO_API_KEY_BOUNTY_BOUNTY"]
     except (FileNotFoundError, KeyError, AttributeError):
         MY_API_KEY = None
 
     if not MY_API_KEY:
-        st.error("API Key not found! Please set 'RETURNGO_API_KEY_BOUNTY' in your Streamlit secrets (`.streamlit/secrets.toml`).")
+        st.error("API Key not found! Please set 'RETURNGO_API_KEY_BOUNTY_BOUNTY' in your Streamlit secrets (`.streamlit/secrets.toml`).")
         st.stop()
 
     try:
