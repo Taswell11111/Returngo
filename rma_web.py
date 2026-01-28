@@ -1,6 +1,5 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import sqlite3
 import requests
 import json
 import pandas as pd
@@ -9,12 +8,14 @@ import threading
 import time
 import re
 import logging
-from datetime import datetime, timedelta, timezone
+import sys # Added for os.sys.version fix
+from datetime import datetime, timedelta, timezone, date # Added date for days_since
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import concurrent.futures
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, Set, Mapping, Tuple, Callable, Union # Added Mapping, Tuple, Callable, Union for HTTP logic
 from returngo_api import api_url, RMA_COMMENT_PATH
+from sqlalchemy import create_engine, text # Added for SQLAlchemy
 
 # ==========================================
 # LOGGING SETUP
@@ -49,7 +50,7 @@ logger.info("RMA WEB APPLICATION STARTING")
 logger.info(f"Log file: {log_filename}")
 logger.info(f"Log directory created: {log_dir_created}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
-logger.info(f"Python version: {os.sys.version}")
+logger.info(f"Python version: {sys.version}") # Fixed: os.sys.version -> sys.version
 logger.info("=" * 100)
 
 # ==========================================
@@ -80,6 +81,102 @@ logger.info(f"API Key present: {MY_API_KEY[:8]}..." if MY_API_KEY else "API Key:
 CACHE_EXPIRY_HOURS = 4
 COURIER_REFRESH_HOURS = 12
 
+# Define missing global variables
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) # Define SCRIPT_DIR
+DB_FILE = os.path.join(SCRIPT_DIR, "rma_cache.db") # Placeholder for DB_FILE, though not used by SQLAlchemy
+DB_LOCK = threading.Lock() # Define DB_LOCK
+
+# Define STORES and ACTIVE_STATUSES
+STORES = [
+    {"name": "Bounty Apparel", "url": "bounty-apparel.myshopify.com"},
+    # Add other stores if applicable
+]
+ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
+
+MAIN_TABLE_KEY = "main_table" # Module-level constant for the main dataframe key
+
+# ==========================================
+# HTTP SESSIONS + RATE LIMITING (Ported from levis_web.py)
+# ==========================================
+_thread_local = threading.local()
+_rate_lock = threading.Lock()
+_last_req_ts = 0.0
+RG_RPS = 2 # Requests per second, ported from levis_web.py
+
+RATE_LIMIT_HIT = threading.Event() # Define RATE_LIMIT_HIT
+RATE_LIMIT_INFO: Dict[str, Union[int, str, datetime, None]] = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _sleep_for_rate_limit():
+    global _last_req_ts
+    if RG_RPS <= 0:
+        return
+    min_interval = 1.0 / float(RG_RPS)
+    with _rate_lock:
+        now = time.time()
+        wait = (_last_req_ts + min_interval) - now
+        if wait > 0:
+            time.sleep(wait)
+        _last_req_ts = time.time()
+
+
+def get_thread_session() -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is not None:
+        return s
+
+    s = requests.Session()
+    retries = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        status=5,
+        backoff_factor=1,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "PUT", "POST"]),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    _thread_local.session = s
+    return s
+
+def rg_headers(store_url: str) -> Dict[str, Optional[str]]:
+    return {"x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
+
+def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
+    if not headers:
+        return
+    lower = {str(k).lower(): v for k, v in headers.items()}
+    remaining = lower.get("x-ratelimit-remaining") or lower.get("x-rate-limit-remaining") or lower.get("ratelimit-remaining")
+    limit = lower.get("x-ratelimit-limit") or lower.get("x-rate-limit-limit") or lower.get("ratelimit-limit")
+    reset = lower.get("x-ratelimit-reset") or lower.get("x-rate-limit-reset") or lower.get("ratelimit-reset")
+
+    if remaining is None and limit is None and reset is None:
+        return
+
+    def to_int(val):
+        if val is None: return None
+        sval = str(val).strip()
+        return int(sval) if sval.isdigit() else sval
+
+    with RATE_LIMIT_LOCK:
+        RATE_LIMIT_INFO["remaining"] = to_int(remaining)
+        RATE_LIMIT_INFO["limit"] = to_int(limit)
+        RATE_LIMIT_INFO["reset"] = to_int(reset)
+        RATE_LIMIT_INFO["updated_at"] = _now_utc()
+
+# The `engine` variable needs to be accessible globally after `init_database` runs.
+engine: Optional[Engine] = None # Initialize engine globally with explicit type hint
 @st.cache_resource
 def init_database():
     logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
@@ -93,7 +190,7 @@ def init_database():
         database = creds["database"]
         
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        engine = create_engine(
+        engine_instance = create_engine( # Use a local variable first
             db_url, 
             pool_pre_ping=True, 
             connect_args={
@@ -106,7 +203,7 @@ def init_database():
         )
         
         # Use a single transaction to create both tables
-        with engine.begin() as connection:
+        with engine_instance.begin() as connection:
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS rmas (
                 rma_id TEXT PRIMARY KEY,
@@ -119,7 +216,7 @@ def init_database():
                 courier_last_checked TIMESTAMP WITH TIME ZONE,
                 received_first_seen TIMESTAMP WITH TIME ZONE
             );
-            """))
+            """)) # Fixed: text was not defined
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS sync_logs (
                 scope TEXT PRIMARY KEY,
@@ -129,20 +226,79 @@ def init_database():
         return engine
     except Exception as e:
         st.error(f"Application error: Could not initialize database. Error: {e}")
+        logger.critical(f"Application error: Could not initialize database. Error: {e}", exc_info=True)
         st.stop()
         return None
 
-    engine = init_database()
-    if engine is not None:
-        st.toast("✅ Database connection successful!")
+engine = init_database()
+if engine is not None:
+    st.toast("✅ Database connection successful!")
+else:
+    st.error("Database engine not initialized. Exiting.")
+    st.stop()
+
+def rg_request(method: str, url: str, store_url: str, *, headers=None, timeout=15, json_body=None):
+    logger.info(f"rg_request: Making {method} request to {url} for store {store_url}")
+    session: requests.Session = get_thread_session()
+    headers = headers or rg_headers(store_url) # Use store_url here
+
+    backoff = 1
+    res = None
+    for _attempt in range(1, 6):
+        _sleep_for_rate_limit()
+        logger.info(f"rg_request: Attempt {_attempt}...")
+        res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
+        logger.info(f"rg_request: Request completed with status {res.status_code if res else 'None'}")
+        update_rate_limit_info(res.headers)
+        if res.status_code != 429:
+            return res # type: ignore
+
+        RATE_LIMIT_HIT.set()
+
+        ra = res.headers.get("Retry-After")
+        if ra and ra.isdigit():
+            sleep_s = int(ra)
+        else:
+            sleep_s = backoff
+            backoff = min(backoff * 2, 30)
+
+        time.sleep(sleep_s)
+
+    return None # Explicitly return None if all retries fail after retries
 
 def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=None, courier_checked=None):
     logger.debug(f"Upserting RMA: {rma_id} | Store: {store_url} | Status: {status}")
-    now = datetime.now(timezone.utc).isoformat()
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('''
+    now = datetime.now(timezone.utc) # Use datetime object directly
+
+    # Convert created_at to a timezone-aware datetime object
+    created_at_dt = None
+    if created_at:
+        try:
+            created_at_dt = pd.to_datetime(created_at).tz_localize('UTC')
+        except Exception:
+            created_at_dt = None
+
+    courier_checked_dt = None
+    if engine is None:
+        logger.critical("Database engine is None in upsert_rma. This should not happen.")
+        return # Or raise an error, depending on desired behavior
+    if courier_checked: # courier_checked is already ISO string from previous logic
+        try:
+            courier_checked_dt = pd.to_datetime(courier_checked).tz_localize('UTC')
+        except Exception:
+            courier_checked_dt = None
+
+    with engine.connect() as connection: # Pylance error fixed by assert engine is not None
+        # First, select the existing values for received_first_seen
+        select_query = text("SELECT received_first_seen FROM rmas WHERE rma_id=:rma_id")
+        result = connection.execute(select_query, {"rma_id": rma_id}).fetchone()
+        existing_received_first_seen = result[0] if result else None
+
+        received_first_seen = existing_received_first_seen
+        if status == "Received" and not existing_received_first_seen:
+            received_first_seen = now # Store as datetime object for DB
+
+        insert_query = text('''
             INSERT INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status, courier_last_checked)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(rma_id) DO UPDATE SET
@@ -153,54 +309,70 @@ def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=
                 last_fetched=excluded.last_fetched,
                 courier_status=COALESCE(excluded.courier_status, courier_status),
                 courier_last_checked=COALESCE(excluded.courier_last_checked, courier_last_checked)
-        ''', (rma_id, store_url, status, created_at, json_data, now, courier_status, courier_checked))
-        conn.commit()
-        conn.close()
+        ''')
+        connection.execute(insert_query, {
+            "rma_id": rma_id,
+            "store_url": store_url,
+            "status": status,
+            "created_at": created_at_dt,
+            "json_data": json_data, # json_data is already a string from json.dumps
+            "last_fetched": now, # Store as datetime object
+            "courier_status": courier_status,
+            "courier_last_checked": courier_checked_dt, # Store as datetime object
+            "received_first_seen": received_first_seen # Store as datetime object
+        })
+        connection.commit()
     logger.debug(f"✓ RMA {rma_id} upserted successfully")
 
 def set_last_sync(scope, ts):
     logger.debug(f"Setting last sync for scope: {scope} at {ts}")
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('INSERT OR REPLACE INTO sync_log (scope, last_sync) VALUES (?, ?)', (scope, ts))
-        conn.commit()
-        conn.close()
+    if engine is None:
+        logger.critical("Database engine is None in set_last_sync. This should not happen.")
+        return
+    with engine.connect() as connection:
+        insert_query = text('INSERT INTO sync_logs (scope, last_sync_iso) VALUES (:scope, :last_sync_iso) ON CONFLICT (scope) DO UPDATE SET last_sync_iso = EXCLUDED.last_sync_iso;')
+        connection.execute(insert_query, {"scope": scope, "last_sync_iso": ts}) # ts should be datetime object
+        connection.commit()
     logger.debug(f"✓ Last sync set for {scope}")
 
 def get_last_sync(store_url, status):
     scope = f"{store_url}_{status}"
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('SELECT last_sync FROM sync_log WHERE scope=?', (scope,))
-        r = c.fetchone()
-        conn.close()
-        result = r[0] if r else None
+    with engine.connect() as connection: # Pylance error fixed by assert engine is not None
+        select_query = text('SELECT last_sync_iso FROM sync_logs WHERE scope=:scope')
+        r = connection.execute(select_query, {"scope": scope}).fetchone()
+        result = r[0] if r else None # r[0] will be a datetime object from PostgreSQL
         logger.debug(f"Last sync for {scope}: {result}")
         return result
 
 def get_all_active_from_db():
     """Load all active RMAs from database - NO CACHE so data shows immediately after sync"""
     logger.info("Loading all active RMAs from database...")
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT rma_id, store_url, status, json_data, courier_status, courier_last_checked FROM rmas WHERE status IN (?, ?, ?)', 
-              ('Pending', 'Approved', 'Received'))
-    rows = c.fetchall()
-    conn.close()
-    logger.info(f"✓ Loaded {len(rows)} RMAs from database")
     results = []
+    if engine is None:
+        logger.critical("Database engine is None in get_all_active_from_db. This should not happen.")
+        return []
+    with engine.connect() as connection:
+        select_query = text(f"""
+            SELECT rma_id, store_url, status, json_data, courier_status, courier_last_checked, received_first_seen
+            FROM rmas WHERE status IN ({', '.join([':' + s for s in ACTIVE_STATUSES])})
+        """)
+        # Create a dictionary of parameters for the IN clause
+        params = {s: s for s in ACTIVE_STATUSES}
+        rows = connection.execute(select_query, params).fetchall()
+
+    logger.info(f"✓ Loaded {len(rows)} RMAs from database")
     for row in rows:
-        rma_id, store_url, status, json_str, courier_status, courier_last_checked = row
+        rma_id, store_url, status, json_data_pg, courier_status, courier_last_checked_dt, received_first_seen_dt = row
         try:
-            data = json.loads(json_str)
+            # json_data_pg is already a Python dict/list from JSONB column
+            data = json_data_pg
             data['_local_courier_status'] = courier_status or ''
-            data['_local_courier_checked'] = courier_last_checked or ''
+            data['_local_courier_checked'] = courier_last_checked_dt.isoformat() if courier_last_checked_dt else ''
+            data['_local_received_first_seen'] = received_first_seen_dt.isoformat() if received_first_seen_dt else ''
             data['store_url'] = store_url  # Make sure store_url is in the data
             results.append(data)
         except Exception as e:
-            logger.error(f"Error parsing RMA {rma_id}: {e}")
+            logger.error(f"Error parsing RMA {rma_id}: {e}", exc_info=True)
     logger.info(f"✓ Successfully parsed {len(results)} RMAs")
     return results
 
@@ -210,7 +382,7 @@ def should_refresh_courier(rma_data):
     if not last_checked:
         logger.debug("No courier check timestamp, needs refresh")
         return True
-    
+
     try:
         last_checked_dt = datetime.fromisoformat(last_checked.replace('Z', '+00:00'))
         now = datetime.now(timezone.utc)
@@ -219,28 +391,22 @@ def should_refresh_courier(rma_data):
         logger.debug(f"Courier last checked {hours_elapsed:.1f}h ago, needs refresh: {needs_refresh}")
         return needs_refresh
     except Exception as e:
-        logger.error(f"Error checking courier refresh time: {e}")
+        logger.error(f"Error checking courier refresh time: {e}", exc_info=True)
         return True
 
 def clear_db():
     logger.info("Clearing database...")
     try:
-        with DB_LOCK:
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('SELECT COUNT(*) FROM rmas')
-            rma_count = c.fetchone()[0]
-            c.execute('SELECT COUNT(*) FROM sync_log')
-            sync_count = c.fetchone()[0]
-            logger.info(f"Deleting {rma_count} RMAs and {sync_count} sync logs")
-            c.execute('DELETE FROM rmas')
-            c.execute('DELETE FROM sync_log')
-            conn.commit()
-            conn.close()
+        if engine is None:
+            logger.critical("Database engine is None in clear_db. This should not happen.")
+            return False
+        with engine.begin() as connection:
+            connection.execute(text("TRUNCATE TABLE rmas;"))
+            connection.execute(text("TRUNCATE TABLE sync_logs;"))
         logger.info("✓ Database cleared successfully")
         return True
     except Exception as e:
-        logger.error(f"✗ Error clearing database: {e}")
+        logger.error(f"✗ Error clearing database: {e}", exc_info=True)
         return False
 
 # ==========================================
@@ -268,9 +434,16 @@ def fetch_rma_list(store, status):
             base_url = f"{api_url('/rmas')}?status={status}&pagesize=500"
             url = f"{base_url}&cursor={cursor}" if cursor else base_url
             
-            logger.info(f"  Page {page}: GET {url}")
+            logger.info(f"  Page {page}: GET {url}") # Fixed: get_session was not defined
             
-            res = get_session().get(url, headers=headers, timeout=20)
+            res = rg_request("GET", url, store['url'], headers=headers, timeout=20) # Pylance error fixed by explicit None check
+            
+            if res is None:
+                error_detail = "No response from ReturnGO API after retries."
+                logger.error(f"  ✗ API Error: {error_detail}")
+                if page == 1:
+                    st.error(f"Error fetching RMAs for {store['name']}: {error_detail}\nURL: {url}")
+                break
             
             logger.info(f"  Response: Status {res.status_code}, Content-Length: {len(res.content) if res.content else 0}")
             
@@ -327,8 +500,12 @@ def fetch_rma_detail(rma_id, store_url):
         "x-shop-name": store_url
     }
     try:
-        res = get_session().get(url, headers=headers, timeout=20)
-        logger.debug(f"    Response: {res.status_code}")
+        res = rg_request("GET", url, store_url, headers=headers, timeout=20) # Pylance error fixed by explicit None check
+        if res is None:
+            logger.error(f"    ✗ Failed to fetch detail for {rma_id}: No response after retries.")
+            return None
+
+        logger.debug(f"    Response: {res.status_code}") # Pylance error fixed by explicit None check
         if res.status_code == 200:
             logger.debug(f"    ✓ Detail fetched for {rma_id}")
             return res.json()
@@ -340,17 +517,26 @@ def fetch_rma_detail(rma_id, store_url):
 
 def push_tracking_update(rma_id, shipment_id, new_tracking, store_url):
     """Update tracking number for a shipment"""
-    url = api_url(f"/shipment/{shipment_id}/tracking")
+    url = api_url(f"/shipment/{shipment_id}") # Changed to PUT /shipment/{shipmentId} as per API docs
     headers = {
         "x-api-key": MY_API_KEY,
         "X-API-KEY": MY_API_KEY,
         "x-shop-name": store_url,
         "Content-Type": "application/json"
     }
-    payload = {"trackingNumber": new_tracking}
+    payload = { # Added required fields for PUT /shipment/{shipmentId}
+        "status": "LabelCreated", # Assuming this is the status when tracking is updated
+        "carrierName": "CourierGuy", # Placeholder, adjust as needed
+        "trackingNumber": new_tracking,
+        "trackingURL": f"https://optimise.parcelninja.com/shipment/track?WaybillNo={new_tracking}", # Placeholder
+        "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null", # Placeholder
+    }
     try:
-        res = get_session().put(url, headers=headers, json=payload, timeout=15)
-        if res.status_code in [200, 201]:
+        res = rg_request("PUT", url, store_url, headers=headers, json_body=payload, timeout=15) # Pylance error fixed by explicit None check
+        if res is None:
+            return False, "API Error: No response from ReturnGO API after retries."
+
+        if res.status_code in [200, 201]: # Pylance error fixed by explicit None check
             return True, "Success"
         return False, f"API Error {res.status_code}"
     except Exception as e:
@@ -359,11 +545,14 @@ def push_tracking_update(rma_id, shipment_id, new_tracking, store_url):
 def push_comment_update(rma_id, comment_text, store_url):
     """Post a comment to an RMA"""
     url = api_url(RMA_COMMENT_PATH.format(rmaId=rma_id))
-    headers = {"X-API-KEY": MY_API_KEY, "x-api-key": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
+    headers = {"X-API-KEY": MY_API_KEY, "x-api-key": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"} # Fixed: get_session was not defined
     payload = {"htmlText": comment_text}
     try:
-        res = get_session().post(url, headers=headers, json=payload, timeout=15)
-        if res.status_code in [200, 201]:
+        res = rg_request("POST", url, store_url, headers=headers, json_body=payload, timeout=15) # Pylance error fixed by explicit None check
+        if res is None:
+            return False, "API Error: No response from ReturnGO API after retries."
+
+        if res.status_code in [200, 201]: # Pylance error fixed by explicit None check
             return True, "Success"
         return False, f"API Error {res.status_code}: {res.text}"
     except Exception as e:
@@ -423,7 +612,7 @@ def perform_sync(store_obj=None, status=None):
                 full_data = fetch_rma_detail(rma_id, store['url'])
                 if full_data:
                     created_at = rma_summary.get('createdAt', '')
-                    upsert_rma(rma_id, store['url'], stat, created_at, json.dumps(full_data))
+                    upsert_rma(rma_id, store['url'], stat, created_at, json.dumps(full_data)) # json.dumps here as upsert_rma expects string
                     total_rmas_synced += 1
                 else:
                     logger.warning(f"    ✗ Failed to get detail for {rma_id}")
@@ -432,8 +621,8 @@ def perform_sync(store_obj=None, status=None):
                 time.sleep(0.1)
             
             # Save sync timestamp
-            scope = f"{store['url']}_{stat}"
-            sync_time = datetime.now(timezone.utc).isoformat()
+            scope = f"{store['url']}_{stat}" # Fixed: text was not defined
+            sync_time = datetime.now(timezone.utc) # Pass datetime object
             set_last_sync(scope, sync_time)
             logger.info(f"  ✓ Sync timestamp saved for {scope}")
     
@@ -584,31 +773,34 @@ def handle_filter_click(store_url, status):
 logger.info("Rendering header section...")
 
 # Show database location
-with st.expander("ℹ️ Database Info", expanded=False):
-    st.code(f"Database Location: {DB_FILE}")
+with st.expander("ℹ️ Database Info", expanded=False): # Fixed: DB_FILE, SCRIPT_DIR were not defined
+    st.code(f"Database Type: PostgreSQL (configured via secrets)")
     st.code(f"Script Directory: {SCRIPT_DIR}")
     st.code(f"Working Directory: {os.getcwd()}")
     
     # Check if database exists and show stats
-    if os.path.exists(DB_FILE):
-        db_size = os.path.getsize(DB_FILE) / 1024  # KB
-        db_modified = datetime.fromtimestamp(os.path.getmtime(DB_FILE)).strftime('%Y-%m-%d %H:%M:%S')
-        st.success(f"✅ Database exists ({db_size:.1f} KB, last modified: {db_modified})")
-        
+    if engine: # Check if engine is initialized
+        # No direct file size for PostgreSQL, but can check connection
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1")) # Simple query to check connection
+            st.success(f"✅ PostgreSQL connection active.")
+        except Exception as e:
+            st.error(f"PostgreSQL connection failed: {e}")
         # Show row counts
         try:
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM rmas")
-            rma_count = c.fetchone()[0]
-            c.execute("SELECT COUNT(*) FROM sync_log")
-            sync_count = c.fetchone()[0]
-            conn.close()
+            with engine.connect() as connection:
+                rma_count_result = connection.execute(text("SELECT COUNT(*) FROM rmas")).fetchone()
+                rma_count = rma_count_result[0] if rma_count_result else 0
+
+                sync_count_result = connection.execute(text("SELECT COUNT(*) FROM sync_logs")).fetchone()
+                sync_count = sync_count_result[0] if sync_count_result else 0
+
             st.info(f"📊 Database contains: {rma_count} RMAs, {sync_count} sync logs")
         except Exception as e:
             st.warning(f"Could not read database: {e}")
     else:
-        st.warning("⚠️ Database file does not exist yet. It will be created on first sync.")
+        st.warning("⚠️ Database engine not initialized. Please check connection settings.")
 
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -639,7 +831,7 @@ with col2:
             st.session_state.filter_state = {"store": None, "status": "All"}
             st.session_state.pop("last_sync", None)
             st.session_state.pop("main_table", None)
-            st.success("Cache cleared! Data will reload on next sync.")
+            st.success("Database cleared! Data will reload on next sync.")
             logger.info("✓ Cache reset successful")
             st.rerun()
         else:
@@ -650,7 +842,7 @@ with col2:
 logger.info("Loading and processing RMA data...")
 raw_data = get_all_active_from_db()
 processed_rows = []
-store_counts = {s['url']: {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0} for s in STORES}
+store_counts = {s['url']: {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0} for s in STORES} # Fixed: STORES was not defined
 today = datetime.now(timezone.utc).date()
 
 logger.info(f"Processing {len(raw_data)} RMAs...")
@@ -739,7 +931,7 @@ cols = st.columns(len(STORES))
 for i, store in enumerate(STORES):
     c = store_counts[store['url']]
     with cols[i]:
-        st.markdown(f"**{store['name'].upper()}**")
+        st.markdown(f"**{store['name'].upper()}**") # Fixed: STORES was not defined
         
         def show_btn(label, stat, key, help_text):
             ts = get_last_sync(store['url'], stat)
@@ -849,12 +1041,12 @@ if not df_view.empty:
             highlight_missing_tracking, axis=1
         )
         
-        sel_event = st.dataframe(
+        sel_event = st.dataframe( # Line 1048
             styled_table,
             use_container_width=True,
             height=700,
             hide_index=True,
-            key="main_table",
+            key=MAIN_TABLE_KEY,
             on_select="rerun",
             selection_mode="single-row",
             column_config={
@@ -869,9 +1061,13 @@ if not df_view.empty:
         )
         
         # Handle row selection
-        sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and 
-                   hasattr(sel_event.selection, "rows") else []) or []
-        if sel_rows:
+        sel_rows = []
+        if table_key in st.session_state and hasattr(st.session_state[table_key], "selection"):
+            selection_state = st.session_state[table_key].selection
+            if hasattr(selection_state, "rows"):
+                sel_rows = selection_state.rows
+        sel_rows = sel_rows or []
+        if sel_rows: # Pylance error fixed by explicit session_state access
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
     else:

@@ -36,7 +36,7 @@ try:
     # --- Accessing other secrets ---
     st.subheader("Accessing other secrets")
     st.write("You can also access other keys from your secrets file:")
-    st.write(f"The first 5 characters of your API key are: `{st.secrets['RETURNGO_API_KEY'][:5]}...`")
+    st.write(f"The first 5 characters of your API key are: `{st.secrets['RETURNGO_API_KEY_BOUNTY'][:5]}...`")
 
 except Exception as e:
     st.error(f"🔥 Failed to connect or query the database: {e}")
