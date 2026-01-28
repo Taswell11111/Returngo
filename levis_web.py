@@ -247,6 +247,7 @@ def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
 
 
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
+    logger.info(f"rg_request: Making {method} request to {url}")
     session: requests.Session = get_thread_session()
     headers = headers or rg_headers()
 
@@ -254,7 +255,9 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
     res = None
     for _attempt in range(1, 6):
         _sleep_for_rate_limit()
+        logger.info(f"rg_request: Attempt {_attempt}...")
         res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
+        logger.info(f"rg_request: Request completed with status {res.status_code if res else 'None'}")
         update_rate_limit_info(res.headers)
         if res.status_code != 429:
             return res # type: ignore
@@ -882,7 +885,9 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     since_dt = get_incremental_since(statuses, full)
 
     list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
+    st.info("Calling fetch_rma_list...")
     summaries, ok, err = fetch_rma_list(statuses, since_dt)
+    st.info(f"fetch_rma_list returned. ok={ok}, error='{err}'")
     if not ok:
         list_bar.empty()
         msg = f"ReturnGO sync failed: {err}" if err else "ReturnGO sync failed."
@@ -930,14 +935,23 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         successful_fetches = 0
         failed_fetches = 0
         bar = st.progress(0, text="Downloading Details (sequentially)...")
+        st.info(f"Starting to fetch details for {total} RMAs one by one...")
+
         for i, rid in enumerate(to_fetch):
             done = i + 1
-            bar.progress(done / total, text=f"Syncing: {done}/{total}")
+            st.info(f"[{done}/{total}] Fetching detail for RMA: {rid}")
+            bar.progress(done / total, text=f"Syncing: {done}/{total} ({rid})")
+
             result = fetch_rma_detail(rid, force=force)
+
             if result is not None:
+                st.info(f"[{done}/{total}] Successfully fetched {rid}.")
                 successful_fetches += 1
             else:
+                st.warning(f"[{done}/{total}] Failed to fetch {rid}.")
                 failed_fetches += 1
+
+        st.info("Finished fetching all details.")
         bar.empty()
 
     now = _now_utc()
