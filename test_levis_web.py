@@ -2156,7 +2156,7 @@ def main():
 
     # --- ACCESS SECRETS ---
     try:
-        MY_API_KEY = st.secrets["RETURNGO_API_KEY_BOUNTY_BOUNTY"]
+        MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
     except (FileNotFoundError, KeyError, AttributeError):
         MY_API_KEY = None
 

@@ -99,7 +99,7 @@ if engine is not None:
     
 # Load secrets
 try:
-    MY_API_KEY = st.secrets["RETURNGO_API_KEY_BOUNTY_BOUNTY"]
+    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
     PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
 except KeyError:
     st.error("Application error: Missing 'RETURNGO_API_KEY_BOUNTY_BOUNTY' in Streamlit secrets.")

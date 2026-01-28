@@ -10,7 +10,7 @@ def api_url(path: str) -> str:
     normalized = path.lstrip("/")
     return f"{BASE_URL}/{normalized}"
 
-MY_API_KEY = os.environ.get("RETURNGO_API_KEY_BOUNTY_BOUNTY")
+MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
 if not MY_API_KEY:
     print("Error: RETURNGO_API_KEY_BOUNTY_BOUNTY environment variable not set.")
     exit(1)
