@@ -43,12 +43,13 @@ def init_database():
     logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
     try:
         # Use standard PostgreSQL connection string from secrets
-        creds = st.secrets.connections.postgresql
-        user = creds.username
-        password = creds.password
-        host = creds.host
-        port = creds.port
-        database = creds.database
+        # Streamlit Cloud uses [connections.postgresql] but attributes might vary
+        creds = st.secrets["connections"]["postgresql"]
+        user = creds["username"]
+        password = creds["password"]
+        host = creds["host"]
+        port = creds["port"]
+        database = creds["database"]
         
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
         engine = create_engine(db_url)
