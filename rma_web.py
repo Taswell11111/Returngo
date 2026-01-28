@@ -88,8 +88,11 @@ DB_LOCK = threading.Lock() # Define DB_LOCK
 
 # Define STORES and ACTIVE_STATUSES
 STORES = [
-    {"name": "Bounty Apparel", "url": "bounty-apparel.myshopify.com"},
-    # Add other stores if applicable
+    {"name": "Diesel", "url": "diesel-dev-south-africa.myshopify.com"},
+    {"name": "Hurley", "url": "hurley-dev-south-africa.myshopify.com"},
+    {"name": "Jeep Apparel", "url": "jeep-apparel-dev-south-africa.myshopify.com"},
+    {"name": "Reebok", "url": "reebok-dev-south-africa.myshopify.com"},
+    {"name": "Superdry", "url": "superdry-dev-south-africa.myshopify.com"}
 ]
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
 
@@ -811,7 +814,7 @@ with st.expander("ℹ️ Database Info", expanded=False): # Fixed: DB_FILE, SCRI
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.title("Bounty Apparel ReturnGo RMAs 🔄️")
+    st.title("ReturnGo RMAs 🔄️")
     search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
     if search_query:
         logger.info(f"Search query: {search_query}")
