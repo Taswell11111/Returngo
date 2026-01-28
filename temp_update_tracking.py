@@ -174,6 +174,26 @@ def push_tracking_update(rma_id: str, shipment_id: str, new_tracking: str, store
         logger.error(f"Failed to update tracking for {rma_id}: {error_msg}")
         return False, error_msg
 
+def push_comment_update(rma_id: str, comment_text: str, store_url: str):
+    logger.info(f"Adding comment to RMA {rma_id} for store {store_url}")
+    url = api_url(RMA_COMMENT_PATH.format(rma_id=rma_id))
+    headers = {
+        "Content-Type": "application/json"
+    }
+    payload = {"htmlText": comment_text}
+    try:
+        res = rg_request("POST", url, store_url, headers=headers, json_body=payload, timeout=15)
+        if res is None:
+            return False, "API Error: No response from ReturnGO API after retries."
+
+        if res.status_code in [200, 201]:
+            logger.info(f"Comment added to RMA {rma_id} successfully.")
+            return True, "Success"
+        return False, f"API Error {res.status_code}: {res.text}"
+    except Exception as e:
+        logger.error(f"Exception adding comment to RMA {rma_id}: {e}")
+        return False, str(e)
+
 # --- Main execution logic ---
 if __name__ == "__main__":
     # Ensure MY_API_KEY_GLOBAL is set from environment
