@@ -3139,6 +3139,10 @@ def main(): # type: ignore
         st.error("Internal error: 'Requested date' column is missing from the data table. Please try syncing again.")
         st.stop()
 
+    if display_df.empty:
+        logger.info("display_df is empty, skipping sort and display.")
+        return # or st.stop() if this function is intended to stop the Streamlit app
+
     display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
     display_df["No"] = (display_df.index + 1).astype(str)
  # type: ignore
