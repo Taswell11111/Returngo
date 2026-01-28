@@ -102,7 +102,7 @@ try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
     PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
 except KeyError:
-    st.error("Application error: Missing 'RETURNGO_API_KEY_BOUNTY_BOUNTY' in Streamlit secrets.")
+    st.error("Application error: Missing 'RETURNGO_API_KEY' in Streamlit secrets.")
     st.stop()
     MY_API_KEY = None
     PARCEL_NINJA_TOKEN = None
