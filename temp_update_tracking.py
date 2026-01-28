@@ -3,6 +3,7 @@ import sys
 import requests
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -193,6 +194,7 @@ def push_comment_update(rma_id: str, comment_text: str, store_url: str):
     except Exception as e:
         logger.error(f"Exception adding comment to RMA {rma_id}: {e}")
         return False, str(e)
+
 
 # --- Main execution logic ---
 if __name__ == "__main__":

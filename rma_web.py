@@ -301,16 +301,17 @@ def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=
             received_first_seen = now # Store as datetime object for DB
 
         insert_query = text('''
-            INSERT INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status, courier_last_checked)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status, courier_last_checked, received_first_seen)
+            VALUES (:rma_id, :store_url, :status, :created_at, :json_data, :last_fetched, :courier_status, :courier_last_checked, :received_first_seen)
             ON CONFLICT(rma_id) DO UPDATE SET
                 store_url=excluded.store_url,
                 status=excluded.status,
                 created_at=excluded.created_at,
                 json_data=excluded.json_data,
                 last_fetched=excluded.last_fetched,
-                courier_status=COALESCE(excluded.courier_status, courier_status),
-                courier_last_checked=COALESCE(excluded.courier_last_checked, courier_last_checked)
+                courier_status=COALESCE(excluded.courier_status, rmas.courier_status),
+                courier_last_checked=COALESCE(excluded.courier_last_checked, rmas.courier_last_checked),
+                received_first_seen=excluded.received_first_seen
         ''')
         connection.execute(insert_query, {
             "rma_id": rma_id,
@@ -660,7 +661,7 @@ def days_since(date_str, today=None):
             today = datetime.now(timezone.utc).date()
         date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
         return (today - date_obj).days
-    except:
+    except Exception:
         return 999999
 
 def get_store_returngo_url(store_url, rma_id):
