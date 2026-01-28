@@ -883,17 +883,23 @@ if not df_view.empty:
             st.toast("Copied table to clipboard.", icon="📋")
         
         # Display Table with row highlighting
-        def highlight_missing_tracking(row):
-            if row.get("Status") == "Approved" and not row.get("DisplayTrack"):
-                return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * 12
-            return [""] * 12
-        
         display_df = df_view[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", 
                              "TrackingStatus", "Created", "Updated", "Days", 
                              "Store URL", "DisplayTrack", "shipment_id", "full_data", "_rma_id_text"]].copy()
         
-        styled_table = display_df[["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", 
-                                   "TrackingStatus", "Created", "Updated", "Days"]].style.apply(
+        # Columns to display in table (10 columns)
+        table_display_cols = ["No", "Store Name", "RMA ID", "Order", "Status", "TrackingNumber", 
+                              "TrackingStatus", "Created", "Updated", "Days"]
+        
+        # Styling function - must return styles for exactly 10 columns
+        def highlight_missing_tracking(row):
+            # Access the full display_df using the index
+            full_row = display_df.loc[row.name]
+            if full_row.get("Status") == "Approved" and not full_row.get("DisplayTrack"):
+                return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * 10
+            return [""] * 10
+        
+        styled_table = display_df[table_display_cols].style.apply(
             highlight_missing_tracking, axis=1
         )
         
