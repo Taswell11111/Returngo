@@ -340,6 +340,9 @@ def set_last_sync(scope, ts):
 
 def get_last_sync(store_url, status):
     scope = f"{store_url}_{status}"
+    if engine is None:
+        logger.critical("Database engine is None in get_last_sync. This should not happen.")
+        return None
     with engine.connect() as connection: # Pylance error fixed by assert engine is not None
         select_query = text('SELECT last_sync_iso FROM sync_logs WHERE scope=:scope')
         r = connection.execute(select_query, {"scope": scope}).fetchone()
