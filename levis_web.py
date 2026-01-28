@@ -40,27 +40,18 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 
 @st.cache_resource
 def init_database():
-    logger.info("Attempting to initialize database connection...")
+    logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
     try:
-        # initialize Python Connector object
-        connector = Connector()
-
-        # function to return the database connection object
-        def getconn():
-            conn = connector.connect(
-                st.secrets.connections.postgresql.instance_connection_name,
-                "pg8000",
-                user=st.secrets.connections.postgresql.username,
-                password=st.secrets.connections.postgresql.password,
-                db=st.secrets.connections.postgresql.database,
-            )
-            return conn
-
-        # create connection pool with 'creator' argument to our connection object
-        engine = create_engine(
-            "postgresql+pg8000://",
-            creator=getconn,
-        )
+        # Use standard PostgreSQL connection string from secrets
+        creds = st.secrets.connections.postgresql
+        user = creds.username
+        password = creds.password
+        host = creds.host
+        port = creds.port
+        database = creds.database
+        
+        db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        engine = create_engine(db_url)
         
         # Use a single transaction to create both tables
         with engine.begin() as connection:
@@ -85,7 +76,7 @@ def init_database():
             """))
         return engine
     except Exception as e:
-        st.error(f"Application error: Could not initialize database. Please check your connection secrets and ensure you have authenticated with Google Cloud CLI (gcloud auth application-default login). Error: {e}")
+        st.error(f"Application error: Could not initialize database. Error: {e}")
         st.stop()
         return None
 
@@ -3279,8 +3270,8 @@ def main(): # type: ignore
 
     def highlight_missing_tracking(row: pd.Series):
         if row.get("Current Status") == "Approved" and not row.get("DisplayTrack"):
-            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(display_cols)
-        return [""] * len(display_cols)
+            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
+        return [""] * len(row)
 
     styled_table = _table_df[display_cols].style.apply(highlight_missing_tracking, axis=1)
 
