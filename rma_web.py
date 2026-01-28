@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, text, Engine # Added Engine for type hinti
 # LOGGING SETUP
 # ==========================================
 # Create logs directory if it doesn't exist
-LOG_DIR = r"C:\Users\Taswell\OneDrive\Documents\GitHub\Returngo\Connection"
+LOG_DIR = "Connection"
 try:
     os.makedirs(LOG_DIR, exist_ok=True)
     log_dir_created = True
