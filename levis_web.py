@@ -43,7 +43,6 @@ def init_database():
     logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
     try:
         # Use standard PostgreSQL connection string from secrets
-        # Streamlit Cloud uses [connections.postgresql] but attributes might vary
         creds = st.secrets["connections"]["postgresql"]
         user = creds["username"]
         password = creds["password"]
@@ -52,7 +51,19 @@ def init_database():
         database = creds["database"]
         
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        engine = create_engine(db_url)
+        # Using a faster connection timeout and pre-ping to detect broken connections
+        # Increased timeout and added keepalives to handle unstable network environments
+        engine = create_engine(
+            db_url, 
+            pool_pre_ping=True, 
+            connect_args={
+                "connect_timeout": 60,
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5
+            }
+        )
         
         # Use a single transaction to create both tables
         with engine.begin() as connection:
@@ -81,7 +92,6 @@ def init_database():
         st.stop()
         return None
 
-with st.spinner("Running init_database()..."):
     engine = init_database()
     if engine is not None:
         st.toast("✅ Database connection successful!")
@@ -2174,6 +2184,30 @@ def main(): # type: ignore
         height=0,
     )
 
+
+    # ==========================================
+    # 0. UI: FETCH (API) vs SYNC (UI/DB)
+    # ==========================================
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("Dashboard Operations")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Sync Dashboard", help="Reload data from database cache"):
+                st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
+                st.toast("✅ Dashboard synced from database")
+                st.rerun()
+                
+        with col2:
+            if st.button("📡 Fetch Data", help="Fetch fresh data from ReturnGO API"):
+                st.session_state["pending_fetch"] = True
+                st.rerun()
+
+        if st.session_state.get("pending_fetch"):
+            st.session_state["pending_fetch"] = False
+            with st.spinner("Fetching fresh data from ReturnGO API..."):
+                perform_sync()
 
     # ==========================================
     # 1b. STYLING + STICKY HEADER

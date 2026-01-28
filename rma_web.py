@@ -8,7 +8,6 @@ import os
 import threading
 import time
 import re
-import sys
 import logging
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
@@ -50,7 +49,7 @@ logger.info("RMA WEB APPLICATION STARTING")
 logger.info(f"Log file: {log_filename}")
 logger.info(f"Log directory created: {log_dir_created}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
-logger.info(f"Python version: {sys.version}")
+logger.info(f"Python version: {os.sys.version}")
 logger.info("=" * 100)
 
 # ==========================================
@@ -81,141 +80,61 @@ logger.info(f"API Key present: {MY_API_KEY[:8]}..." if MY_API_KEY else "API Key:
 CACHE_EXPIRY_HOURS = 4
 COURIER_REFRESH_HOURS = 12
 
-# Database file location - stored in same directory as this script
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if os.path.abspath(__file__) != "" else os.getcwd()
-DB_FILE = os.path.join(SCRIPT_DIR, "rma_cache.db")
-DB_LOCK = threading.Lock()
-
-logger.info(f"Database file will be stored at: {DB_FILE}")
-logger.info(f"Current working directory: {os.getcwd()}")
-logger.info(f"Script directory: {SCRIPT_DIR}")
-
-STORES = [
-    {"name": "Diesel", "url": "diesel-dev-south-africa.myshopify.com"},
-    {"name": "Hurley", "url": "hurley-dev-south-africa.myshopify.com"},
-    {"name": "Jeep Apparel", "url": "jeep-apparel-dev-south-africa.myshopify.com"},
-    {"name": "Reebok", "url": "reebok-dev-south-africa.myshopify.com"},
-    {"name": "Superdry", "url": "superdry-dev-south-africa.myshopify.com"}
-]
-
-logger.info(f"Configured {len(STORES)} stores:")
-for store in STORES:
-    logger.info(f"  - {store['name']}: {store['url']}")
-
-ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
-logger.info(f"Active statuses: {ACTIVE_STATUSES}")
-
-# --- STYLING ---
-st.markdown("""
-    <style>
-    .stApp { background-color: #0e1117; color: white; }
-    
-    div.stButton > button {
-        width: 100%;
-        border: 1px solid #4b5563;
-        background-color: #1f2937;
-        color: white;
-        border-radius: 8px;
-        padding: 12px 24px;
-        font-size: 14px;
-        font-weight: bold;
-    }
-    div.stButton > button:hover {
-        border-color: #1f538d; 
-        color: #1f538d;
-    }
-    div[data-testid="stDialog"] {
-        background-color: #1a1a1a;
-        border: 1px solid #4b5563;
-    }
-    .sync-time {
-        font-size: 0.8em;
-        color: #9ca3af;
-        text-align: center;
-        margin-top: 0;
-        margin-bottom: 6px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-    }
-    .rows-count {
-        font-size: 1em;
-        color: #d1d5db;
-        text-align: left;
-    }
-    .rows-count .value {
-        font-weight: bold;
-        color: #60a5fa;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# Helper for Session
 @st.cache_resource
-def get_session():
-    logger.info("Creating HTTP session with retry logic...")
-    session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-    session.mount('https://', HTTPAdapter(max_retries=retries))
-    logger.info("✓ HTTP session created successfully")
-    return session
-
-# ==========================================
-# 2. DATABASE MANAGER
-# ==========================================
-def init_db():
-    logger.info("Initializing database...")
-    logger.info(f"Database file: {DB_FILE}")
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        logger.debug("Creating rmas table if not exists...")
-        c.execute('''
+def init_database():
+    logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
+    try:
+        # Use standard PostgreSQL connection string from secrets
+        creds = st.secrets["connections"]["postgresql"]
+        user = creds["username"]
+        password = creds["password"]
+        host = creds["host"]
+        port = creds["port"]
+        database = creds["database"]
+        
+        db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        engine = create_engine(
+            db_url, 
+            pool_pre_ping=True, 
+            connect_args={
+                "connect_timeout": 60,
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5
+            }
+        )
+        
+        # Use a single transaction to create both tables
+        with engine.begin() as connection:
+            connection.execute(text("""
             CREATE TABLE IF NOT EXISTS rmas (
                 rma_id TEXT PRIMARY KEY,
                 store_url TEXT,
                 status TEXT,
-                created_at TEXT,
-                json_data TEXT,
-                last_fetched TEXT,
+                created_at TIMESTAMP WITH TIME ZONE,
+                json_data JSONB,
+                last_fetched TIMESTAMP WITH TIME ZONE,
                 courier_status TEXT,
-                courier_last_checked TEXT
-            )
-        ''')
-        # Check if courier columns exist and add them if not
-        try:
-            c.execute("SELECT courier_status FROM rmas LIMIT 1")
-            logger.debug("✓ courier_status column exists")
-        except sqlite3.OperationalError:
-            logger.warning("courier_status column missing, adding...")
-            try:
-                c.execute("ALTER TABLE rmas ADD COLUMN courier_status TEXT")
-                logger.info("✓ Added courier_status column")
-            except:
-                logger.error("✗ Failed to add courier_status column")
-        try:
-            c.execute("SELECT courier_last_checked FROM rmas LIMIT 1")
-            logger.debug("✓ courier_last_checked column exists")
-        except sqlite3.OperationalError:
-            logger.warning("courier_last_checked column missing, adding...")
-            try:
-                c.execute("ALTER TABLE rmas ADD COLUMN courier_last_checked TEXT")
-                logger.info("✓ Added courier_last_checked column")
-            except:
-                logger.error("✗ Failed to add courier_last_checked column")
-        
-        logger.debug("Creating sync_log table if not exists...")
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS sync_log (
+                courier_last_checked TIMESTAMP WITH TIME ZONE,
+                received_first_seen TIMESTAMP WITH TIME ZONE
+            );
+            """))
+            connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS sync_logs (
                 scope TEXT PRIMARY KEY,
-                last_sync TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
-        logger.info("✓ Database initialized successfully")
+                last_sync_iso TIMESTAMP WITH TIME ZONE
+            );
+            """))
+        return engine
+    except Exception as e:
+        st.error(f"Application error: Could not initialize database. Error: {e}")
+        st.stop()
+        return None
 
-logger.info("Calling init_db()...")
-init_db()
+    engine = init_database()
+    if engine is not None:
+        st.toast("✅ Database connection successful!")
 
 def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=None, courier_checked=None):
     logger.debug(f"Upserting RMA: {rma_id} | Store: {store_url} | Status: {status}")
@@ -554,7 +473,33 @@ def get_store_returngo_url(store_url, rma_id):
     return f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}"
 
 # ==========================================
-# 6. FRONTEND UI LOGIC
+# 6. UI: FETCH (API) vs SYNC (UI/DB)
+# ==========================================
+
+def render_sync_dashboard_ui():
+    """Sync UI: Loads from database cache."""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Dashboard Operations")
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if st.button("🔄 Sync Dashboard", help="Reload data from database cache"):
+            st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
+            st.toast("✅ Dashboard synced from database")
+            st.rerun()
+            
+    with col2:
+        if st.button("📡 Fetch Data", help="Fetch fresh data from ReturnGO API"):
+            st.session_state["pending_fetch"] = True
+            st.rerun()
+
+    if st.session_state.get("pending_fetch"):
+        st.session_state["pending_fetch"] = False
+        with st.spinner("Fetching fresh data from ReturnGO API..."):
+            perform_sync()
+
+# ==========================================
+# 7. FRONTEND UI LOGIC
 # ==========================================
 logger.info("-" * 100)
 logger.info("INITIALIZING UI")
@@ -796,18 +741,18 @@ for i, store in enumerate(STORES):
     with cols[i]:
         st.markdown(f"**{store['name'].upper()}**")
         
-        def show_btn(label, stat, key, help_text, counts):
+        def show_btn(label, stat, key, help_text):
             ts = get_last_sync(store['url'], stat)
             st.markdown(
                 f"<div class='sync-time'>Updated: {ts[11:19] if ts else '-'}</div>",
                 unsafe_allow_html=True,
             )
-            if st.button(f"{label}\n{counts[stat]}", key=key, help=help_text):
+            if st.button(f"{label}\n{c[stat]}", key=key, help=help_text):
                 handle_filter_click(store['url'], stat)
         
-        show_btn("Pending", "Pending", f"p_{i}", f"Sync and view {c['Pending']} pending RMAs for {store['name']}", c)
-        show_btn("Approved", "Approved", f"a_{i}", f"Sync and view {c['Approved']} approved RMAs for {store['name']}", c)
-        show_btn("Received", "Received", f"r_{i}", f"Sync and view {c['Received']} received RMAs for {store['name']}", c)
+        show_btn("Pending", "Pending", f"p_{i}", f"Sync and view {c['Pending']} pending RMAs for {store['name']}")
+        show_btn("Approved", "Approved", f"a_{i}", f"Sync and view {c['Approved']} approved RMAs for {store['name']}")
+        show_btn("Received", "Received", f"r_{i}", f"Sync and view {c['Received']} received RMAs for {store['name']}")
         
         if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}", help=f"Filter {c['NoTrack']} approved RMAs without tracking numbers"):
             handle_filter_click(store['url'], "NoTrack")
@@ -924,8 +869,8 @@ if not df_view.empty:
         )
         
         # Handle row selection
-        selection = sel_event.get("selection", {})
-        sel_rows = selection.get("rows", [])
+        sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and 
+                   hasattr(sel_event.selection, "rows") else []) or []
         if sel_rows:
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
