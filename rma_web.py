@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import re
+import sys
 import logging
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
@@ -49,7 +50,7 @@ logger.info("RMA WEB APPLICATION STARTING")
 logger.info(f"Log file: {log_filename}")
 logger.info(f"Log directory created: {log_dir_created}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
-logger.info(f"Python version: {os.sys.version}")
+logger.info(f"Python version: {sys.version}")
 logger.info("=" * 100)
 
 # ==========================================
@@ -795,18 +796,18 @@ for i, store in enumerate(STORES):
     with cols[i]:
         st.markdown(f"**{store['name'].upper()}**")
         
-        def show_btn(label, stat, key, help_text):
+        def show_btn(label, stat, key, help_text, counts):
             ts = get_last_sync(store['url'], stat)
             st.markdown(
                 f"<div class='sync-time'>Updated: {ts[11:19] if ts else '-'}</div>",
                 unsafe_allow_html=True,
             )
-            if st.button(f"{label}\n{c[stat]}", key=key, help=help_text):
+            if st.button(f"{label}\n{counts[stat]}", key=key, help=help_text):
                 handle_filter_click(store['url'], stat)
         
-        show_btn("Pending", "Pending", f"p_{i}", f"Sync and view {c['Pending']} pending RMAs for {store['name']}")
-        show_btn("Approved", "Approved", f"a_{i}", f"Sync and view {c['Approved']} approved RMAs for {store['name']}")
-        show_btn("Received", "Received", f"r_{i}", f"Sync and view {c['Received']} received RMAs for {store['name']}")
+        show_btn("Pending", "Pending", f"p_{i}", f"Sync and view {c['Pending']} pending RMAs for {store['name']}", c)
+        show_btn("Approved", "Approved", f"a_{i}", f"Sync and view {c['Approved']} approved RMAs for {store['name']}", c)
+        show_btn("Received", "Received", f"r_{i}", f"Sync and view {c['Received']} received RMAs for {store['name']}", c)
         
         if st.button(f"No Track\n{c['NoTrack']}", key=f"n_{i}", help=f"Filter {c['NoTrack']} approved RMAs without tracking numbers"):
             handle_filter_click(store['url'], "NoTrack")
@@ -923,8 +924,8 @@ if not df_view.empty:
         )
         
         # Handle row selection
-        sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and 
-                   hasattr(sel_event.selection, "rows") else []) or []
+        selection = sel_event.get("selection", {})
+        sel_rows = selection.get("rows", [])
         if sel_rows:
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
