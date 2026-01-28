@@ -40,29 +40,29 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 
 @st.cache_resource
 def init_database():
-    logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
+    logger.info("Attempting to initialize database connection via Google Cloud SQL Connector...")
     try:
-        # Use standard PostgreSQL connection string from secrets
-        creds = st.secrets["connections"]["postgresql"]
-        user = creds["username"]
-        password = creds["password"]
-        host = creds["host"]
-        port = creds["port"]
-        database = creds["database"]
-        
-        db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        # Using a faster connection timeout and pre-ping to detect broken connections
-        # Increased timeout and added keepalives to handle unstable network environments
+        # Use Google Cloud SQL Connector for secure, reliable connections
+        connector = Connector()
+
+        # Function to create a connection using the connector
+        def getconn():
+            creds = st.secrets["connections"]["postgresql"]
+            conn = connector.connect(
+                creds["instance_connection_name"], # e.g., "project:region:instance"
+                "pg8000",
+                user=creds["username"],
+                password=creds["password"],
+                db=creds["database"],
+                enable_iam_auth=False # Set to True if using IAM database authentication
+            )
+            return conn
+
+        # Create the engine with the connector
         engine = create_engine(
-            db_url, 
-            pool_pre_ping=True, 
-            connect_args={
-                "connect_timeout": 60,
-                "keepalives": 1,
-                "keepalives_idle": 30,
-                "keepalives_interval": 10,
-                "keepalives_count": 5
-            }
+            "postgresql+pg8000://",
+            creator=getconn,
+            pool_pre_ping=True,
         )
         
         # Use a single transaction to create both tables
@@ -88,7 +88,7 @@ def init_database():
             """))
         return engine
     except Exception as e:
-        st.error(f"Application error: Could not initialize database. Error: {e}")
+        st.error(f"Application error: Could not initialize database using Cloud SQL Connector. Error: {e}")
         st.stop()
         return None
         
