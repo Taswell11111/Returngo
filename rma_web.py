@@ -228,56 +228,92 @@ def clear_db():
 # 3. API CALLS
 # ==========================================
 def fetch_rma_list(store, status):
-    url = f"{api_url}/rmas/open?shop={store['url']}&status={status}"
-    headers = {"x-api-key": MY_API_KEY}
-    try:
-        res = get_session().get(url, headers=headers, timeout=20)
-        if res.status_code == 200:
+    """Fetch all RMAs for a given store and status with pagination"""
+    all_rmas = []
+    cursor = None
+    page = 1
+    max_pages = 100  # Safety limit
+    
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
+    
+    while page <= max_pages:
+        try:
+            # Build URL with cursor pagination
+            base_url = f"{api_url('/rmas')}?status={status}&pagesize=500"
+            url = f"{base_url}&cursor={cursor}" if cursor else base_url
+            
+            res = get_session().get(url, headers=headers, timeout=20)
+            
+            if res.status_code != 200:
+                if page == 1:  # Only error on first page
+                    st.error(f"Error fetching RMAs for {store['name']}: {res.status_code}")
+                break
+            
             data = res.json()
-            return data.get('data', [])
-        else:
-            st.error(f"Error fetching RMAs: {res.status_code}")
-            return []
-    except Exception as e:
-        st.error(f"Exception: {e}")
-        return []
+            rmas = data.get("rmas", [])
+            
+            if not rmas:
+                break
+            
+            all_rmas.extend(rmas)
+            
+            # Check for next page
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
+                
+            page += 1
+            
+        except Exception as e:
+            if page == 1:  # Only error on first page
+                st.error(f"Exception fetching RMAs for {store['name']}: {e}")
+            break
+    
+    return all_rmas
 
 def fetch_rma_detail(rma_id, store_url):
-    url = f"{api_url}/rma/{rma_id}"
-    headers = {"x-api-key": MY_API_KEY, "x-shop-name": store_url}
+    """Fetch detailed RMA data"""
+    url = api_url(f"/rma/{rma_id}")
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
     try:
         res = get_session().get(url, headers=headers, timeout=20)
         if res.status_code == 200:
             return res.json()
         return None
-    except: return None
+    except:
+        return None
 
 def push_tracking_update(rma_id, shipment_id, new_tracking, store_url):
-    url = f"{api_url}/shipment/{shipment_id}/tracking"
-    headers = {"x-api-key": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
+    """Update tracking number for a shipment"""
+    url = api_url(f"/shipment/{shipment_id}/tracking")
+    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
     payload = {"trackingNumber": new_tracking}
     try:
         res = get_session().put(url, headers=headers, json=payload, timeout=15)
         if res.status_code in [200, 201]:
             return True, "Success"
         return False, f"API Error {res.status_code}"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        return False, str(e)
 
 def push_comment_update(rma_id, comment_text, store_url):
-    url = f"{api_url}{RMA_COMMENT_PATH.format(rmaId=rma_id)}"
-    headers = {"x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
+    """Post a comment to an RMA"""
+    url = api_url(RMA_COMMENT_PATH.format(rmaId=rma_id))
+    headers = {"X-API-KEY": MY_API_KEY, "x-api-key": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
     payload = {"htmlText": comment_text}
     try:
         res = get_session().post(url, headers=headers, json=payload, timeout=15)
         if res.status_code in [200, 201]:
             return True, "Success"
         return False, f"API Error {res.status_code}: {res.text}"
-    except Exception as e: return False, str(e)
+    except Exception as e:
+        return False, str(e)
 
 # ==========================================
 # 4. SYNC LOGIC
 # ==========================================
 def perform_sync(store_obj=None, status=None):
+    """Sync RMAs from ReturnGO API"""
     st.cache_data.clear()
     
     stores_to_sync = [store_obj] if store_obj else STORES
@@ -288,32 +324,50 @@ def perform_sync(store_obj=None, status=None):
     
     total_tasks = len(stores_to_sync) * len(statuses_to_sync)
     current_task = 0
+    total_rmas_synced = 0
     
     for store in stores_to_sync:
         for stat in statuses_to_sync:
             current_task += 1
-            progress_placeholder.progress(current_task / total_tasks)
-            status_text.text(f"Syncing {store['name']} - {stat}...")
+            progress_pct = current_task / total_tasks
             
+            status_text.text(f"Syncing {store['name']} - {stat}... ({current_task}/{total_tasks})")
+            progress_placeholder.progress(progress_pct)
+            
+            # Fetch list of RMAs
             rma_list = fetch_rma_list(store, stat)
             
-            for rma_summary in rma_list:
+            # Fetch details for each RMA
+            for idx, rma_summary in enumerate(rma_list):
                 rma_id = rma_summary.get('rmaId')
                 if not rma_id:
                     continue
+                
+                # Update sub-progress within this store/status combo
+                sub_progress_text = f"Syncing {store['name']} - {stat}... ({idx+1}/{len(rma_list)} RMAs)"
+                status_text.text(sub_progress_text)
                 
                 full_data = fetch_rma_detail(rma_id, store['url'])
                 if full_data:
                     created_at = rma_summary.get('createdAt', '')
                     upsert_rma(rma_id, store['url'], stat, created_at, json.dumps(full_data))
+                    total_rmas_synced += 1
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.1)
             
+            # Save sync timestamp
             scope = f"{store['url']}_{stat}"
             set_last_sync(scope, datetime.now(timezone.utc).isoformat())
-            time.sleep(0.5)
     
+    # Clean up progress indicators
     progress_placeholder.empty()
     status_text.empty()
+    
+    # Show completion message
+    st.toast(f"✅ Sync Complete! {total_rmas_synced} RMAs synced.", icon="🔄")
     st.session_state['show_toast'] = True
+    time.sleep(0.5)
     st.rerun()
 
 # ==========================================
