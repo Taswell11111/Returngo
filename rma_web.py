@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import re
+import logging
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -16,19 +17,65 @@ from typing import Optional, Dict, Any, Set
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 # ==========================================
+# LOGGING SETUP
+# ==========================================
+# Create logs directory if it doesn't exist
+LOG_DIR = r"C:\Users\Taswell\OneDrive\Documents\GitHub\Returngo\Connection"
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_dir_created = True
+except Exception as e:
+    LOG_DIR = "."  # Fallback to current directory
+    log_dir_created = False
+
+# Create log filename with timestamp
+log_filename = os.path.join(LOG_DIR, f"rma_web_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+
+# Configure logging to both console and file
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_filename, mode='w', encoding='utf-8')
+    ],
+    force=True
+)
+logger = logging.getLogger(__name__)
+
+# Log startup
+logger.info("=" * 100)
+logger.info("RMA WEB APPLICATION STARTING")
+logger.info(f"Log file: {log_filename}")
+logger.info(f"Log directory created: {log_dir_created}")
+logger.info(f"Timestamp: {datetime.now().isoformat()}")
+logger.info(f"Python version: {os.sys.version}")
+logger.info("=" * 100)
+
+# ==========================================
 # 1. CONFIGURATION
 # ==========================================
+logger.info("Setting up page configuration...")
 st.set_page_config(page_title="Bounty Apparel ReturnGo RMAs", layout="wide", page_icon="🔄️")
 
 # ACCESS SECRETS
+logger.info("Loading API credentials...")
 try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+    logger.info("✓ API Key loaded from secrets")
 except (FileNotFoundError, KeyError):
     MY_API_KEY = os.environ.get("RETURNGO_API_KEY")
+    if MY_API_KEY:
+        logger.info("✓ API Key loaded from environment")
+    else:
+        logger.error("✗ API Key not found in secrets or environment")
 
 if not MY_API_KEY:
+    logger.critical("FATAL: API Key not found! Application stopped.")
     st.error("API Key not found! Please set 'RETURNGO_API_KEY' in secrets or env vars.")
     st.stop()
+
+logger.info(f"API Key present: {MY_API_KEY[:8]}..." if MY_API_KEY else "API Key: None")
 
 CACHE_EXPIRY_HOURS = 4
 COURIER_REFRESH_HOURS = 12
@@ -43,7 +90,12 @@ STORES = [
     {"name": "Superdry", "url": "superdry-dev-south-africa.myshopify.com"}
 ]
 
+logger.info(f"Configured {len(STORES)} stores:")
+for store in STORES:
+    logger.info(f"  - {store['name']}: {store['url']}")
+
 ACTIVE_STATUSES = ["Pending", "Approved", "Received"]
+logger.info(f"Active statuses: {ACTIVE_STATUSES}")
 
 # --- STYLING ---
 st.markdown("""
@@ -92,18 +144,23 @@ st.markdown("""
 # Helper for Session
 @st.cache_resource
 def get_session():
+    logger.info("Creating HTTP session with retry logic...")
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
+    logger.info("✓ HTTP session created successfully")
     return session
 
 # ==========================================
 # 2. DATABASE MANAGER
 # ==========================================
 def init_db():
+    logger.info("Initializing database...")
+    logger.info(f"Database file: {DB_FILE}")
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
+        logger.debug("Creating rmas table if not exists...")
         c.execute('''
             CREATE TABLE IF NOT EXISTS rmas (
                 rma_id TEXT PRIMARY KEY,
@@ -119,17 +176,26 @@ def init_db():
         # Check if courier columns exist and add them if not
         try:
             c.execute("SELECT courier_status FROM rmas LIMIT 1")
+            logger.debug("✓ courier_status column exists")
         except sqlite3.OperationalError:
+            logger.warning("courier_status column missing, adding...")
             try:
                 c.execute("ALTER TABLE rmas ADD COLUMN courier_status TEXT")
-            except: pass
+                logger.info("✓ Added courier_status column")
+            except:
+                logger.error("✗ Failed to add courier_status column")
         try:
             c.execute("SELECT courier_last_checked FROM rmas LIMIT 1")
+            logger.debug("✓ courier_last_checked column exists")
         except sqlite3.OperationalError:
+            logger.warning("courier_last_checked column missing, adding...")
             try:
                 c.execute("ALTER TABLE rmas ADD COLUMN courier_last_checked TEXT")
-            except: pass
+                logger.info("✓ Added courier_last_checked column")
+            except:
+                logger.error("✗ Failed to add courier_last_checked column")
         
+        logger.debug("Creating sync_log table if not exists...")
         c.execute('''
             CREATE TABLE IF NOT EXISTS sync_log (
                 scope TEXT PRIMARY KEY,
@@ -138,10 +204,13 @@ def init_db():
         ''')
         conn.commit()
         conn.close()
+        logger.info("✓ Database initialized successfully")
 
+logger.info("Calling init_db()...")
 init_db()
 
 def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=None, courier_checked=None):
+    logger.debug(f"Upserting RMA: {rma_id} | Store: {store_url} | Status: {status}")
     now = datetime.now(timezone.utc).isoformat()
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
@@ -160,14 +229,17 @@ def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=
         ''', (rma_id, store_url, status, created_at, json_data, now, courier_status, courier_checked))
         conn.commit()
         conn.close()
+    logger.debug(f"✓ RMA {rma_id} upserted successfully")
 
 def set_last_sync(scope, ts):
+    logger.debug(f"Setting last sync for scope: {scope} at {ts}")
     with DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('INSERT OR REPLACE INTO sync_log (scope, last_sync) VALUES (?, ?)', (scope, ts))
         conn.commit()
         conn.close()
+    logger.debug(f"✓ Last sync set for {scope}")
 
 def get_last_sync(store_url, status):
     scope = f"{store_url}_{status}"
@@ -177,16 +249,20 @@ def get_last_sync(store_url, status):
         c.execute('SELECT last_sync FROM sync_log WHERE scope=?', (scope,))
         r = c.fetchone()
         conn.close()
-        return r[0] if r else None
+        result = r[0] if r else None
+        logger.debug(f"Last sync for {scope}: {result}")
+        return result
 
 @st.cache_data(ttl=3600)
 def get_all_active_from_db():
+    logger.info("Loading all active RMAs from database...")
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT rma_id, store_url, status, json_data, courier_status, courier_last_checked FROM rmas WHERE status IN (?, ?, ?)', 
               ('Pending', 'Approved', 'Received'))
     rows = c.fetchall()
     conn.close()
+    logger.info(f"✓ Loaded {len(rows)} RMAs from database")
     results = []
     for row in rows:
         rma_id, store_url, status, json_str, courier_status, courier_last_checked = row
@@ -195,46 +271,68 @@ def get_all_active_from_db():
             data['_local_courier_status'] = courier_status or ''
             data['_local_courier_checked'] = courier_last_checked or ''
             results.append(data)
-        except: pass
+        except Exception as e:
+            logger.error(f"Error parsing RMA {rma_id}: {e}")
+    logger.info(f"✓ Successfully parsed {len(results)} RMAs")
     return results
 
 def should_refresh_courier(rma_data):
     """Check if courier status needs refreshing based on time elapsed"""
     last_checked = rma_data.get('_local_courier_checked')
     if not last_checked:
+        logger.debug("No courier check timestamp, needs refresh")
         return True
     
     try:
         last_checked_dt = datetime.fromisoformat(last_checked.replace('Z', '+00:00'))
         now = datetime.now(timezone.utc)
         hours_elapsed = (now - last_checked_dt).total_seconds() / 3600
-        return hours_elapsed >= COURIER_REFRESH_HOURS
-    except:
+        needs_refresh = hours_elapsed >= COURIER_REFRESH_HOURS
+        logger.debug(f"Courier last checked {hours_elapsed:.1f}h ago, needs refresh: {needs_refresh}")
+        return needs_refresh
+    except Exception as e:
+        logger.error(f"Error checking courier refresh time: {e}")
         return True
 
 def clear_db():
+    logger.info("Clearing database...")
     try:
         with DB_LOCK:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
+            c.execute('SELECT COUNT(*) FROM rmas')
+            rma_count = c.fetchone()[0]
+            c.execute('SELECT COUNT(*) FROM sync_log')
+            sync_count = c.fetchone()[0]
+            logger.info(f"Deleting {rma_count} RMAs and {sync_count} sync logs")
             c.execute('DELETE FROM rmas')
             c.execute('DELETE FROM sync_log')
             conn.commit()
             conn.close()
+        logger.info("✓ Database cleared successfully")
         return True
-    except: return False
+    except Exception as e:
+        logger.error(f"✗ Error clearing database: {e}")
+        return False
 
 # ==========================================
 # 3. API CALLS
 # ==========================================
 def fetch_rma_list(store, status):
     """Fetch all RMAs for a given store and status with pagination"""
+    logger.info(f"→ Fetching RMA list for {store['name']} ({store['url']}) - Status: {status}")
     all_rmas = []
     cursor = None
     page = 1
     max_pages = 100  # Safety limit
     
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store['url']}
+    # Include both casings of API key header for compatibility
+    headers = {
+        "x-api-key": MY_API_KEY,
+        "X-API-KEY": MY_API_KEY,
+        "x-shop-name": store['url']
+    }
+    logger.debug(f"Headers prepared: x-shop-name={store['url']}, API key present")
     
     while page <= max_pages:
         try:
@@ -242,51 +340,85 @@ def fetch_rma_list(store, status):
             base_url = f"{api_url('/rmas')}?status={status}&pagesize=500"
             url = f"{base_url}&cursor={cursor}" if cursor else base_url
             
+            logger.info(f"  Page {page}: GET {url}")
+            
             res = get_session().get(url, headers=headers, timeout=20)
             
+            logger.info(f"  Response: Status {res.status_code}, Content-Length: {len(res.content) if res.content else 0}")
+            
             if res.status_code != 200:
-                if page == 1:  # Only error on first page
-                    st.error(f"Error fetching RMAs for {store['name']}: {res.status_code}")
+                error_detail = ""
+                try:
+                    error_detail = res.text[:500] if res.text else "(empty response)"
+                except:
+                    pass
+                logger.error(f"  ✗ API Error: {res.status_code}")
+                logger.error(f"  Response body: {error_detail}")
+                
+                if page == 1:  # Only show UI error on first page
+                    st.error(f"Error fetching RMAs for {store['name']}: {res.status_code}\nURL: {url}\nResponse: {error_detail}")
                 break
             
             data = res.json()
             rmas = data.get("rmas", [])
             
+            logger.info(f"  ✓ Received {len(rmas)} RMAs on page {page}")
+            
             if not rmas:
+                logger.info(f"  No more RMAs, stopping pagination")
                 break
             
             all_rmas.extend(rmas)
             
             # Check for next page
             cursor = data.get("next_cursor")
-            if not cursor:
+            if cursor:
+                logger.debug(f"  Next cursor: {cursor[:50]}...")
+            else:
+                logger.info(f"  No next cursor, pagination complete")
                 break
                 
             page += 1
             
         except Exception as e:
-            if page == 1:  # Only error on first page
-                st.error(f"Exception fetching RMAs for {store['name']}: {e}")
+            logger.error(f"  ✗ Exception on page {page}: {str(e)}", exc_info=True)
+            if page == 1:  # Only show UI error on first page
+                st.error(f"Exception fetching RMAs for {store['name']}: {str(e)}")
             break
     
+    logger.info(f"✓ Fetch complete: {len(all_rmas)} total RMAs for {store['name']} - {status}")
     return all_rmas
 
 def fetch_rma_detail(rma_id, store_url):
     """Fetch detailed RMA data"""
+    logger.debug(f"  → Fetching detail for RMA {rma_id}")
     url = api_url(f"/rma/{rma_id}")
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url}
+    headers = {
+        "x-api-key": MY_API_KEY,
+        "X-API-KEY": MY_API_KEY,
+        "x-shop-name": store_url
+    }
     try:
         res = get_session().get(url, headers=headers, timeout=20)
+        logger.debug(f"    Response: {res.status_code}")
         if res.status_code == 200:
+            logger.debug(f"    ✓ Detail fetched for {rma_id}")
             return res.json()
+        logger.warning(f"    ✗ Failed to fetch detail for {rma_id}: {res.status_code}")
         return None
-    except:
+    except Exception as e:
+        logger.error(f"    ✗ Exception fetching {rma_id}: {e}")
         return None
 
 def push_tracking_update(rma_id, shipment_id, new_tracking, store_url):
     """Update tracking number for a shipment"""
     url = api_url(f"/shipment/{shipment_id}/tracking")
-    headers = {"X-API-KEY": MY_API_KEY, "x-shop-name": store_url, "Content-Type": "application/json"}
+    headers = {
+        "x-api-key": MY_API_KEY,
+        "X-API-KEY": MY_API_KEY,
+        "x-shop-name": store_url,
+        "Content-Type": "application/json"
+    }
     payload = {"trackingNumber": new_tracking}
     try:
         res = get_session().put(url, headers=headers, json=payload, timeout=15)
@@ -314,10 +446,19 @@ def push_comment_update(rma_id, comment_text, store_url):
 # ==========================================
 def perform_sync(store_obj=None, status=None):
     """Sync RMAs from ReturnGO API"""
+    logger.info("=" * 100)
+    logger.info("SYNC OPERATION STARTED")
+    logger.info(f"Store filter: {store_obj['name'] if store_obj else 'ALL STORES'}")
+    logger.info(f"Status filter: {status if status else 'ALL STATUSES'}")
+    logger.info("=" * 100)
+    
     st.cache_data.clear()
+    logger.info("Cache cleared")
     
     stores_to_sync = [store_obj] if store_obj else STORES
     statuses_to_sync = [status] if status else ACTIVE_STATUSES
+    
+    logger.info(f"Will sync {len(stores_to_sync)} stores × {len(statuses_to_sync)} statuses = {len(stores_to_sync) * len(statuses_to_sync)} combinations")
     
     progress_placeholder = st.empty()
     status_text = st.empty()
@@ -327,20 +468,24 @@ def perform_sync(store_obj=None, status=None):
     total_rmas_synced = 0
     
     for store in stores_to_sync:
+        logger.info(f"Processing store: {store['name']} ({store['url']})")
         for stat in statuses_to_sync:
             current_task += 1
             progress_pct = current_task / total_tasks
             
+            logger.info(f"  Task {current_task}/{total_tasks}: Syncing {stat} status")
             status_text.text(f"Syncing {store['name']} - {stat}... ({current_task}/{total_tasks})")
             progress_placeholder.progress(progress_pct)
             
             # Fetch list of RMAs
             rma_list = fetch_rma_list(store, stat)
+            logger.info(f"  Retrieved {len(rma_list)} RMAs for {stat}")
             
             # Fetch details for each RMA
             for idx, rma_summary in enumerate(rma_list):
                 rma_id = rma_summary.get('rmaId')
                 if not rma_id:
+                    logger.warning(f"    Skipping RMA with no ID")
                     continue
                 
                 # Update sub-progress within this store/status combo
@@ -352,22 +497,32 @@ def perform_sync(store_obj=None, status=None):
                     created_at = rma_summary.get('createdAt', '')
                     upsert_rma(rma_id, store['url'], stat, created_at, json.dumps(full_data))
                     total_rmas_synced += 1
+                else:
+                    logger.warning(f"    ✗ Failed to get detail for {rma_id}")
                 
                 # Small delay to avoid rate limiting
                 time.sleep(0.1)
             
             # Save sync timestamp
             scope = f"{store['url']}_{stat}"
-            set_last_sync(scope, datetime.now(timezone.utc).isoformat())
+            sync_time = datetime.now(timezone.utc).isoformat()
+            set_last_sync(scope, sync_time)
+            logger.info(f"  ✓ Sync timestamp saved for {scope}")
     
     # Clean up progress indicators
     progress_placeholder.empty()
     status_text.empty()
     
+    logger.info("=" * 100)
+    logger.info(f"SYNC OPERATION COMPLETE: {total_rmas_synced} RMAs synced")
+    logger.info("=" * 100)
+    
     # Show completion message
     st.toast(f"✅ Sync Complete! {total_rmas_synced} RMAs synced.", icon="🔄")
     st.session_state['show_toast'] = True
     time.sleep(0.5)
+    
+    logger.info("Triggering rerun...")
     st.rerun()
 
 # ==========================================
@@ -392,15 +547,23 @@ def get_store_returngo_url(store_url, rma_id):
 # ==========================================
 # 6. FRONTEND UI LOGIC
 # ==========================================
+logger.info("-" * 100)
+logger.info("INITIALIZING UI")
+logger.info("-" * 100)
 
 if 'filter_state' not in st.session_state:
     st.session_state.filter_state = {"store": None, "status": "All"}
+    logger.info("Initialized filter_state in session")
+    
 if st.session_state.get('show_toast'):
     st.toast("✅ API Sync Complete!", icon="🔄")
     st.session_state['show_toast'] = False
+    logger.info("Displayed sync complete toast")
+    
 if st.session_state.get('show_update_toast'):
     st.toast("✅ UI refreshed from database.", icon="🔄")
     st.session_state['show_update_toast'] = False
+    logger.info("Displayed update complete toast")
 
 @st.dialog("RMA Actions")
 def show_rma_actions_dialog(record):
@@ -453,31 +616,41 @@ def show_rma_actions_dialog(record):
                 st.divider()
 
 def handle_filter_click(store_url, status):
+    logger.info(f"Filter clicked: Store={store_url}, Status={status}")
     st.session_state.filter_state = {"store": store_url, "status": status}
     if status in ["Pending", "Approved", "Received"]:
         store_obj = next((s for s in STORES if s['url'] == store_url), None)
+        logger.info(f"Triggering sync for {store_obj['name'] if store_obj else 'Unknown'} - {status}")
         perform_sync(store_obj, status)
     else:
+        logger.info(f"Filter set, triggering rerun")
         st.rerun()
 
 # --- Header ---
+logger.info("Rendering header section...")
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title("Bounty Apparel ReturnGo RMAs 🔄️")
     search_query = st.text_input("🔍 Search Order, RMA, or Tracking", placeholder="Type to search...")
+    if search_query:
+        logger.info(f"Search query: {search_query}")
 with col2:
     sync_col, update_col = st.columns(2)
     with sync_col:
         if st.button("🔄 Sync All Data", type="primary"):
+            logger.info("USER ACTION: Sync All Data button clicked")
             perform_sync()
     with update_col:
         if st.button("🔄 Update All", type="secondary"):
+            logger.info("USER ACTION: Update All button clicked")
             st.cache_data.clear()
             st.cache_resource.clear()
             st.session_state.pop("main_table", None)
             st.session_state['show_update_toast'] = True
+            logger.info("Caches cleared, triggering rerun")
             st.rerun()
     if st.button("🗑️ Reset Cache", type="secondary"):
+        logger.info("USER ACTION: Reset Cache button clicked")
         if clear_db():
             st.cache_data.clear()
             st.cache_resource.clear()
@@ -485,16 +658,20 @@ with col2:
             st.session_state.pop("last_sync", None)
             st.session_state.pop("main_table", None)
             st.success("Cache cleared! Data will reload on next sync.")
+            logger.info("✓ Cache reset successful")
             st.rerun()
         else:
             st.error("DB might be locked.")
+            logger.error("✗ Cache reset failed - DB locked")
 
 # --- Process Data ---
+logger.info("Loading and processing RMA data...")
 raw_data = get_all_active_from_db()
 processed_rows = []
 store_counts = {s['url']: {"Pending": 0, "Approved": 0, "Received": 0, "NoTrack": 0, "Flagged": 0} for s in STORES}
 today = datetime.now(timezone.utc).date()
 
+logger.info(f"Processing {len(raw_data)} RMAs...")
 for rma in raw_data:
     store_url = rma.get('store_url')
     if not store_url:
