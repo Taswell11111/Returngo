@@ -11,8 +11,7 @@ import threading
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from sqlalchemy import create_engine, text, Engine
-from google.cloud.sql.connector import Connector
+from sqlalchemy import create_engine, text
 import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
 from returngo_api import api_url, RMA_COMMENT_PATH
@@ -39,35 +38,40 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # ==========================================
 
 @st.cache_resource
-def init_database() -> Engine:
-    """Initializes a robust, pooled database connection using the Google Cloud SQL Connector."""
-    logger.info("Initializing database connection using Google Cloud SQL Connector...")
+def init_database():
+    """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
+    logger.info("Initializing database connection from Streamlit secrets...")
     try:
         creds = st.secrets["connections"]["postgresql"]
-        instance_connection_name = creds["instance_connection_name"]
-        db_user = creds["username"]
-        db_pass = creds["password"]
-        db_name = creds["database"]
-        driver = creds.get("driver", "pg8000")
+        dialect = creds.get("dialect", "postgresql")
+        driver = creds.get("driver")
+        user = creds["username"]
+        password = creds["password"]
+        host = creds["host"]
+        port = creds["port"]
+        database = creds["database"]
 
-        connector = Connector()
+        # Construct the database URL, including the driver if specified
+        db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
-        def getconn():
-            conn = connector.connect(
-                instance_connection_name,
-                driver,
-                user=db_user,
-                password=db_pass,
-                db=db_name,
-            )
-            return conn
+        connect_args = {"timeout": 60}
+
+        # Handle SSL settings based on the specified driver
+        if driver == "pg8000" and creds.get("sslmode") == "require":
+            # pg8000 uses 'ssl_context' in connect_args
+            connect_args["ssl_context"] = True
+        elif "sslmode" in creds:
+            # Other drivers like psycopg2 expect 'sslmode' as a URL parameter
+            db_url += f"?sslmode={creds['sslmode']}"
+
+        logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
 
         engine = create_engine(
-            f"postgresql+{driver}://",
-            creator=getconn,
+            db_url,
             pool_pre_ping=True,
+            connect_args=connect_args,
         )
-        
+
         # Use a single transaction to create both tables if they don't exist
         with engine.begin() as connection:
             connection.execute(text("""
@@ -89,9 +93,14 @@ def init_database() -> Engine:
                 last_sync_iso TIMESTAMP WITH TIME ZONE
             );
             """))
-        logger.info("Database connection successful via Cloud SQL Connector.")
+        logger.info("Database tables verified and connection is ready.")
         return engine
 
+    except KeyError as e:
+        logger.critical(f"Database configuration error: Missing key {e} in [connections.postgresql] secrets.")
+        st.error(f"Application error: Database configuration is missing required key: {e}. Please check your secrets.toml file.")
+        st.stop()
+        return None
     except Exception as e:
         logger.critical(f"Fatal error during database initialization: {e}", exc_info=True)
         st.error(f"Application error: Could not connect to the database. Details: {e}")
