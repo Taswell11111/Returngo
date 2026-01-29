@@ -946,7 +946,7 @@ for i, store in enumerate(STORES):
         def show_btn(label, stat, key, help_text):
             ts = get_last_sync(store['url'], stat)
             st.markdown(
-                f"<div class='sync-time'>Updated: {ts[11:19] if ts else '-'}</div>",
+                f"<div class='sync-time'>Updated: {ts.strftime('%H:%M:%S') if ts else '-'}</div>",
                 unsafe_allow_html=True,
             )
             if st.button(f"{label}\n{c[stat]}", key=key, help=help_text): # Fixed: "connect" is not a known attribute of "None"

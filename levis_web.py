@@ -51,18 +51,10 @@ def init_database() -> Optional[Engine]:
         port = creds["port"]
         database = creds["database"]
 
-        # This is the key change to prevent the metadata server error
-        # when running outside of a Google Cloud environment.
-        from google.cloud.sql.connector import Connector
-        connector = Connector(enable_iam_auth=False)
-
         # Construct the database URL, including the driver if specified
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
         connect_args = {"timeout": 60}
-
-        def creator():
-            return connector.connect(creds["instance_connection_name"], driver, **creds)
 
         # Handle SSL settings based on the specified driver
         if driver == "pg8000" and creds.get("sslmode") == "require":
@@ -77,7 +69,6 @@ def init_database() -> Optional[Engine]:
         engine = create_engine(
             db_url,
             pool_pre_ping=True,
-            creator=creator,
             connect_args=connect_args,
         )
 
