@@ -54,7 +54,7 @@ def init_database():
         # Construct the database URL, including the driver if specified
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
-        connect_args = {"connect_timeout": 60}
+        connect_args = {"timeout": 60}
 
         # Handle SSL settings based on the specified driver
         if driver == "pg8000" and creds.get("sslmode") == "require":
