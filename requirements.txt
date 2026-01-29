@@ -4,7 +4,6 @@ pandas
 sqlalchemy
 psycopg2-binary
 urllib3
-cloud-sql-python-connector[pg8000]
 pg8000
 anthropic
 toml
