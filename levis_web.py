@@ -8,12 +8,13 @@ import re
 import logging
 import os
 import threading
+import html
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sqlalchemy import create_engine, text, Engine
 import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
-from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
+from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 logger = logging.getLogger(__name__)
@@ -109,12 +110,7 @@ def init_database() -> Optional[Engine]:
         
 # Initialize the database connection engine at the module level
 engine = init_database()
-if engine is not None:
-    # This toast should only appear once after successful connection
-    # It's better to place it after the init_database call in main()
-    # or ensure it's only called once. For now, keeping it here as per original.
-    st.toast("✅ Database connection successful!")
-    
+
 # Load API secrets
 try:
     # Standardize API key name as per error message and rma_web.py context
@@ -167,6 +163,26 @@ def _iso_utc(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def _append_log_entry(log_key: str, message: str, *, level: str = "info", limit: int = 200) -> None:
+    if not message:
+        return
+    ts = datetime.now().strftime("%H:%M:%S")
+    entry = f"[{ts}] {message}"
+    if level and level != "info":
+        entry = f"[{ts}] {level.upper()}: {message}"
+    log_entries: List[str] = st.session_state.get(log_key, [])
+    log_entries.append(entry)
+    st.session_state[log_key] = log_entries[-limit:]
+
+
+def append_ops_log(message: str, *, level: str = "info") -> None:
+    _append_log_entry("ops_log", message, level=level)
+
+
+def append_schema_log(message: str, *, level: str = "info") -> None:
+    _append_log_entry("schema_log", message, level=level)
 
 
 def _sleep_for_rate_limit():
@@ -903,28 +919,26 @@ def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
 
 
 def perform_sync(statuses=None, *, full=False, rerun: bool = True):
+    if st.session_state.get("disconnected"):
+        append_ops_log("System is disconnected. Login again to resume sync.", level="warning")
+        return
     failed_fetches = 0
     successful_fetches = 0
-    status_msg = st.empty()
-    status_msg.info("⏳ Connecting to ReturnGO...")
+    append_ops_log("⏳ Connecting to ReturnGO...")
 
     if statuses is None:
         statuses = ACTIVE_STATUSES
 
     since_dt = get_incremental_since(statuses, full)
 
-    list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
-    st.info("Calling fetch_rma_list...")
+    append_ops_log("Calling fetch_rma_list...")
     summaries, ok, err = fetch_rma_list(statuses, since_dt)
-    st.info(f"fetch_rma_list returned. ok={ok}, error='{err}'")
+    append_ops_log(f"fetch_rma_list returned. ok={ok}, error='{err}'")
     if not ok:
-        list_bar.empty()
         msg = f"ReturnGO sync failed: {err}" if err else "ReturnGO sync failed."
-        status_msg.error(msg)
+        append_ops_log(msg, level="error")
         return
-    list_bar.progress(1.0, text=f"Fetched {len(summaries)} RMAs")
-    time.sleep(0.08)
-    list_bar.empty()
+    append_ops_log(f"Fetched {len(summaries)} RMAs.")
 
     api_ids = {s.get("rmaId") for s in summaries if s.get("rmaId")}
 
@@ -958,30 +972,26 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         force = False
 
     total = len(to_fetch)
-    status_msg.info(f"⏳ Syncing {total} records...")
+    append_ops_log(f"⏳ Syncing {total} records...")
 
     successful_fetches = 0
     failed_fetches = 0
     if total > 0:
-        bar = st.progress(0, text="Downloading Details (sequentially)...")
-        st.info(f"Starting to fetch details for {total} RMAs one by one...")
+        append_ops_log(f"Starting to fetch details for {total} RMAs one by one...")
 
         for i, rid in enumerate(to_fetch):
             done = i + 1
-            st.info(f"[{done}/{total}] Fetching detail for RMA: {rid}")
-            bar.progress(done / total, text=f"Syncing: {done}/{total} ({rid})")
+            if done == 1 or done % 5 == 0 or done == total:
+                append_ops_log(f"[{done}/{total}] Fetching detail for RMA: {rid}")
 
             result = fetch_rma_detail(rid, force=force)
 
             if result is not None:
-                st.info(f"[{done}/{total}] Successfully fetched {rid}.")
                 successful_fetches += 1
             else:
-                st.warning(f"[{done}/{total}] Failed to fetch {rid}.")
                 failed_fetches += 1
 
-        st.info("Finished fetching all details.")
-        bar.empty()
+        append_ops_log("Finished fetching all details.")
 
     now = _now_utc()
     scope = ",".join(statuses)
@@ -990,20 +1000,24 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         set_last_sync(s, now)
 
     if failed_fetches == 0:
-        status_msg.success(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
+        append_ops_log(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
     else:
-        status_msg.warning(f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed.")
+        append_ops_log(
+            f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed."
+        )
     st.session_state["show_toast"] = True
-    status_msg.success("✅ Sync Complete!")
     try:
         load_open_rmas.clear()
     except Exception:
-        st.error("Failed to clear open-RMA cache")
+        append_ops_log("Failed to clear open-RMA cache", level="error")
     if rerun:
         st.rerun()
  # type: ignore
 
 def force_refresh_rma_ids(rma_ids, scope_label: str):
+    if st.session_state.get("disconnected"):
+        append_ops_log("System is disconnected. Login again to refresh data.", level="warning")
+        return
     ids = [str(i) for i in set(rma_ids) if i]
     if not ids: # type: ignore
         set_last_sync(scope_label, _now_utc())
@@ -1013,27 +1027,25 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
         # from reaching this return; it exists to satisfy type checkers / static analyzers.
         return
 
-    msg = st.empty()
-    msg.info(f"⏳ Refreshing {len(ids)} records...")
+    append_ops_log(f"⏳ Refreshing {len(ids)} records...")
 
-    bar = st.progress(0, text="Downloading Details...")
     total = len(ids)
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_rma_detail, rid, force=True) for rid in ids]
         done = 0
         for _ in concurrent.futures.as_completed(futures):
             done += 1
-            bar.progress(done / total, text=f"Refreshing: {done}/{total}")
-    bar.empty()
+            if done == 1 or done % 10 == 0 or done == total:
+                append_ops_log(f"Refreshing progress: {done}/{total}")
 
     set_last_sync(scope_label, _now_utc())
     st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
     st.session_state["show_toast"] = True
-    msg.success("✅ Refresh Complete!")
+    append_ops_log("✅ Refresh Complete!")
     try:
         load_open_rmas.clear()
     except Exception as e:
-        st.error(f"Failed to clear open-RMA cache: {e}")
+        append_ops_log(f"Failed to clear open-RMA cache: {e}", level="error")
     st.rerun()
 
 # ==========================================
@@ -1690,8 +1702,11 @@ def inject_command_center_css():
         }
 
         .api-action-bar.compact {
-            padding: 12px 14px;
+            padding: 0;
             margin: 12px 0 0 0;
+            background: transparent;
+            border: none;
+            box-shadow: none;
         }
 
         .api-action-bar.compact .api-action-bar-title {
@@ -2107,17 +2122,21 @@ def execute_api_operation(endpoint: str, context: str = ""):
     """Execute the selected API operation."""
     global df_view
 
+    if st.session_state.get("disconnected"):
+        append_ops_log("System is disconnected. Login again to run API operations.", level="warning")
+        return
+
     logger.info("Executing API operation: %s (context: %s)", endpoint, context or "none")
 
     operation = API_OPERATIONS.get(endpoint)
     if not operation:
-        st.error(f"Unknown operation: {endpoint}")
+        append_ops_log(f"Unknown operation: {endpoint}", level="error")
         logger.error("Unknown API operation: %s", endpoint)
         return
 
     op_type = operation.get("type")
     if not op_type:
-        st.error(f"Operation '{endpoint}' has no type defined in API_OPERATIONS")
+        append_ops_log(f"Operation '{endpoint}' has no type defined in API_OPERATIONS", level="error")
         logger.error("Operation '%s' missing type field", endpoint)
         return
 
@@ -2131,43 +2150,43 @@ def execute_api_operation(endpoint: str, context: str = ""):
         filter_name = operation.get("filter_name")
         scope = operation.get("scope")
 
-        with st.spinner(f"Syncing {filter_name}..."):
-            perform_sync(statuses=statuses, full=False, rerun=False)
+        append_ops_log(f"Syncing {filter_name}...")
+        perform_sync(statuses=statuses, full=False, rerun=False)
 
-            if filter_name and filter_name in FILTERS and scope:
-                matching_ids = ids_for_filter(filter_name)
-                if matching_ids:
-                    force_refresh_rma_ids(matching_ids, scope)
-                else:
-                    st.info(f"No RMAs match {filter_name} filter.")
-            elif filter_name and filter_name in FILTERS and not scope:
-                st.error(f"Operation '{endpoint}' missing required 'scope' field")
+        if filter_name and filter_name in FILTERS and scope:
+            matching_ids = ids_for_filter(filter_name)
+            if matching_ids:
+                force_refresh_rma_ids(matching_ids, scope)
+            else:
+                append_ops_log(f"No RMAs match {filter_name} filter.")
+        elif filter_name and filter_name in FILTERS and not scope:
+            append_ops_log(f"Operation '{endpoint}' missing required 'scope' field", level="error")
         return
 
     if op_type == "rma_detail":
         if not context: # type: ignore
-            st.error("Please enter an RMA ID")
+            append_ops_log("Please enter an RMA ID", level="error")
             return
-        with st.spinner(f"Fetching RMA {context}..."): # type: ignore
-            rma_data = fetch_rma_detail(context, force=True)
+        append_ops_log(f"Fetching RMA {context}...")
+        rma_data = fetch_rma_detail(context, force=True)
         if rma_data:
-            st.success(f"✅ Refreshed RMA {context}")
+            append_ops_log(f"✅ Refreshed RMA {context}")
             st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
             st.rerun()
         else:
-            st.error(f"Failed to fetch RMA {context}")
+            append_ops_log(f"Failed to fetch RMA {context}", level="error")
         return
 
     if op_type == "batch_courier":
         if df_view.empty:
-            st.warning("No data loaded. Sync dashboard first.")
+            append_ops_log("No data loaded. Sync dashboard first.", level="warning")
             return
 
         rmas_with_tracking = df_view[df_view["DisplayTrack"] != ""].copy()
         rma_ids = rmas_with_tracking["_rma_id_text"].tolist()
 
         if not rma_ids:
-            st.info("No RMAs with tracking numbers found.")
+            append_ops_log("No RMAs with tracking numbers found.")
             return
 
         force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH") # type: ignore
@@ -2175,7 +2194,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
 
     if op_type == "export_csv":
         if df_view.empty:
-            st.warning("No data to export. Sync dashboard first.")
+            append_ops_log("No data to export. Sync dashboard first.", level="warning")
             return
 
         csv = df_view.to_csv(index=False)
@@ -2187,7 +2206,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
         )
         return
 
-    st.error(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'")
+    append_ops_log(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'", level="error")
     logger.error("Unknown operation type '%s' for endpoint '%s'", op_type, endpoint)
 
 
@@ -2224,10 +2243,17 @@ def main(): # type: ignore
         
         if st.button("🔄 Update From Database", help="Reload data from the local database cache without calling the API."):
             st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
-            st.toast("✅ Dashboard updated from database")
+            append_ops_log("✅ Dashboard updated from database")
             st.rerun()
 
         st.divider()
+
+        db_status_led = "db-led-on" if engine else "db-led-off"
+        db_status_text = "✅ Database connection" if engine else "⚪ Database connection"
+        st.markdown(
+            f"<div class='db-status-line'><span class='db-led {db_status_led}'></span>{db_status_text}</div>",
+            unsafe_allow_html=True,
+        )
 
         with st.expander("ℹ️ Database Info"):
             if engine:
@@ -2248,26 +2274,29 @@ def main(): # type: ignore
         if st.button("🗑️ Reset Cache", key="btn_reset", help="⚠️ Delete ALL cached data from database. Use only for troubleshooting. Next sync will take longer."):
             if clear_db(): # This function now truncates the PostgreSQL tables
                 st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
-                st.success("Database has been cleared!")
+                append_ops_log("Database has been cleared!")
                 st.rerun()
             else:
-                st.error("Failed to clear the database.")
+                append_ops_log("Failed to clear the database.", level="error")
 
-        if st.button("🔬 Verify DB Schema", key="btn_verify_schema"):
+        if st.button("🔬 Verify DB Schema", key="btn_verify_schema", help="Inspect table and column availability for the current database connection."):
             with st.spinner("Inspecting database..."):
                 from sqlalchemy import inspect
 
                 # Display connection info first
-                st.subheader("Connection Target (from secrets.toml):")
                 try:
                     conn_details = {
                         "host": st.secrets.connections.postgresql.host,
                         "database": st.secrets.connections.postgresql.database,
                         "username": st.secrets.connections.postgresql.username
                     }
-                    st.json(conn_details)
+                    append_schema_log(
+                        f"Connection target: {conn_details['host']} / {conn_details['database']} ({conn_details['username']})"
+                    )
                 except Exception as e:
-                    st.error(f"Could not read connection secrets from secrets.toml: {e}")
+                    append_schema_log(
+                        f"Could not read connection secrets from secrets.toml: {e}", level="error"
+                    )
 
 
                 def get_schema_info(engine):
@@ -2291,14 +2320,32 @@ def main(): # type: ignore
 
                 schema_info = get_schema_info(engine)
                 
-                st.subheader("Database Schema:")
                 if "error" in schema_info:
-                    st.error(schema_info["error"])
+                    append_schema_log(schema_info["error"], level="error")
                 else:
-                    st.success("Schema inspection complete.")
-                    st.json(schema_info)
+                    summary = []
+                    for table_name, columns in schema_info.items():
+                        summary.append(f"{table_name} ({len(columns)} columns)")
+                    append_schema_log("Schema inspection complete.")
+                    append_schema_log("Tables: " + ", ".join(summary))
 
         render_api_action_bar(compact=True)
+
+        st.markdown("<div class='schema-log-title'>Database Schema</div>", unsafe_allow_html=True)
+        schema_log_entries = st.session_state.get("schema_log", [])
+        schema_log_text = "\n".join(schema_log_entries) if schema_log_entries else "No schema checks yet."
+        st.markdown(
+            f"<div class='schema-log-box'><pre>{html.escape(schema_log_text)}</pre></div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("<div class='ops-log-title'>Activity Log</div>", unsafe_allow_html=True)
+        ops_log_entries = st.session_state.get("ops_log", [])
+        ops_log_text = "\n".join(ops_log_entries) if ops_log_entries else "No activity yet."
+        st.markdown(
+            f"<div class='ops-log-box'><pre>{html.escape(ops_log_text)}</pre></div>",
+            unsafe_allow_html=True,
+        )
 
     # ==========================================
     # 1b. STYLING + STICKY HEADER
@@ -2307,15 +2354,15 @@ def main(): # type: ignore
         """
         <style>
           .stApp {
-            background: radial-gradient(1200px 600px at 20% 0%, rgba(196,18,48,0.08), transparent 60%),
-                        radial-gradient(900px 500px at 90% 10%, rgba(59,130,246,0.08), transparent 55%),
-                        #0e1117;
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
+                        radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
+                        #0b1f3a;
             color: #e5e7eb;
           }
 
           /* Title */
           .title-wrap h1 {
-            font-size: 3.1rem;
+            font-size: 6.2rem;
             margin-bottom: 0.15rem;
             letter-spacing: 0.2px;
             font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
@@ -2548,6 +2595,110 @@ def main(): # type: ignore
             font-size: 1.025rem;
             color: rgba(226,232,240,0.9);
           }
+          .db-status-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            margin-bottom: 8px;
+          }
+          .db-led {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 6px rgba(0, 0, 0, 0.35);
+          }
+          .db-led-on {
+            background: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.65);
+          }
+          .db-led-off {
+            background: #64748b;
+          }
+          .schema-log-title,
+          .ops-log-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: rgba(148, 163, 184, 0.9);
+            margin: 12px 0 6px 0;
+          }
+          .schema-log-box,
+          .ops-log-box {
+            background: rgba(15, 23, 42, 0.75);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 12px;
+            padding: 10px 12px;
+            min-height: 140px;
+            max-height: 320px;
+            overflow-y: auto;
+            font-size: 12px;
+            color: #e2e8f0;
+          }
+          .schema-log-box pre,
+          .ops-log-box pre {
+            margin: 0;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            white-space: pre-wrap;
+          }
+          .power-btn button {
+            width: 115px !important;
+            height: 115px !important;
+            min-width: 115px !important;
+            min-height: 115px !important;
+            border-radius: 14px !important;
+            background: rgba(239, 68, 68, 0.18) !important;
+            border: 2px solid rgba(239, 68, 68, 0.55) !important;
+            color: #fee2e2 !important;
+            font-size: 2.4rem !important;
+            font-weight: 700 !important;
+            box-shadow: 0 10px 24px rgba(239, 68, 68, 0.25) !important;
+          }
+          .power-btn button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 12px 28px rgba(239, 68, 68, 0.35) !important;
+          }
+          .disconnect-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.92);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: fadeIn 0.6s ease-out;
+          }
+          .disconnect-card {
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            border-radius: 18px;
+            padding: 24px 28px;
+            width: min(420px, 88vw);
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+          }
+          .disconnect-card h2 {
+            margin: 0 0 10px 0;
+            font-size: 1.6rem;
+          }
+          .disconnect-card p {
+            margin: 0;
+            color: rgba(226, 232, 240, 0.8);
+          }
+          .table-actions-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+          }
+          .table-actions-left button {
+            background: rgba(15, 23, 42, 0.72) !important;
+            border-color: rgba(148, 163, 184, 0.22) !important;
+            font-size: 13px !important;
+            padding: 6px 10px !important;
+          }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
             position: absolute;
@@ -2597,7 +2748,7 @@ def main(): # type: ignore
               width: 85% !important;
             }
             .title-wrap h1 {
-              font-size: 2.2rem !important;
+              font-size: 4rem !important;
             }
             .subtitle-bar {
               font-size: 0.85rem !important;
@@ -2707,12 +2858,25 @@ def main(): # type: ignore
             });
           }
 
+          function stylePowerButton() {
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach((button) => {
+              if (button.textContent && button.textContent.trim() === '⏻') {
+                const wrapper = button.closest('[data-testid="stButton"]');
+                if (wrapper) wrapper.classList.add('power-btn');
+              }
+            });
+          }
+
           applySticky();
           styleSyncDashboardButton();
+          stylePowerButton();
           setTimeout(applySticky, 250);
           setTimeout(applySticky, 800);
           setTimeout(styleSyncDashboardButton, 250);
           setTimeout(styleSyncDashboardButton, 800);
+          setTimeout(stylePowerButton, 250);
+          setTimeout(stylePowerButton, 800);
         </script>
         """,
         height=0,
@@ -2744,6 +2908,14 @@ def main(): # type: ignore
         st.session_state.failure_shipment = False
     if "cache_version" not in st.session_state:
         st.session_state.cache_version = 0
+    if "ops_log" not in st.session_state:
+        st.session_state.ops_log = []
+    if "schema_log" not in st.session_state:
+        st.session_state.schema_log = []
+    if "table_autosize" not in st.session_state:
+        st.session_state.table_autosize = False
+    if "disconnected" not in st.session_state:
+        st.session_state.disconnected = False
 
     filter_migration = {
         "Pending": "Pending Requests",
@@ -2760,7 +2932,7 @@ def main(): # type: ignore
         logger.info("Migrated filters: %s -> %s", active, migrated) # type: ignore
 
     if st.session_state.get("show_toast"):
-        st.toast("✅ Updated!", icon="🔄") # type: ignore
+        append_ops_log("✅ Updated!", level="info")
         st.session_state["show_toast"] = False
 
     if RATE_LIMIT_HIT.is_set():
@@ -2773,23 +2945,64 @@ def main(): # type: ignore
     # ==========================================
     # 10. HEADER (STICKY)
     # ==========================================
-    st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
-    st.title("Levi's ReturnGO Ops Dashboard")
-    st.markdown(
-        f"""
-        <div class="subtitle-bar">
-            <span class="subtitle-dot"></span>
-            <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
-            <span style="opacity:.45">|</span>
-            <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+    header_left, header_right = st.columns([8, 1], vertical_alignment="center")
+    with header_left:
+        st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
+        st.title("Levi's ReturnGO Ops Dashboard")
+        st.markdown(
+            f"""
+            <div class="subtitle-bar">
+                <span class="subtitle-dot"></span>
+                <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
+                <span style="opacity:.45">|</span>
+                <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+    with header_right:
+        if st.button("⏻", key="disconnect_btn", help="Disconnect database and API sessions"):
+            append_ops_log("Session disconnected. Awaiting login.", level="warning")
+            st.session_state.disconnected = True
 
 
     st.write("")
+
+    if st.session_state.get("disconnected"):
+        st.markdown(
+            """
+            <div class="disconnect-overlay">
+              <div class="disconnect-card">
+                <h2>Session disconnected</h2>
+                <p>Please login again to reconnect the database and API.</p>
+                <div id="reconnect-slot"></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        reconnect_clicked = st.button("Login again", key="reconnect_btn")
+        components.html(
+            """
+            <script>
+              const slot = window.parent.document.querySelector('#reconnect-slot');
+              const buttons = window.parent.document.querySelectorAll('button');
+              buttons.forEach((button) => {
+                if (button.textContent && button.textContent.trim() === 'Login again') {
+                  const wrapper = button.closest('[data-testid="stButton"]');
+                  if (wrapper && slot) slot.appendChild(wrapper);
+                }
+              });
+            </script>
+            """,
+            height=0,
+        )
+        if reconnect_clicked:
+            st.session_state.disconnected = False
+            append_ops_log("✅ Reconnected. Ready to resume.", level="info")
+            st.rerun()
+        st.stop()
 
     # ==========================================
     # 11. LOAD + PROCESS OPEN RMAs # type: ignore
@@ -2947,7 +3160,7 @@ def main(): # type: ignore
         refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
         refresh_thread.start()
         if len(rmas_needing_courier_refresh) > 5:
-            st.toast(
+            append_schema_log(
                 f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
             )
 
@@ -2970,7 +3183,7 @@ def main(): # type: ignore
                 .reset_index(name="Count")
             )
             date_counts.columns = ["Date", "Count"]
-            st.line_chart(date_counts.set_index("Date"), height=300)
+            st.line_chart(date_counts.set_index("Date"), height=450)
         else:
             st.info("No valid requested dates found for charting.")
 
@@ -3238,7 +3451,7 @@ def main(): # type: ignore
         "failures",
     ]
 
-    column_config = {
+    base_column_config = {
         "No": st.column_config.TextColumn("No"),
         "RMA ID": st.column_config.LinkColumn(
             "RMA ID",
@@ -3258,11 +3471,59 @@ def main(): # type: ignore
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    _table_df = display_df.copy()  # Create a copy with all columns for styling and actions
+    table_df = display_df[display_cols].copy()
 
-    total_rows = len(_table_df)
-    tsv_rows = [display_cols] + _table_df[display_cols].astype(str).values.tolist()
+    def _autosize_width(column: str, data: pd.DataFrame) -> str:
+        if column not in data.columns or data.empty:
+            return "medium"
+        max_len = int(data[column].astype(str).map(len).max())
+        if max_len <= 8:
+            return "small"
+        if max_len <= 20:
+            return "medium"
+        return "large"
+
+    if st.session_state.get("table_autosize"):
+        column_config = {}
+        for key in display_cols:
+            width = _autosize_width(key, table_df)
+            if key == "RMA ID":
+                column_config[key] = st.column_config.LinkColumn(
+                    key,
+                    display_text=r"rmaid=([^&]+)",
+                    width=width,
+                )
+            elif key == "Tracking Number":
+                column_config[key] = st.column_config.LinkColumn(
+                    key,
+                    display_text=r"ref=(.*)",
+                    width=width,
+                )
+            else:
+                column_config[key] = st.column_config.TextColumn(
+                    key,
+                    width=width,
+                )
+    else:
+        column_config = base_column_config
+
+    total_rows = len(table_df)
+    tsv_rows = [display_cols] + table_df.astype(str).values.tolist()
     tsv_text = "\n".join(["\t".join(row) for row in tsv_rows])
+    action_left, _ = st.columns([3, 5], vertical_alignment="center")
+    with action_left:
+        st.markdown("<div class='table-actions-left'>", unsafe_allow_html=True)
+        csv_payload = table_df.to_csv(index=False)
+        st.download_button(
+            label="⬇️ CSV",
+            data=csv_payload,
+            file_name=f"returngo_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            key="download_table_csv",
+        )
+        if st.button("Autosize", key="autosize_btn"):
+            st.session_state.table_autosize = not st.session_state.get("table_autosize", False)
+        st.markdown("</div>", unsafe_allow_html=True)
     count_col, action_col = st.columns([5, 3], vertical_alignment="center")
     with count_col:
         st.markdown( # type: ignore
@@ -3297,9 +3558,17 @@ def main(): # type: ignore
                   const payload = JSON.parse({json_payload});
                   if (navigator.clipboard?.writeText) {{
                     await navigator.clipboard.writeText(payload);
-                  }} else {{
-                    console.warn("Clipboard API unavailable.");
+                    return;
                   }}
+                  const textArea = document.createElement('textarea');
+                  textArea.value = payload;
+                  textArea.style.position = 'fixed';
+                  textArea.style.opacity = '0';
+                  document.body.appendChild(textArea);
+                  textArea.focus();
+                  textArea.select();
+                  document.execCommand('copy');
+                  document.body.removeChild(textArea);
                 }} catch (err) {{
                   console.error("Clipboard write failed.", err);
                 }}
@@ -3308,26 +3577,27 @@ def main(): # type: ignore
             """,
             height=0,
         )
-        st.toast("Copied table to clipboard.", icon="📋")
+        append_ops_log("📋 Copied table to clipboard.")
 
     def highlight_problematic_rows(row: pd.Series):
         """Applies highlighting to rows based on a set of problem conditions."""
         highlight = False
+        full_row = display_df.loc[row.name] if row.name in display_df.index else row
         
         # Condition 1: Approved/Received without tracking
-        if (row.get("Current Status") in ["Approved", "Received"]) and not row.get("DisplayTrack"):
+        if (full_row.get("Current Status") in ["Approved", "Received"]) and not full_row.get("DisplayTrack"):
             highlight = True
         
         # Condition 2: Failures exist (non-empty 'failures' string)
-        if row.get("failures"):
+        if full_row.get("failures"):
             highlight = True
             
         # Condition 3: Courier Cancelled
-        if row.get("is_cc"):
+        if full_row.get("is_cc"):
             highlight = True
             
         # Condition 4: Flagged
-        if row.get("is_fg"):
+        if full_row.get("is_fg"):
             highlight = True
 
         if highlight:
@@ -3335,13 +3605,7 @@ def main(): # type: ignore
         
         return [""] * len(row)
 
-    styled_table = _table_df.style.apply(highlight_problematic_rows, axis=1)
-
-    # Define columns to hide from the view
-    cols_to_hide = [col for col in _table_df.columns if col not in display_cols]
-    
-    if cols_to_hide:
-        styled_table = styled_table.hide(cols_to_hide, axis="columns")
+    styled_table = table_df.style.apply(highlight_problematic_rows, axis=1)
 
     table_key = "rma_table"
     sel_event = st.dataframe( # type: ignore
