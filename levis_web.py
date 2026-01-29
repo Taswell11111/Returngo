@@ -3,19 +3,18 @@ import streamlit.components.v1 as components
 import requests
 import json
 import pandas as pd
-import threading
 import time
 import re
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sqlalchemy import create_engine, text
-import concurrent.futures
+import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
 from returngo_api import api_url, RMA_COMMENT_PATH
-from google.cloud.sql.connector import Connector
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
@@ -40,32 +39,36 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 
 @st.cache_resource
 def init_database():
-    logger.info("Attempting to initialize database connection via Google Cloud SQL Connector...")
+    """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
+    logger.info("Initializing database connection from Streamlit secrets...")
     try:
-        # Use Google Cloud SQL Connector for secure, reliable connections
-        connector = Connector()
+        creds = st.secrets["connections"]["postgresql"]
+        dialect = creds.get("dialect", "postgresql")
+        driver = creds.get("driver")
+        user = creds["username"]
+        password = creds["password"]
+        host = creds["host"]
+        port = creds["port"]
+        database = creds["database"]
+        sslmode = creds.get("sslmode", "prefer")
 
-        # Function to create a connection using the connector
-        def getconn():
-            creds = st.secrets["connections"]["postgresql"]
-            conn = connector.connect(
-                creds["instance_connection_name"], # e.g., "project:region:instance"
-                "pg8000",
-                user=creds["username"],
-                password=creds["password"],
-                db=creds["database"],
-                enable_iam_auth=False # Set to True if using IAM database authentication
-            )
-            return conn
+        # Construct the database URL, including the driver if specified
+        db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
-        # Create the engine with the connector
+        # pg8000 uses ssl_context in connect_args, others might use a URL parameter
+        connect_args = {"connect_timeout": 60}
+        if "sslmode" in creds:
+             db_url += f"?sslmode={creds['sslmode']}"
+
+        logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
+
         engine = create_engine(
-            "postgresql+pg8000://",
-            creator=getconn,
+            db_url,
             pool_pre_ping=True,
+            connect_args=connect_args,
         )
-        
-        # Use a single transaction to create both tables
+
+        # Use a single transaction to create both tables if they don't exist
         with engine.begin() as connection:
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS rmas (
@@ -86,26 +89,588 @@ def init_database():
                 last_sync_iso TIMESTAMP WITH TIME ZONE
             );
             """))
+        logger.info("Database tables verified and connection is ready.")
         return engine
+
+    except KeyError as e:
+        logger.critical(f"Database configuration error: Missing key {e} in [connections.postgresql] secrets.")
+        st.error(f"Application error: Database configuration is missing required key: {e}. Please check your secrets.toml file.")
+        st.stop()
+        return None
     except Exception as e:
-        st.error(f"Application error: Could not initialize database using Cloud SQL Connector. Error: {e}")
+        logger.critical(f"Fatal error during database initialization: {e}", exc_info=True)
+        st.error(f"Application error: Could not connect to the database. Details: {e}")
         st.stop()
         return None
         
 # Initialize the database connection engine at the module level
 engine = init_database()
 if engine is not None:
+    # This toast should only appear once after successful connection
+    # It's better to place it after the init_database call in main()
+    # or ensure it's only called once. For now, keeping it here as per original.
     st.toast("✅ Database connection successful!")
     
-# Load secrets
+# Load API secrets
 try:
-    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+    # Standardize API key name as per error message and rma_web.py context
+    MY_API_KEY = st.secrets["RETURNGO_API_KEY_BOUNTY_BOUNTY"]
     PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
 except KeyError:
-    st.error("Application error: Missing 'RETURNGO_API_KEY' in Streamlit secrets.")
+    st.error("Application error: Missing 'RETURNGO_API_KEY_BOUNTY_BOUNTY' in Streamlit secrets.")
     st.stop()
     MY_API_KEY = None
     PARCEL_NINJA_TOKEN = None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 STORE_URL = "levis-sa.myshopify.com"
 
