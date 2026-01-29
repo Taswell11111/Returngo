@@ -2248,8 +2248,9 @@ def main(): # type: ignore
 
         st.divider()
 
-        db_status_led = "db-led-on" if engine else "db-led-off"
-        db_status_text = "✅ Database connection" if engine else "⚪ Database connection"
+        is_connected = bool(engine) and not st.session_state.get("disconnected")
+        db_status_led = "db-led-on" if is_connected else "db-led-off"
+        db_status_text = "✅ Database connection" if is_connected else "⚪ Database connection"
         st.markdown(
             f"<div class='db-status-line'><span class='db-led {db_status_led}'></span>{db_status_text}</div>",
             unsafe_allow_html=True,
@@ -2983,6 +2984,9 @@ def main(): # type: ignore
             unsafe_allow_html=True,
         )
         reconnect_clicked = st.button("Login again", key="reconnect_btn")
+        # NOTE: This DOM move is brittle because it relies on Streamlit's
+        # button markup and the exact button label. If Streamlit updates DOM
+        # structure or copy, this may need to be revisited.
         components.html(
             """
             <script>
@@ -3160,7 +3164,7 @@ def main(): # type: ignore
         refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
         refresh_thread.start()
         if len(rmas_needing_courier_refresh) > 5:
-            append_schema_log(
+            append_ops_log(
                 f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
             )
 
@@ -3483,20 +3487,19 @@ def main(): # type: ignore
             return "medium"
         return "large"
 
+    link_column_configs = {
+        "RMA ID": {"display_text": r"rmaid=([^&]+)"},
+        "Tracking Number": {"display_text": r"ref=(.*)"},
+    }
+
     if st.session_state.get("table_autosize"):
         column_config = {}
         for key in display_cols:
             width = _autosize_width(key, table_df)
-            if key == "RMA ID":
+            if key in link_column_configs:
                 column_config[key] = st.column_config.LinkColumn(
                     key,
-                    display_text=r"rmaid=([^&]+)",
-                    width=width,
-                )
-            elif key == "Tracking Number":
-                column_config[key] = st.column_config.LinkColumn(
-                    key,
-                    display_text=r"ref=(.*)",
+                    display_text=link_column_configs[key]["display_text"],
                     width=width,
                 )
             else:
@@ -3554,12 +3557,11 @@ def main(): # type: ignore
             f"""
             <script>
               (async () => {{
+                const payload = JSON.parse({json_payload});
                 try {{
-                  const payload = JSON.parse({json_payload});
-                  if (navigator.clipboard?.writeText) {{
-                    await navigator.clipboard.writeText(payload);
-                    return;
-                  }}
+                  await navigator.clipboard.writeText(payload);
+                }} catch (err) {{
+                  console.warn("navigator.clipboard.writeText failed, using fallback.", err);
                   const textArea = document.createElement('textarea');
                   textArea.value = payload;
                   textArea.style.position = 'fixed';
@@ -3567,10 +3569,12 @@ def main(): # type: ignore
                   document.body.appendChild(textArea);
                   textArea.focus();
                   textArea.select();
-                  document.execCommand('copy');
+                  try {{
+                    document.execCommand('copy');
+                  }} catch (copyErr) {{
+                    console.error("Fallback clipboard copy failed.", copyErr);
+                  }}
                   document.body.removeChild(textArea);
-                }} catch (err) {{
-                  console.error("Clipboard write failed.", err);
                 }}
               }})();
             </script>
@@ -3582,30 +3586,36 @@ def main(): # type: ignore
     def highlight_problematic_rows(row: pd.Series):
         """Applies highlighting to rows based on a set of problem conditions."""
         highlight = False
-        full_row = display_df.loc[row.name] if row.name in display_df.index else row
-        
+
         # Condition 1: Approved/Received without tracking
-        if (full_row.get("Current Status") in ["Approved", "Received"]) and not full_row.get("DisplayTrack"):
+        if (row.get("Current Status") in ["Approved", "Received"]) and not row.get("DisplayTrack"):
             highlight = True
-        
+
         # Condition 2: Failures exist (non-empty 'failures' string)
-        if full_row.get("failures"):
+        if row.get("failures"):
             highlight = True
-            
+
         # Condition 3: Courier Cancelled
-        if full_row.get("is_cc"):
+        if row.get("is_cc"):
             highlight = True
-            
+
         # Condition 4: Flagged
-        if full_row.get("is_fg"):
+        if row.get("is_fg"):
             highlight = True
 
         if highlight:
             return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
-        
+
         return [""] * len(row)
 
-    styled_table = table_df.style.apply(highlight_problematic_rows, axis=1)
+    cols_for_styling = list(
+        dict.fromkeys(display_cols + ["DisplayTrack", "failures", "is_cc", "is_fg"])
+    )
+    styling_df = display_df[cols_for_styling].copy()
+    styled_table = styling_df.style.apply(highlight_problematic_rows, axis=1)
+    cols_to_hide = [col for col in styling_df.columns if col not in display_cols]
+    if cols_to_hide:
+        styled_table = styled_table.hide(cols_to_hide, axis="columns")
 
     table_key = "rma_table"
     sel_event = st.dataframe( # type: ignore
