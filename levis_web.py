@@ -14,7 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sqlalchemy import create_engine, text, Engine
 import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
-from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List
+from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List, Literal
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 logger = logging.getLogger(__name__)
@@ -3477,7 +3477,7 @@ def main(): # type: ignore
 
     table_df = display_df[display_cols].copy()
 
-    def _autosize_width(column: str, data: pd.DataFrame) -> str:
+    def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
         if column not in data.columns or data.empty:
             return "medium"
         max_len = int(data[column].astype(str).map(len).max())
