@@ -1308,14 +1308,13 @@ def format_tracking_status_with_icon(status: str) -> str:
     return f"📍 {status}"
 
 
-def clean_rma_id_for_export(value: str) -> str:
-    if not value:
+def clean_rma_id_for_export(value):
+    if not isinstance(value, str) or not value:
         return value
-    return re.sub(
-        r"^https://app\.returngo\.ai/dashboard/returns\?filter_status=open&rmaid=",
-        "",
-        str(value),
-    )
+    prefix = "https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid="
+    if value.startswith(prefix):
+        return value[len(prefix):]
+    return value
 
 
 def toggle_filter(name: str):
