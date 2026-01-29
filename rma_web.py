@@ -309,7 +309,6 @@ def upsert_rma(rma_id, store_url, status, created_at, json_data, courier_status=
         except Exception:
             courier_checked_dt = None
 
-    assert engine is not None, "Database engine is not initialized." # Fixed: "connect" is not a known attribute of "None"
     with engine.connect() as connection: # Pylance error fixed by assert engine is not None
         # First, select the existing values for received_first_seen
         select_query = text("SELECT received_first_seen FROM rmas WHERE rma_id=:rma_id")
@@ -352,7 +351,6 @@ def set_last_sync(scope, ts):
     if engine is None:
         logger.critical("Database engine is None in set_last_sync. This should not happen.")
         return
-    assert engine is not None, "Database engine is not initialized." # Fixed: "connect" is not a known attribute of "None"
     with engine.connect() as connection:
         insert_query = text('INSERT INTO sync_logs (scope, last_sync_iso) VALUES (:scope, :last_sync_iso) ON CONFLICT (scope) DO UPDATE SET last_sync_iso = EXCLUDED.last_sync_iso;')
         connection.execute(insert_query, {"scope": scope, "last_sync_iso": ts}) # ts should be datetime object

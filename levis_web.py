@@ -11,7 +11,7 @@ import threading
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, Engine
 import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
 from returngo_api import api_url, RMA_COMMENT_PATH
@@ -38,7 +38,7 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # ==========================================
 
 @st.cache_resource
-def init_database():
+def init_database() -> Optional[Engine]:
     """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
     logger.info("Initializing database connection from Streamlit secrets...")
     try:
@@ -51,10 +51,18 @@ def init_database():
         port = creds["port"]
         database = creds["database"]
 
+        # This is the key change to prevent the metadata server error
+        # when running outside of a Google Cloud environment.
+        from google.cloud.sql.connector import Connector
+        connector = Connector(enable_iam_auth=False)
+
         # Construct the database URL, including the driver if specified
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
         connect_args = {"timeout": 60}
+
+        def creator():
+            return connector.connect(creds["instance_connection_name"], driver, **creds)
 
         # Handle SSL settings based on the specified driver
         if driver == "pg8000" and creds.get("sslmode") == "require":
@@ -69,6 +77,7 @@ def init_database():
         engine = create_engine(
             db_url,
             pool_pre_ping=True,
+            creator=creator,
             connect_args=connect_args,
         )
 
@@ -874,6 +883,10 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
         except Exception:
             courier_checked_dt = None
 
+    if engine is None:
+        logger.error("Database engine not initialized, cannot upsert RMA %s", rma_id)
+        return
+        
     with engine.connect() as connection:
         # First, select the existing values
         select_query = text("SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=:rma_id")
@@ -909,9 +922,9 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
         connection.execute(insert_query, {
             "rma_id": str(rma_id),
             "store_url": STORE_URL,
-            "status": status,
+            "status": status, # type: ignore
             "created_at": created_at_dt,
-            "json_data": json.dumps(payload),
+            "json_data": payload,
             "last_fetched": now_iso,
             "courier_status": courier_status,
             "courier_last_checked": courier_checked_dt,
@@ -941,7 +954,7 @@ def delete_rmas(rma_ids):
     if not normalized_ids:
         return
     
-    if engine is None: # type: ignore
+    if engine is None:
         return
         
     try:
@@ -959,7 +972,7 @@ def delete_rmas(rma_ids):
 
 
 def get_rma(rma_id: str):
-    if engine is None: # type: ignore
+    if engine is None:
         return None
 
     with engine.connect() as connection:
@@ -980,7 +993,7 @@ def get_rma(rma_id: str):
 
 
 def get_all_open_from_db():
-    if engine is None: # type: ignore
+    if engine is None:
         return []
 
     with engine.connect() as connection:
@@ -1047,7 +1060,7 @@ def get_last_sync(scope: str) -> Optional[datetime]:
         return None
 
 def clear_db():
-    if engine is None: # type: ignore
+    if engine is None:
         return False
     try:
         with engine.begin() as connection: # Use begin() for a transaction
@@ -3325,6 +3338,8 @@ def main(): # type: ignore
 
 
                 def get_schema_info(engine):
+                    if engine is None:
+                        return {"error": "Database engine is not initialized."}
                     try:
                         inspector = inspect(engine)
                         table_names = inspector.get_table_names()
