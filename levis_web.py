@@ -1452,6 +1452,8 @@ def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
 
 
 def perform_sync(statuses=None, *, full=False, rerun: bool = True):
+    failed_fetches = 0
+    successful_fetches = 0
     status_msg = st.empty()
     status_msg.info("⏳ Connecting to ReturnGO...")
 
@@ -2788,7 +2790,7 @@ def main(): # type: ignore
 
         if st.button("🔄 Sync All Data", key="btn_sync_all", help="Fetch latest data from ReturnGO API for all stores and statuses. This may take several minutes."):
             st.session_state.last_sync_pressed = datetime.now()
-            perform_sync() # type: ignore
+            perform_sync(full=True) # type: ignore
         
         if st.button("🔄 Sync From Cache", help="Reload data from database cache"):
             st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
