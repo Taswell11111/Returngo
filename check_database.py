@@ -27,8 +27,13 @@ def get_db_url_and_connect_args():
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
         connect_args = {}
-        if "sslmode" in conn:
-             db_url += f"?sslmode={conn['sslmode']}"
+        # Handle SSL settings based on the specified driver
+        if driver == "pg8000" and conn.get("sslmode") == "require":
+            # pg8000 uses 'ssl_context' in connect_args
+            connect_args["ssl_context"] = True
+        elif "sslmode" in conn:
+            # Other drivers like psycopg2 expect 'sslmode' as a URL parameter
+            db_url += f"?sslmode={conn['sslmode']}"
 
         return db_url, connect_args
     except (FileNotFoundError, KeyError) as e:

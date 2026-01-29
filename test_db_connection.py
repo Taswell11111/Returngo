@@ -4,11 +4,10 @@ import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
-def get_db_url():
-    """Reads secrets and constructs the database URL."""
+def get_db_config():
+    """Reads secrets and constructs the database URL and connection arguments."""
     try:
         # Construct the full path to the secrets.toml file
-        # Assumes the script is run from the root of the project directory
         secrets_path = os.path.join(os.getcwd(), ".streamlit", "secrets.toml")
 
         if not os.path.exists(secrets_path):
@@ -28,17 +27,21 @@ def get_db_url():
         # Construct the database URL, including the driver if specified
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
-        if "sslmode" in conn:
-             db_url += f"?sslmode={conn['sslmode']}"
+        connect_args = {}
+        # Handle SSL settings based on the specified driver
+        if driver == "pg8000" and conn.get("sslmode") == "require":
+            connect_args["ssl_context"] = True
+        elif "sslmode" in conn:
+            db_url += f"?sslmode={conn['sslmode']}"
 
-        return db_url
+        return db_url, connect_args
     except (FileNotFoundError, KeyError) as e:
         print(f"Error reading database configuration: {e}", file=sys.stderr)
-        return None
+        return None, None
 
 def main():
     """Tests the database connection using settings from the secrets file."""
-    db_url = get_db_url()
+    db_url, connect_args = get_db_config()
 
     if not db_url:
         sys.exit(1)
@@ -47,7 +50,7 @@ def main():
     print(f"Target: {db_url.split('@')[-1]}") # Print host/db without credentials
 
     try:
-        engine = create_engine(db_url)
+        engine = create_engine(db_url, connect_args=connect_args)
         with engine.connect() as connection:
             # A simple query to confirm connectivity
             result = connection.execute(text("SELECT 1")).scalar()

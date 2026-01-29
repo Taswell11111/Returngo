@@ -50,15 +50,19 @@ def init_database():
         host = creds["host"]
         port = creds["port"]
         database = creds["database"]
-        sslmode = creds.get("sslmode", "prefer")
 
         # Construct the database URL, including the driver if specified
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
 
-        # pg8000 uses ssl_context in connect_args, others might use a URL parameter
         connect_args = {"connect_timeout": 60}
-        if "sslmode" in creds:
-             db_url += f"?sslmode={creds['sslmode']}"
+
+        # Handle SSL settings based on the specified driver
+        if driver == "pg8000" and creds.get("sslmode") == "require":
+            # pg8000 uses 'ssl_context' in connect_args
+            connect_args["ssl_context"] = True
+        elif "sslmode" in creds:
+            # Other drivers like psycopg2 expect 'sslmode' as a URL parameter
+            db_url += f"?sslmode={creds['sslmode']}"
 
         logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
 

@@ -182,31 +182,41 @@ def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
 # The `engine` variable needs to be accessible globally after `init_database` runs.
 engine: Optional[Engine] = None # Initialize engine globally with explicit type hint
 @st.cache_resource
-def init_database():
-    logger.info("Attempting to initialize database connection via direct SQLAlchemy...")
+def init_database() -> Optional[Engine]:
+    """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
+    logger.info("Initializing database connection from Streamlit secrets...")
     try:
-        # Use standard PostgreSQL connection string from secrets
         creds = st.secrets["connections"]["postgresql"]
+        dialect = creds.get("dialect", "postgresql")
+        driver = creds.get("driver")
         user = creds["username"]
         password = creds["password"]
         host = creds["host"]
         port = creds["port"]
         database = creds["database"]
-        
-        db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        engine_instance: Engine = create_engine( # Use a local variable first
-            db_url, 
-            pool_pre_ping=True, 
-            connect_args={
-                "connect_timeout": 60,
-                "keepalives": 1,
-                "keepalives_idle": 30,
-                "keepalives_interval": 10,
-                "keepalives_count": 5
-            }
+
+        # Construct the database URL, including the driver if specified
+        db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
+
+        connect_args = {"connect_timeout": 60}
+
+        # Handle SSL settings based on the specified driver
+        if driver == "pg8000" and creds.get("sslmode") == "require":
+            # pg8000 uses 'ssl_context' in connect_args
+            connect_args["ssl_context"] = True
+        elif "sslmode" in creds:
+            # Other drivers like psycopg2 expect 'sslmode' as a URL parameter
+            db_url += f"?sslmode={creds['sslmode']}"
+
+        logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
+
+        engine_instance = create_engine(
+            db_url,
+            pool_pre_ping=True,
+            connect_args=connect_args,
         )
-        
-        # Use a single transaction to create both tables # Fixed: text was not defined
+
+        # Use a single transaction to create both tables if they don't exist
         with engine_instance.begin() as connection:
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS rmas (
@@ -226,11 +236,18 @@ def init_database():
                 scope TEXT PRIMARY KEY,
                 last_sync_iso TIMESTAMP WITH TIME ZONE
             );
-            """)) # Fixed: text was not defined
-        return engine
+            """))
+        logger.info("Database tables verified and connection is ready.")
+        return engine_instance
+
+    except KeyError as e:
+        logger.critical(f"Database configuration error: Missing key {e} in [connections.postgresql] secrets.")
+        st.error(f"Application error: Database configuration is missing required key: {e}. Please check your secrets.toml file.")
+        st.stop()
+        return None
     except Exception as e:
-        st.error(f"Application error: Could not initialize database. Error: {e}")
-        logger.critical(f"Application error: Could not initialize database. Error: {e}", exc_info=True)
+        logger.critical(f"Fatal error during database initialization: {e}", exc_info=True)
+        st.error(f"Application error: Could not connect to the database. Details: {e}")
         st.stop()
         return None
 
