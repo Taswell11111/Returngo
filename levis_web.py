@@ -3258,7 +3258,7 @@ def main(): # type: ignore
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy() # type: ignore
+    _table_df = display_df.copy()  # Create a copy with all columns for styling and actions
 
     total_rows = len(_table_df)
     tsv_rows = [display_cols] + _table_df[display_cols].astype(str).values.tolist()
@@ -3310,12 +3310,38 @@ def main(): # type: ignore
         )
         st.toast("Copied table to clipboard.", icon="📋")
 
-    def highlight_missing_tracking(row: pd.Series):
-        if row.get("Current Status") == "Approved" and not row.get("DisplayTrack"):
+    def highlight_problematic_rows(row: pd.Series):
+        """Applies highlighting to rows based on a set of problem conditions."""
+        highlight = False
+        
+        # Condition 1: Approved/Received without tracking
+        if (row.get("Current Status") in ["Approved", "Received"]) and not row.get("DisplayTrack"):
+            highlight = True
+        
+        # Condition 2: Failures exist (non-empty 'failures' string)
+        if row.get("failures"):
+            highlight = True
+            
+        # Condition 3: Courier Cancelled
+        if row.get("is_cc"):
+            highlight = True
+            
+        # Condition 4: Flagged
+        if row.get("is_fg"):
+            highlight = True
+
+        if highlight:
             return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
+        
         return [""] * len(row)
 
-    styled_table = _table_df[display_cols].style.apply(highlight_missing_tracking, axis=1)
+    styled_table = _table_df.style.apply(highlight_problematic_rows, axis=1)
+
+    # Define columns to hide from the view
+    cols_to_hide = [col for col in _table_df.columns if col not in display_cols]
+    
+    if cols_to_hide:
+        styled_table = styled_table.hide(cols_to_hide, axis="columns")
 
     table_key = "rma_table"
     sel_event = st.dataframe( # type: ignore
