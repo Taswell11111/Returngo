@@ -3394,13 +3394,28 @@ def main(): # type: ignore
                             status=status,
                             created_at=requested_iso or "",
                             payload=rma_payload,
+    if rmas_needing_courier_refresh and in_courier_refresh_window():
+        def refresh_courier_batch(rmas_to_refresh):
+            for rma_id, rma_payload, requested_iso, status in rmas_to_refresh:
+                try: # type: ignore
+                    courier_status, courier_checked = maybe_refresh_courier(rma_payload)
+                    if courier_status:
+                        upsert_rma(
+                            rma_id=str(rma_id),
+                            status=status,
+                            created_at=requested_iso or "",
+                            payload=rma_payload,
                             courier_status=courier_status,
                             courier_checked_iso=courier_checked,
                         ) # type: ignore
                 except Exception as exc:
                     logger.warning("Background courier refresh failed for %s: %s", rma_id, exc)
 
-        refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
+        refresh_thread = threading.Thread(
+            target=refresh_courier_batch,
+            args=(rmas_needing_courier_refresh.copy(),),
+            daemon=True
+        )
         refresh_thread.start()
         append_ops_log(
             "🔄 Refreshing "
