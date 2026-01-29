@@ -20,25 +20,12 @@ from sqlalchemy import create_engine, text, Engine # Added Engine for type hinti
 # ==========================================
 # LOGGING SETUP
 # ==========================================
-# Create logs directory if it doesn't exist
-LOG_DIR = "Connection"
-try:
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_dir_created = True
-except Exception as e:
-    LOG_DIR = "."  # Fallback to current directory
-    log_dir_created = False
-
-# Create log filename with timestamp
-log_filename = os.path.join(LOG_DIR, f"rma_web_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-
-# Configure logging to both console and file
+# Configure logging to console
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(log_filename, mode='w', encoding='utf-8')
+        logging.StreamHandler()
     ],
     force=True
 )
@@ -47,10 +34,8 @@ logger = logging.getLogger(__name__)
 # Log startup
 logger.info("=" * 100)
 logger.info("RMA WEB APPLICATION STARTING")
-logger.info(f"Log file: {log_filename}")
-logger.info(f"Log directory created: {log_dir_created}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
-logger.info(f"Python version: {sys.version}") # Fixed: os.sys.version -> sys.version
+logger.info(f"Python version: {sys.version}")
 logger.info("=" * 100)
 
 # ==========================================
