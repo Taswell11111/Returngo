@@ -1509,9 +1509,9 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     total = len(to_fetch)
     status_msg.info(f"⏳ Syncing {total} records...")
 
+    successful_fetches = 0
+    failed_fetches = 0
     if total > 0:
-        successful_fetches = 0
-        failed_fetches = 0
         bar = st.progress(0, text="Downloading Details (sequentially)...")
         st.info(f"Starting to fetch details for {total} RMAs one by one...")
 
