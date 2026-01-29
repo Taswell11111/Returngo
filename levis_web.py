@@ -125,10 +125,6 @@ except KeyError:
     st.stop()
     MY_API_KEY = None
     PARCEL_NINJA_TOKEN = None
-
-
-
-
 STORE_URL = "levis-sa.myshopify.com"
 
 # Efficiency controls
