@@ -976,7 +976,7 @@ def get_rma(rma_id: str):
     if not row:
         return None
 
-    payload = json.loads(row[0])
+    payload = row[0]
     payload["_local_courier_status"] = row[2]
     payload["_local_courier_checked"] = row[3].isoformat() if row[3] else None
     payload["_local_received_first_seen"] = row[4].isoformat() if row[4] else None
@@ -997,7 +997,7 @@ def get_all_open_from_db():
 
     results = []
     for js, cstat, cchk, rcv_seen in rows:
-        data = json.loads(js)
+        data = js
         data["_local_courier_status"] = cstat
         data["_local_courier_checked"] = cchk.isoformat() if cchk else None
         data["_local_received_first_seen"] = rcv_seen.isoformat() if rcv_seen else None
@@ -2760,28 +2760,100 @@ def main(): # type: ignore
 
 
     # ==========================================
-    # 0. UI: FETCH (API) vs SYNC (UI/DB)
+    # 0. UI: Sync Dashboard in Sidebar
     # ==========================================
     with st.sidebar:
-        st.markdown("---")
         st.subheader("Dashboard Operations")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Sync Dashboard", help="Reload data from database cache"):
-                st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
-                st.toast("✅ Dashboard synced from database")
-                st.rerun()
-                
-        with col2:
-            if st.button("📡 Fetch Data", help="Fetch fresh data from ReturnGO API"):
-                st.session_state["pending_fetch"] = True
-                st.rerun()
+        last_sync = st.session_state.get("last_sync_pressed") # type: ignore
+        last_sync_display = (
+            last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--" # type: ignore
+        )
+        with RATE_LIMIT_LOCK:
+            remaining = RATE_LIMIT_INFO.get("remaining")
+            limit = RATE_LIMIT_INFO.get("limit")
+        if remaining is not None and limit is not None:
+            try:
+                if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
+                    remain_int = int(remaining)
+                    limit_int = int(limit)
+                    if remain_int < limit_int * 0.2:
+                        st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
+            except (ValueError, TypeError):
+                pass
+        st.markdown(
+            f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>", # type: ignore
+            unsafe_allow_html=True,
+        )
 
-        if st.session_state.get("pending_fetch"):
-            st.session_state["pending_fetch"] = False
-            with st.spinner("Fetching fresh data from ReturnGO API..."):
-                perform_sync()
+        if st.button("🔄 Sync All Data", key="btn_sync_all", help="Fetch latest data from ReturnGO API for all stores and statuses. This may take several minutes."):
+            st.session_state.last_sync_pressed = datetime.now()
+            perform_sync() # type: ignore
+        
+        if st.button("🔄 Sync From Cache", help="Reload data from database cache"):
+            st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
+            st.toast("✅ Dashboard synced from database")
+            st.rerun()
+
+        st.markdown( # type: ignore
+            "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
+            unsafe_allow_html=True,
+        )
+        if st.button("🗑️ Reset Cache", key="btn_reset", help="⚠️ Delete ALL cached data from database. Use only for troubleshooting. Next sync will take longer."):
+            if clear_db(): # This function now truncates the PostgreSQL tables
+                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+                st.success("Database has been cleared!")
+                st.rerun()
+            else:
+                st.error("Failed to clear the database.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        if st.button("🔬 Verify DB Schema", key="btn_verify_schema"):
+            with st.spinner("Inspecting database..."):
+                from sqlalchemy import inspect
+
+                # Display connection info first
+                st.subheader("Connection Target (from secrets.toml):")
+                try:
+                    conn_details = {
+                        "host": st.secrets.connections.postgresql.host,
+                        "database": st.secrets.connections.postgresql.database,
+                        "username": st.secrets.connections.postgresql.username
+                    }
+                    st.json(conn_details)
+                except Exception as e:
+                    st.error(f"Could not read connection secrets from secrets.toml: {e}")
+
+
+                def get_schema_info(engine):
+                    if engine is None:
+                        return {"error": "Database engine is not initialized."}
+                    try:
+                        inspector = inspect(engine)
+                        table_names = inspector.get_table_names()
+                        if not table_names:
+                            return {"error": "No tables found in the database. The 'init_database' function may have failed or the database is empty."}
+                        
+                        schemas = {}
+                        for table_name in table_names:
+                            schemas[table_name] = []
+                            columns = inspector.get_columns(table_name)
+                            for column in columns:
+                                schemas[table_name].append(f"{column['name']} ({column['type']})")
+                        return schemas
+                    except Exception as e:
+                        return {"error": f"An error occurred while inspecting the schema: {e}"}
+
+                schema_info = get_schema_info(engine)
+                
+                st.subheader("Database Schema:")
+                if "error" in schema_info:
+                    st.error(schema_info["error"])
+                else:
+                    st.success("Schema inspection complete.")
+                    st.json(schema_info)
+
+        render_api_action_bar(compact=True)
 
     # ==========================================
     # 1b. STYLING + STICKY HEADER
@@ -3256,107 +3328,21 @@ def main(): # type: ignore
     # ==========================================
     # 10. HEADER (STICKY)
     # ==========================================
-    h1, h2 = st.columns([3, 1], vertical_alignment="top")
- # type: ignore
-    with h1:
-        st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
-        st.title("Levi's ReturnGO Ops Dashboard")
-        st.markdown(
-            f"""
-            <div class="subtitle-bar">
-              <span class="subtitle-dot"></span>
-              <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
-              <span style="opacity:.45">|</span>
-              <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
+    st.title("Levi's ReturnGO Ops Dashboard")
+    st.markdown(
+        f"""
+        <div class="subtitle-bar">
+            <span class="subtitle-dot"></span>
+            <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
+            <span style="opacity:.45">|</span>
+            <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with h2:
-        last_sync = st.session_state.get("last_sync_pressed") # type: ignore
-        last_sync_display = (
-            last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--" # type: ignore
-        )
-        with RATE_LIMIT_LOCK:
-            remaining = RATE_LIMIT_INFO.get("remaining")
-            limit = RATE_LIMIT_INFO.get("limit")
-        if remaining is not None and limit is not None:
-            try:
-                if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
-                    remain_int = int(remaining)
-                    limit_int = int(limit)
-                    if remain_int < limit_int * 0.2:
-                        st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
-            except (ValueError, TypeError):
-                pass
-        st.markdown(
-            f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>", # type: ignore
-            unsafe_allow_html=True,
-        )
-        if st.button("🔄 Sync Dashboard", key="btn_sync_all", width="stretch"):
-            st.session_state.last_sync_pressed = datetime.now()
-            perform_sync() # type: ignore
-        st.markdown( # type: ignore
-            "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
-            unsafe_allow_html=True,
-        )
-        if st.button("🗑️ Reset Cache", key="btn_reset", width="content"):
-            if clear_db(): # This function now truncates the PostgreSQL tables
-                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
-                st.success("Database has been cleared!")
-                st.rerun()
-            else:
-                st.error("Failed to clear the database.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        if st.button("🔬 Verify DB Schema", key="btn_verify_schema"):
-            with st.spinner("Inspecting database..."):
-                from sqlalchemy import inspect
-
-                # Display connection info first
-                st.subheader("Connection Target (from secrets.toml):")
-                try:
-                    conn_details = {
-                        "instance_connection_name": st.secrets.connections.postgresql.instance_connection_name,
-                        "database": st.secrets.connections.postgresql.database,
-                        "username": st.secrets.connections.postgresql.username
-                    }
-                    st.json(conn_details)
-                except Exception as e:
-                    st.error(f"Could not read connection secrets from secrets.toml: {e}")
-
-
-                def get_schema_info(engine):
-                    if engine is None:
-                        return {"error": "Database engine is not initialized."}
-                    try:
-                        inspector = inspect(engine)
-                        table_names = inspector.get_table_names()
-                        if not table_names:
-                            return {"error": "No tables found in the database. The 'init_database' function may have failed or the database is empty."}
-                        
-                        schemas = {}
-                        for table_name in table_names:
-                            schemas[table_name] = []
-                            columns = inspector.get_columns(table_name)
-                            for column in columns:
-                                schemas[table_name].append(f"{column['name']} ({column['type']})")
-                        return schemas
-                    except Exception as e:
-                        return {"error": f"An error occurred while inspecting the schema: {e}"}
-
-                schema_info = get_schema_info(engine)
-                
-                st.subheader("Database Schema:")
-                if "error" in schema_info:
-                    st.error(schema_info["error"])
-                else:
-                    st.success("Schema inspection complete.")
-                    st.json(schema_info)
-
-        render_api_action_bar(compact=True)
 
     st.write("")
 
