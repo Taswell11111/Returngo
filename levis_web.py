@@ -3421,10 +3421,10 @@ def main(): # type: ignore
             date_counts = (
                 timeline_df.groupby(timeline_df["_req_date_parsed"].dt.normalize()) # pyright: ignore[reportAttributeAccessIssue]
                 .size() # type: ignore
-                .reset_index(name="Count") \
+                .reset_index(name="Count")
+                .rename(columns={"_req_date_parsed": "Date"})
                 .sort_values("Date")
             )
-            date_counts.columns = ["Date", "Count"]
             if date_counts.empty:
                 st.info("No valid requested dates found for charting.")
             else:
