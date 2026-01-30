@@ -3413,31 +3413,35 @@ def main(): # type: ignore
         # Filter to open statuses (defensive: df_view may include non-active if search/filters applied)
         timeline_df = df_view[df_view["Current Status"].isin(ACTIVE_STATUSES)].copy()
         timeline_df["_req_date_parsed"] = pd.to_datetime(
-            timeline_df["Requested date"], errors="coerce"
+            timeline_df["Requested date"], errors="coerce", utc=True
         )
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
 
         if not timeline_df.empty:
             date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # pyright: ignore[reportAttributeAccessIssue]
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.normalize()) # pyright: ignore[reportAttributeAccessIssue]
                 .size() # type: ignore
-                .reset_index(name="Count")
+                .reset_index(name="Count") \
+                .sort_values("Date")
             )
             date_counts.columns = ["Date", "Count"]
-            chart = (
-                alt.Chart(date_counts, title="Daily RMA Requests")
-                .mark_line(point=alt.OverlayMarkDef(color="#fde047"), color="#60a5fa", strokeWidth=2.5)
-                .encode( # type: ignore
-                    x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d", labelAngle=-45)),
-                    y=alt.Y("Count:Q", title="Number of Requests", axis=alt.Axis(grid=True, gridOpacity=0.2)),
-                    tooltip=[alt.Tooltip("Date:T", title="Date"), alt.Tooltip("Count:Q", title="Requests")],
+            if date_counts.empty:
+                st.info("No valid requested dates found for charting.")
+            else:
+                chart = (
+                    alt.Chart(date_counts, title="Daily RMA Requests")
+                    .mark_line(point=alt.OverlayMarkDef(color="#fde047"), color="#60a5fa", strokeWidth=2.5)
+                    .encode( # type: ignore
+                        x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d", labelAngle=-45)),
+                        y=alt.Y("Count:Q", title="Number of Requests", axis=alt.Axis(grid=True, gridOpacity=0.2)),
+                        tooltip=[alt.Tooltip("Date:T", title="Date"), alt.Tooltip("Count:Q", title="Requests")],
+                    )
+                    .properties(height=300, background="transparent")
+                    .configure_axis(labelColor="#9ca3af", titleColor="#cbd5e1", domainColor="#4b5563", tickColor="#4b5563")
+                    .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
+                    .configure_view(stroke=None)
                 )
-                .properties(height=300, background="transparent")
-                .configure_axis(labelColor="#9ca3af", titleColor="#cbd5e1", domainColor="#4b5563", tickColor="#4b5563")
-                .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
-                .configure_view(stroke=None)
-            )
-            st.altair_chart(chart, use_container_width=True) # type: ignore
+                st.altair_chart(chart, use_container_width=True) # type: ignore
         else:
             st.info("No valid requested dates found for charting.")
 
