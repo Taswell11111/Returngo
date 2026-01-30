@@ -842,8 +842,7 @@ def should_refresh_detail(rma_id: str) -> bool:
 
 @st.cache_data(ttl=COURIER_REFRESH_HOURS * 3600, show_spinner=False)
 def should_refresh_courier(rma_payload: dict) -> bool:
-    if not in_courier_refresh_window():
-        return False
+
     cached_checked = rma_payload.get("_local_courier_checked")
     if not cached_checked:
         return True
@@ -3316,7 +3315,7 @@ def main(): # type: ignore
             has_tracking=bool(track_nums),
         )
 
-        if track_nums and should_refresh_courier(rma):
+        if track_nums and in_courier_refresh_window() and should_refresh_courier(rma):
             rmas_needing_courier_refresh.append((rma_id, rma, requested_iso, status))
 
         if has_refund_failure:
@@ -3382,17 +3381,6 @@ def main(): # type: ignore
                 logger.error("Error calculating count for %s: %s", filter_name, exc)
                 counts[count_key] = 0
 
-    if rmas_needing_courier_refresh and in_courier_refresh_window():
-        def refresh_courier_batch():
-            for rma_id, rma_payload, requested_iso, status in rmas_needing_courier_refresh:
-                try: # type: ignore
-                    courier_status, courier_checked = maybe_refresh_courier(rma_payload)
-                    if courier_status:
-                        upsert_rma(
-                            rma_id=str(rma_id),
-                            status=status,
-                            created_at=requested_iso or "",
-                            payload=rma_payload,
     if rmas_needing_courier_refresh and in_courier_refresh_window():
         def refresh_courier_batch(rmas_to_refresh):
             for rma_id, rma_payload, requested_iso, status in rmas_to_refresh:
@@ -3487,47 +3475,20 @@ def main(): # type: ignore
         for (label, count, key), col in zip(snapshot_items, snapshot_cols):
             with col:
                 is_active = st.session_state.get("daily_snapshot_filter") == key
+                # Simplified, more robust card implementation using native Streamlit elements
+                # The surrounding div with the 'snapshot-card' class is for styling
                 st.markdown(
-                    f"""
-                    <div class='snapshot-card {'active' if is_active else ''}' data-snapshot-key='{key}'>
-                        <div class='snapshot-title'>{html.escape(label)}</div>
-                        <div class='snapshot-count'>{count}</div>
-                        <div class='snapshot-meter'><span style='width:100%'></span></div>
-                        <div class='snapshot-action' id='snap-{key}'></div>
-                    </div>
-                    """,
+                    f"<div class='snapshot-card {'active' if is_active else ''}'>",
                     unsafe_allow_html=True,
                 )
-                if st.button(label, key=f"{key}_btn"):
+                st.metric(label=label, value=count)
+
+                button_label = "Clear Filter" if is_active else "Filter"
+                if st.button(button_label, key=key):
                     st.session_state.daily_snapshot_filter = None if is_active else key
                     st.rerun()
 
-        snapshot_map = {label: f"snap-{key}" for label, _, key in snapshot_items}
-        components.html(
-            f"""
-            <script>
-              const snapshotMap = {json.dumps(snapshot_map)};
-              const moveSnapshotButtons = () => {{
-                const buttons = window.parent.document.querySelectorAll('button');
-                Object.entries(snapshotMap).forEach(([label, slotId]) => {{
-                  const slot = window.parent.document.getElementById(slotId);
-                  if (!slot) return;
-                  buttons.forEach((btn) => {{
-                    if (btn.textContent && btn.textContent.trim() === label) {{
-                      const wrapper = btn.closest('[data-testid="stButton"]');
-                      if (wrapper && !slot.querySelector('button')) {{
-                        slot.appendChild(wrapper);
-                      }}
-                    }}
-                  }});
-                }});
-              }};
-              setTimeout(moveSnapshotButtons, 200);
-              setTimeout(moveSnapshotButtons, 800);
-            </script>
-            """,
-            height=0,
-        )
+                st.markdown("</div>", unsafe_allow_html=True)
 
     
     st.markdown("### 📊 Command Center")
@@ -3989,7 +3950,9 @@ def main(): # type: ignore
         return [""] * len(row)
 
     cols_for_styling = list(
-        dict.fromkeys(visible_cols + ["DisplayTrack", "failures", "is_cc", "is_fg"])
+        dict.fromkeys(
+            visible_cols + ["Current Status", "DisplayTrack", "failures", "is_cc", "is_fg"]
+        )
     )
     styling_df = display_df[cols_for_styling].copy()
     styled_table = styling_df.style.apply(highlight_problematic_rows, axis=1)
