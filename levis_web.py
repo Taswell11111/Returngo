@@ -2428,6 +2428,7 @@ def main(): # type: ignore
         <style>
           .stApp {
             position: relative;
+            z-index: 0;
             background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
                         radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
                         #0b1f3a;
@@ -2441,7 +2442,7 @@ def main(): # type: ignore
               linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent 40%),
               linear-gradient(225deg, rgba(226, 232, 240, 0.06), transparent 45%);
             pointer-events: none;
-            z-index: 0;
+            z-index: -1;
           }
           .stApp::after {
             content: "";
