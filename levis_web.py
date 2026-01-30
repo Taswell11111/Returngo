@@ -2809,32 +2809,34 @@ def main(): # type: ignore
             text-align: center;
             color: #e2e8f0;
           }
-          .disconnect-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(2, 6, 23, 0.92);
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            animation: fadeIn 0.6s ease-out;
-          }
-          .disconnect-card {
-            background: rgba(15, 23, 42, 0.95);
-            border: 1px solid rgba(148, 163, 184, 0.3);
+          .disconnect-banner {
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid rgba(148, 163, 184, 0.35);
             border-radius: 18px;
-            padding: 24px 28px;
-            width: min(420px, 88vw);
+            padding: 22px 26px;
             text-align: center;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+            box-shadow: 0 16px 32px rgba(0,0,0,0.35);
+            margin: 12px 0 10px 0;
+            animation: fadeIn 0.45s ease-out;
           }
-          .disconnect-card h2 {
-            margin: 0 0 10px 0;
-            font-size: 1.6rem;
+          .disconnect-banner h2 {
+            margin: 0 0 8px 0;
+            font-size: 1.5rem;
           }
-          .disconnect-card p {
+          .disconnect-banner p {
             margin: 0;
-            color: rgba(226, 232, 240, 0.8);
+            color: rgba(226, 232, 240, 0.82);
+          }
+          .disconnect-actions {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 18px;
+          }
+          .disconnect-actions div.stButton > button {
+            background: rgba(59, 130, 246, 0.25) !important;
+            border: 1px solid rgba(59, 130, 246, 0.5) !important;
+            padding: 8px 16px !important;
+            font-weight: 600 !important;
           }
           .table-actions-left {
             display: flex;
@@ -3208,35 +3210,16 @@ def main(): # type: ignore
     if st.session_state.get("disconnected"):
         st.markdown(
             """
-            <div class="disconnect-overlay">
-              <div class="disconnect-card">
-                <h2>Session disconnected</h2>
-                <p>Please login again to reconnect the database and API.</p>
-                <div id="reconnect-slot"></div>
-              </div>
+            <div class="disconnect-banner">
+              <h2>Session disconnected</h2>
+              <p>Please login again to reconnect the database and API.</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
+        st.markdown('<div class="disconnect-actions">', unsafe_allow_html=True)
         reconnect_clicked = st.button("Login again", key="reconnect_btn")
-        # NOTE: This DOM move is brittle because it relies on Streamlit's
-        # button markup and the exact button label. If Streamlit updates DOM
-        # structure or copy, this may need to be revisited.
-        components.html(
-            """
-            <script>
-              const slot = window.parent.document.querySelector('#reconnect-slot');
-              const buttons = window.parent.document.querySelectorAll('button');
-              buttons.forEach((button) => {
-                if (button.textContent && button.textContent.trim() === 'Login again') {
-                  const wrapper = button.closest('[data-testid="stButton"]');
-                  if (wrapper && slot) slot.appendChild(wrapper);
-                }
-              });
-            </script>
-            """,
-            height=0,
-        )
+        st.markdown("</div>", unsafe_allow_html=True)
         if reconnect_clicked:
             st.session_state.disconnected = False
             append_ops_log("✅ Reconnected. Ready to resume.", level="info")
