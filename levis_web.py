@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 import streamlit.components.v1 as components
 import requests
 import json
@@ -171,10 +172,24 @@ def _iso_utc(dt: datetime) -> str:
 def _append_log_entry(log_key: str, message: str, *, level: str = "info", limit: int = 200) -> None:
     if not message:
         return
+    
+    ctx = get_script_run_ctx()
     ts = datetime.now().strftime("%H:%M:%S")
     entry = f"[{ts}] {message}"
+    
     if level and level != "info":
         entry = f"[{ts}] {level.upper()}: {message}"
+        
+    if ctx is None:
+        # We're in a background thread, so use standard logging
+        if level == "error":
+            logger.error(message)
+        elif level == "warning":
+            logger.warning(message)
+        else:
+            logger.info(message)
+        return
+        
     log_entries: List[str] = st.session_state.get(log_key, [])
     log_entries.append(entry)
     st.session_state[log_key] = log_entries[-limit:]
