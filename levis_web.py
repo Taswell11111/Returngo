@@ -3431,25 +3431,23 @@ def main(): # type: ignore
             )
             date_counts.columns = ["Date", "Count"]
             chart = (
-                alt.Chart(date_counts)
-                .mark_line(point=True, color="#60a5fa")
-                .encode(
-                    x=alt.X("Date:T", title="Requested date"),
-                    y=alt.Y("Count:Q", title="Requests"),
-                    tooltip=["Date:T", "Count:Q"],
+                alt.Chart(date_counts, title="Daily RMA Requests")
+                .mark_line(point=alt.OverlayMarkDef(color="#fde047"), color="#60a5fa", strokeWidth=2.5)
+                .encode( # type: ignore
+                    x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d", labelAngle=-45)),
+                    y=alt.Y("Count:Q", title="Number of Requests", axis=alt.Axis(grid=True, gridOpacity=0.2)),
+                    tooltip=[alt.Tooltip("Date:T", title="Date"), alt.Tooltip("Count:Q", title="Requests")],
                 )
-                .properties(height=300)
+                .properties(height=300, background="transparent")
+                .configure_axis(labelColor="#9ca3af", titleColor="#cbd5e1", domainColor="#4b5563", tickColor="#4b5563")
+                .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
+                .configure_view(stroke=None)
             )
-            st.altair_chart(chart, width="stretch")
+            st.altair_chart(chart, use_container_width=True)
         else:
             st.info("No valid requested dates found for charting.")
 
         st.write("")
-        st.markdown("### Daily Status Snapshot")
-        st.markdown(
-            "<div style='color:#cbd5f5'>Snapshot reflects today's Returns activity.</div>",
-            unsafe_allow_html=True,
-        )
 
         def snapshot_count(status_label: str, date_column: str) -> int:
             if df_view.empty or date_column not in df_view.columns:
