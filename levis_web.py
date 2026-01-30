@@ -2426,13 +2426,18 @@ def main(): # type: ignore
     st.markdown(
         """
         <style>
-          .stApp {
-            position: relative;
-            z-index: 0;
+          html,
+          body {
             background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
                         radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
                         #0b1f3a;
             color: #e5e7eb;
+          }
+          .stApp {
+            position: relative;
+            z-index: 0;
+            background: transparent !important;
+            color: inherit;
           }
           .stApp::before {
             content: "";
@@ -2515,6 +2520,12 @@ def main(): # type: ignore
             background: transparent !important;
             position: relative;
             z-index: 1;
+          }
+          [data-testid="stAppViewContainer"],
+          [data-testid="stAppViewContainer"] > .main,
+          .main,
+          .main > div {
+            background: transparent !important;
           }
           section[data-testid="stSidebar"] {
             border-right: none !important;
