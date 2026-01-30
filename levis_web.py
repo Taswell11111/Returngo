@@ -2119,7 +2119,7 @@ def render_command_tile(
         if st.button(
             button_label,
             key=f"tile_{name}",
-            use_container_width=True,
+            width="stretch",
         ):
             toggle_filter(name) # type: ignore
 
@@ -2161,12 +2161,12 @@ def render_api_action_bar(*, compact: bool = False):
                 label_visibility="collapsed",
             )
         else:
-            if st.button("⚡ Execute", key="api_execute_btn", type="primary", use_container_width=True):
+            if st.button("⚡ Execute", key="api_execute_btn", type="primary", width="stretch"):
                 execute_api_operation(api_endpoint, "")
                 return
 
     if operation.get("requires_context"):
-        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", use_container_width=True): # type: ignore
+        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", width="stretch"): # type: ignore
             execute_api_operation(api_endpoint, st.session_state.get("api_context_input", ""))
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -3439,7 +3439,7 @@ def main(): # type: ignore
                 )
                 .properties(height=300)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
         else:
             st.info("No valid requested dates found for charting.")
 
