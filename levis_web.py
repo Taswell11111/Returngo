@@ -3437,7 +3437,7 @@ def main(): # type: ignore
                 .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
                 .configure_view(stroke=None)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, use_container_width=True) # type: ignore
         else:
             st.info("No valid requested dates found for charting.")
 
