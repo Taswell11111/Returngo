@@ -3417,12 +3417,12 @@ def main(): # type: ignore
         )
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
 
-        if not timeline_df.empty:
             date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.normalize()) # pyright: ignore[reportAttributeAccessIssue]
+                timeline_df.groupby(
+                    timeline_df["_req_date_parsed"].dt.normalize().rename("Date"), as_index=False
+                ) # pyright: ignore[reportAttributeAccessIssue]
                 .size() # type: ignore
-                .reset_index(name="Count")
-                .rename(columns={"_req_date_parsed": "Date"}, errors="raise")
+                .rename(columns={"size": "Count"})
                 .sort_values("Date")
             )
             if date_counts.empty:
