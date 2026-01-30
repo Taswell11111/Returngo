@@ -1,5 +1,6 @@
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
+import numpy as np
 import streamlit.components.v1 as components
 import requests
 import json
@@ -3440,7 +3441,7 @@ def main(): # type: ignore
             .rename(columns={"size": "Count"})
             .sort_values("Date")
         )
-        if date_counts.empty:
+        if date_counts.empty or not np.isfinite(date_counts['Count']).all():
             st.info("No valid requested dates found for charting.")
         else:
             chart = (
