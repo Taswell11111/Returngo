@@ -3419,8 +3419,8 @@ def main(): # type: ignore
 
         date_counts = (
             timeline_df.groupby(
-                timeline_df["_req_date_parsed"].dt.normalize().rename("Date"), as_index=False
-            ) # pyright: ignore[reportAttributeAccessIssue]
+                timeline_df["_req_date_parsed"].dt.date.rename("Date"), as_index=False
+            )
             .size() # type: ignore
             .rename(columns={"size": "Count"})
             .sort_values("Date")
