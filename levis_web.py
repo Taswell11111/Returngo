@@ -2443,9 +2443,9 @@ def main(): # type: ignore
         <style>
           html,
           body {
-            background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
+            /* background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
                         radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
-                        #0b1f3a;
+                        #0b1f3a; */
             color: #e5e7eb;
           }
           .stApp {
@@ -3456,7 +3456,7 @@ def main(): # type: ignore
                 .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
                 .configure_view(stroke=None)
             )
-            st.altair_chart(chart, use_container_width=True) # type: ignore
+            st.altair_chart(chart, theme="streamlit", width='stretch') # type: ignore
 
         st.write("")
 
