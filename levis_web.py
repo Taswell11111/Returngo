@@ -3417,33 +3417,31 @@ def main(): # type: ignore
         )
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
 
-            date_counts = (
-                timeline_df.groupby(
-                    timeline_df["_req_date_parsed"].dt.normalize().rename("Date"), as_index=False
-                ) # pyright: ignore[reportAttributeAccessIssue]
-                .size() # type: ignore
-                .rename(columns={"size": "Count"})
-                .sort_values("Date")
-            )
-            if date_counts.empty:
-                st.info("No valid requested dates found for charting.")
-            else:
-                chart = (
-                    alt.Chart(date_counts, title="Daily RMA Requests")
-                    .mark_line(point=alt.OverlayMarkDef(color="#fde047"), color="#60a5fa", strokeWidth=2.5)
-                    .encode( # type: ignore
-                        x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d", labelAngle=-45)),
-                        y=alt.Y("Count:Q", title="Number of Requests", axis=alt.Axis(grid=True, gridOpacity=0.2)),
-                        tooltip=[alt.Tooltip("Date:T", title="Date"), alt.Tooltip("Count:Q", title="Requests")],
-                    )
-                    .properties(height=300, background="transparent")
-                    .configure_axis(labelColor="#9ca3af", titleColor="#cbd5e1", domainColor="#4b5563", tickColor="#4b5563")
-                    .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
-                    .configure_view(stroke=None)
-                )
-                st.altair_chart(chart, use_container_width=True) # type: ignore
-        else:
+        date_counts = (
+            timeline_df.groupby(
+                timeline_df["_req_date_parsed"].dt.normalize().rename("Date"), as_index=False
+            ) # pyright: ignore[reportAttributeAccessIssue]
+            .size() # type: ignore
+            .rename(columns={"size": "Count"})
+            .sort_values("Date")
+        )
+        if date_counts.empty:
             st.info("No valid requested dates found for charting.")
+        else:
+            chart = (
+                alt.Chart(date_counts, title="Daily RMA Requests")
+                .mark_line(point=alt.OverlayMarkDef(color="#fde047"), color="#60a5fa", strokeWidth=2.5)
+                .encode( # type: ignore
+                    x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d", labelAngle=-45)),
+                    y=alt.Y("Count:Q", title="Number of Requests", axis=alt.Axis(grid=True, gridOpacity=0.2)),
+                    tooltip=[alt.Tooltip("Date:T", title="Date"), alt.Tooltip("Count:Q", title="Requests")],
+                )
+                .properties(height=300, background="transparent")
+                .configure_axis(labelColor="#9ca3af", titleColor="#cbd5e1", domainColor="#4b5563", tickColor="#4b5563")
+                .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
+                .configure_view(stroke=None)
+            )
+            st.altair_chart(chart, use_container_width=True) # type: ignore
 
         st.write("")
 
