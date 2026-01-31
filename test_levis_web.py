@@ -1,4 +1,3 @@
-
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
@@ -14,9 +13,13 @@ from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sqlalchemy import create_engine, text, Engine
-import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
+import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List, Literal
 from returngo_api import api_url, RMA_COMMENT_PATH
+from dataclasses import dataclass, asdict
+from enum import Enum
+import pickle
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
@@ -25,9 +28,7 @@ if not logging.getLogger().hasHandlers():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-# Suppress the "missing ScriptRunContext" warning when running in non-Streamlit environments
-# This warning is benign if the script is not intended to be run directly by `streamlit run`.
-# The recommended way to run Streamlit apps is `streamlit run your_script.py`.
+# Suppress the "missing ScriptRunContext" warning
 class NoScriptRunContextWarningFilter(logging.Filter):
     def filter(self, record):
         return not record.getMessage().startswith("Thread 'MainThread': missing ScriptRunContext!")
@@ -36,9 +37,41 @@ script_run_context_logger = logging.getLogger("streamlit.runtime.scriptrunner_ut
 script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 
 # ==========================================
+# NEW: Data classes for enhanced features
+# ==========================================
+@dataclass
+class UserSettings:
+    theme: str = "dark"  # dark, light, auto
+    favorites: List[str] = None
+    export_presets: Dict[str, Dict] = None
+    performance_metrics: bool = True
+    keyboard_shortcuts: bool = True
+    
+    def __post_init__(self):
+        if self.favorites is None:
+            self.favorites = []
+        if self.export_presets is None:
+            self.export_presets = {}
+
+@dataclass
+class PerformanceMetrics:
+    api_call_times: List[float] = None
+    cache_hit_rate: float = 0.0
+    last_sync_duration: float = 0.0
+    avg_response_time: float = 0.0
+    
+    def __post_init__(self):
+        if self.api_call_times is None:
+            self.api_call_times = []
+
+class Theme(Enum):
+    DARK = "dark"
+    LIGHT = "light"
+    AUTO = "auto"
+
+# ==========================================
 # 1a. CONFIGURATION
 # ==========================================
-
 @st.cache_resource
 def init_database() -> Optional[Engine]:
     """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
@@ -53,17 +86,12 @@ def init_database() -> Optional[Engine]:
         port = creds["port"]
         database = creds["database"]
 
-        # Construct the database URL, including the driver if specified
         db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
-
         connect_args = {"timeout": 60}
 
-        # Handle SSL settings based on the specified driver
         if driver == "pg8000" and creds.get("sslmode") == "require":
-            # pg8000 uses 'ssl_context' in connect_args
             connect_args["ssl_context"] = True
         elif "sslmode" in creds:
-            # Other drivers like psycopg2 expect 'sslmode' as a URL parameter
             db_url += f"?sslmode={creds['sslmode']}"
 
         logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
@@ -74,7 +102,6 @@ def init_database() -> Optional[Engine]:
             connect_args=connect_args,
         )
 
-        # Use a single transaction to create both tables if they don't exist
         with engine.begin() as connection:
             connection.execute(text("""
             CREATE TABLE IF NOT EXISTS rmas (
@@ -114,7 +141,6 @@ engine = init_database()
 
 # Load API secrets
 try:
-    # Standardize API key name as per error message and rma_web.py context
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
     PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
 except KeyError:
@@ -139,14 +165,73 @@ COURIER_STATUS_OPTIONS = [
     "Delivered",
     "Courier Cancelled",
     "No tracking number",
-    ]
+]
 
 RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO: Dict[str, Union[int, str, datetime, None]] = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 RATE_LIMIT_LOCK = threading.Lock()
-PARCEL_NINJA_TOKEN: Optional[str] = None # Initialize to None to avoid unbound variable
+PARCEL_NINJA_TOKEN: Optional[str] = None
 df_view = pd.DataFrame()
 counts: Dict[str, int] = {}
+
+# ==========================================
+# NEW: Enhanced feature initializations
+# ==========================================
+USER_SETTINGS_FILE = Path("user_settings.pkl")
+PERFORMANCE_FILE = Path("performance_metrics.pkl")
+KEYBOARD_SHORTCUTS = {
+    "1": "Pending Requests",
+    "2": "Approved - Submitted",
+    "3": "Approved - In Transit",
+    "4": "Received",
+    "5": "No Tracking",
+    "6": "Flagged",
+    "7": "Courier Cancelled",
+    "8": "Approved - Delivered",
+    "9": "Resolution Actioned",
+    "0": "No Resolution Actioned",
+    "s": "search",
+    "f": "toggle_favorites",
+    "r": "refresh_all",
+    "e": "export_csv",
+    "c": "clear_filters",
+}
+
+def load_user_settings() -> UserSettings:
+    """Load user settings from file or create default."""
+    if USER_SETTINGS_FILE.exists():
+        try:
+            with open(USER_SETTINGS_FILE, 'rb') as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return UserSettings()
+
+def save_user_settings(settings: UserSettings):
+    """Save user settings to file."""
+    try:
+        with open(USER_SETTINGS_FILE, 'wb') as f:
+            pickle.dump(settings, f)
+    except Exception as e:
+        logger.error(f"Failed to save user settings: {e}")
+
+def load_performance_metrics() -> PerformanceMetrics:
+    """Load performance metrics from file."""
+    if PERFORMANCE_FILE.exists():
+        try:
+            with open(PERFORMANCE_FILE, 'rb') as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return PerformanceMetrics()
+
+def save_performance_metrics(metrics: PerformanceMetrics):
+    """Save performance metrics to file."""
+    try:
+        with open(PERFORMANCE_FILE, 'wb') as f:
+            pickle.dump(metrics, f)
+    except Exception as e:
+        logger.error(f"Failed to save performance metrics: {e}")
 
 # ==========================================
 # 2. HTTP SESSIONS + RATE LIMITING
@@ -244,7 +329,6 @@ def get_parcel_session() -> requests.Session:
 
 
 def rg_headers() -> Dict[str, Optional[str]]:
-    # ReturnGO accepts the API key in either casing; include both for comment POST parity.
     return {"x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY, "x-shop-name": STORE_URL}
 
 
@@ -277,7 +361,7 @@ def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
         sval = str(val).strip()
         return int(sval) if sval.isdigit() else sval
 
-    with RATE_LIMIT_LOCK: # type: ignore
+    with RATE_LIMIT_LOCK:
         RATE_LIMIT_INFO["remaining"] = to_int(remaining)
         RATE_LIMIT_INFO["limit"] = to_int(limit)
         RATE_LIMIT_INFO["reset"] = to_int(reset)
@@ -285,6 +369,7 @@ def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
 
 
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
+    start_time = time.time()
     logger.info(f"rg_request: Making {method} request to {url}")
     session: requests.Session = get_thread_session()
     headers = headers or rg_headers()
@@ -298,7 +383,13 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
         logger.info(f"rg_request: Request completed with status {res.status_code if res else 'None'}")
         update_rate_limit_info(res.headers)
         if res.status_code != 429:
-            return res # type: ignore
+            end_time = time.time()
+            # Track performance metrics
+            if "performance_metrics" in st.session_state:
+                st.session_state.performance_metrics.api_call_times.append(end_time - start_time)
+                if len(st.session_state.performance_metrics.api_call_times) > 100:
+                    st.session_state.performance_metrics.api_call_times = st.session_state.performance_metrics.api_call_times[-100:]
+            return res
 
         RATE_LIMIT_HIT.set()
 
@@ -311,21 +402,16 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
 
         time.sleep(sleep_s)
 
-    return None # Explicitly return None if all retries fail after retries
+    return None
 
 
 # ==========================================
 # 3. DATABASE
 # ==========================================
-
-
-
-
 def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
                courier_status: Optional[str] = None, courier_checked_iso: Optional[str] = None):
     now_iso = _iso_utc(_now_utc())
     
-    # Convert created_at to a timezone-aware datetime object
     created_at_dt = None
     if created_at:
         try:
@@ -345,7 +431,6 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
         return
         
     with engine.connect() as connection:
-        # First, select the existing values
         select_query = text("SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=:rma_id")
         result = connection.execute(select_query, {"rma_id": rma_id}).fetchone()
 
@@ -379,7 +464,7 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
         connection.execute(insert_query, {
             "rma_id": str(rma_id),
             "store_url": STORE_URL,
-            "status": status, # type: ignore
+            "status": status,
             "created_at": created_at_dt,
             "json_data": payload,
             "last_fetched": now_iso,
@@ -391,10 +476,10 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
 
 
 def delete_rmas(rma_ids):
-    if not rma_ids: # type: ignore
+    if not rma_ids:
         return
-    if isinstance(rma_ids, (str, bytes)): # type: ignore
-        rma_ids = [rma_ids] # type: ignore
+    if isinstance(rma_ids, (str, bytes)):
+        rma_ids = [rma_ids]
 
     seen: Set[str] = set()
     normalized_ids = []
@@ -473,11 +558,6 @@ def get_all_open_from_db():
 
 @st.cache_data(show_spinner=False, ttl=60)
 def load_open_rmas(_cache_version: int):
-    """
-    Loads all RMAs with an 'active' status from the PostgreSQL database.
-    This function is cached by Streamlit. The cache is invalidated when `_cache_version`
-    is changed, forcing a fresh read from the database.
-    """
     return get_all_open_from_db()
 
 
@@ -512,7 +592,6 @@ def get_last_sync(scope: str) -> Optional[datetime]:
         row = connection.execute(query, {"scope": scope}).fetchone()
         if row and row[0]:
             try:
-                # The value from postgres is already a datetime object
                 return row[0]
             except Exception:
                 return None
@@ -522,7 +601,7 @@ def clear_db():
     if engine is None:
         return False
     try:
-        with engine.begin() as connection: # Use begin() for a transaction
+        with engine.begin() as connection:
             connection.execute(text("TRUNCATE TABLE rmas, sync_logs;"))
         return True
     except Exception as e:
@@ -756,7 +835,6 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number:
         return "No tracking number"
-
     return check_courier_status_web_scraping(tracking_number)
 
 
@@ -776,7 +854,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         updated_filter = f"&rma_updated_at=gte:{_iso_utc(since_dt)}"
 
     while True:
-        base_url = f"{api_url('/rmas')}?pagesize=500&status={status_param}{updated_filter}" # type: ignore
+        base_url = f"{api_url('/rmas')}?pagesize=500&status={status_param}{updated_filter}"
         url = f"{base_url}&cursor={cursor}" if cursor else base_url
 
         res = rg_request("GET", url, timeout=20)
@@ -786,7 +864,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         if res.status_code != 200:
             err_text = (res.text or "").strip()
             if len(err_text) > 200:
-                err_text = f"{err_text[:200]}..." # type: ignore
+                err_text = f"{err_text[:200]}..."
             last_error = f"{res.status_code}: {err_text}" if err_text else str(res.status_code)
             break
 
@@ -794,7 +872,7 @@ def fetch_rma_list(statuses, since_dt: Optional[datetime]) -> Tuple[list, bool, 
         try:
             data = res.json() if res.content else {}
         except ValueError:
-            last_error = "Invalid JSON response from ReturnGO" # type: ignore
+            last_error = "Invalid JSON response from ReturnGO"
             break
         rmas = data.get("rmas", []) or []
         if not rmas:
@@ -838,7 +916,6 @@ def should_refresh_courier(rma_payload: dict) -> bool:
         return True
 
 
-# This function would now primarily orchestrate fetching and caching of courier status
 def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[str]]:
     shipments = rma_payload.get("shipments", []) or []
     track_no = None
@@ -852,12 +929,9 @@ def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[st
     cached_status = rma_payload.get("_local_courier_status")
     cached_checked = rma_payload.get("_local_courier_checked")
     
-    # Use the cached check_courier_status directly
-    status = check_courier_status(track_no) # This call is now cached by st.cache_data
+    status = check_courier_status(track_no)
     
-    # If the status was just refreshed (i.e., cache miss for check_courier_status), update checked_iso
-    # Otherwise, use the existing cached_checked
-    if status != cached_status or cached_checked is None: # Simple heuristic to detect refresh
+    if status != cached_status or cached_checked is None:
         checked_iso = _iso_utc(_now_utc())
     else:
         checked_iso = cached_checked
@@ -867,2803 +941,4 @@ def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[st
 def fetch_rma_detail(rma_id: str, *, force: bool = False):
     cached = get_rma(rma_id)
     if (not force) and cached and not should_refresh_detail(rma_id):
-        return cached[0]
-
-    
-    url = api_url(f"/rma/{rma_id}")
-    res: Optional[requests.Response] = rg_request("GET", url, timeout=20)
-    if res is None:
-        logger.error("Failed to fetch RMA detail for %s after retries.", rma_id)
-        return cached[0] if cached else None
-    if res.status_code != 200:
-        logger.error("Failed to fetch RMA detail for %s: Status %s, Response: %s", rma_id, res.status_code, res.text)
-        return cached[0] if cached else None
-
-    data = res.json() if res.content else {}
-    summary = data.get("rmaSummary", {}) or {}
-
-    
-    if cached:
-        data["_local_courier_status"] = cached[0].get("_local_courier_status")
-        data["_local_courier_checked"] = cached[0].get("_local_courier_checked")
-        data["_local_received_first_seen"] = cached[0].get("_local_received_first_seen")
-
-    courier_status, courier_checked = maybe_refresh_courier(data)
-    
-    try: # type: ignore
-        upsert_rma(
-            rma_id=str(rma_id),
-            status=summary.get("status", "Unknown"),
-            created_at=summary.get("createdAt") or data.get("createdAt") or "",
-            payload=data,
-            courier_status=courier_status,
-            courier_checked_iso=courier_checked,
-        )
-        # Refresh local fields for UI
-        fresh = get_rma(str(rma_id))
-        if fresh:
-            data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
-        data["_local_courier_status"] = courier_status
-        data["_local_courier_checked"] = courier_checked
-        return data
-    except Exception as e:
-        logger.error("Error upserting RMA %s to DB: %s", rma_id, e)
-        return cached[0] if cached else None # Return cached if upsert fails
-
-
-def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
-    if full:
-        return None
-    stamps = [get_last_sync(s) for s in statuses]
-    stamps = [d for d in stamps if d]
-    return min(stamps) if stamps else None
-
-
-def perform_sync(statuses=None, *, full=False, rerun: bool = True):
-    if st.session_state.get("disconnected"):
-        append_ops_log("System is disconnected. Login again to resume sync.", level="warning")
-        return
-    failed_fetches = 0
-    successful_fetches = 0
-    append_ops_log("⏳ Connecting to ReturnGO...")
-
-    if statuses is None:
-        statuses = ACTIVE_STATUSES
-
-    since_dt = get_incremental_since(statuses, full)
-
-    append_ops_log("Calling fetch_rma_list...")
-    summaries, ok, err = fetch_rma_list(statuses, since_dt)
-    append_ops_log(f"fetch_rma_list returned. ok={ok}, error='{err}'")
-    if not ok:
-        msg = f"ReturnGO sync failed: {err}" if err else "ReturnGO sync failed."
-        append_ops_log(msg, level="error")
-        return
-    append_ops_log(f"Fetched {len(summaries)} RMAs.")
-
-    api_ids = {s.get("rmaId") for s in summaries if s.get("rmaId")}
-
-    # tidy cache only for open statuses scope
-    if set(statuses) == set(ACTIVE_STATUSES) and not full and since_dt is not None:
-        local_active_ids = set()
-        for stt in ACTIVE_STATUSES:
-            local_active_ids |= get_local_ids_for_status(stt) # type: ignore
-        stale = local_active_ids - api_ids # type: ignore
-        logger.info("Removing %s stale RMAs no longer in active statuses", len(stale))
-        delete_rmas(stale)
-    elif full:
-        if engine is None:
-            return
-        with engine.connect() as connection:
-            query = text("SELECT rma_id FROM rmas WHERE store_url=:store_url")
-            result = connection.execute(query, {"store_url": STORE_URL})
-            all_local_ids = {r[0] for r in result.fetchall()}
-        # Fetch all local IDs from the DB
-        stale_full = all_local_ids - api_ids # type: ignore
-        if stale_full:
-            logger.info("Full sync: removing %s RMAs not in API response", len(stale_full))
-            delete_rmas(stale_full)
-
-    # If incremental, force-refresh details for returned IDs (they changed)
-    if since_dt is not None:
-        to_fetch = list(api_ids)
-        force = True
-    else:
-        to_fetch = [rid for rid in api_ids if should_refresh_detail(rid)]
-        force = False
-
-    total = len(to_fetch)
-    append_ops_log(f"⏳ Syncing {total} records...")
-
-    successful_fetches = 0
-    failed_fetches = 0
-    if total > 0:
-        append_ops_log(f"Starting to fetch details for {total} RMAs one by one...")
-
-        for i, rid in enumerate(to_fetch):
-            done = i + 1
-            if done == 1 or done % 5 == 0 or done == total:
-                append_ops_log(f"[{done}/{total}] Fetching detail for RMA: {rid}")
-
-            result = fetch_rma_detail(rid, force=force)
-
-            if result is not None:
-                successful_fetches += 1
-            else:
-                failed_fetches += 1
-
-        append_ops_log("Finished fetching all details.")
-
-    now = _now_utc()
-    scope = ",".join(statuses)
-    set_last_sync(scope, now)
-    for s in statuses:
-        set_last_sync(s, now)
-
-    if failed_fetches == 0:
-        append_ops_log(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
-    else:
-        append_ops_log(
-            f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed."
-        )
-    st.session_state["show_toast"] = True
-    try:
-        load_open_rmas.clear()
-    except Exception:
-        append_ops_log("Failed to clear open-RMA cache", level="error")
-    if rerun:
-        st.rerun()
- # type: ignore
-
-def force_refresh_rma_ids(rma_ids, scope_label: str):
-    if st.session_state.get("disconnected"):
-        append_ops_log("System is disconnected. Login again to refresh data.", level="warning")
-        return
-    ids = [str(i) for i in set(rma_ids) if i]
-    if not ids: # type: ignore
-        set_last_sync(scope_label, _now_utc())
-        st.session_state["show_toast"] = True
-        st.rerun()
-        # Note: st.rerun() raises a RerunException and normally prevents execution
-        # from reaching this return; it exists to satisfy type checkers / static analyzers.
-        return
-
-    append_ops_log(f"⏳ Refreshing {len(ids)} records...")
-
-    total = len(ids)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(fetch_rma_detail, rid, force=True) for rid in ids]
-        done = 0
-        for _ in concurrent.futures.as_completed(futures):
-            done += 1
-            if done == 1 or done % 10 == 0 or done == total:
-                append_ops_log(f"Refreshing progress: {done}/{total}")
-
-    set_last_sync(scope_label, _now_utc())
-    st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
-    st.session_state["show_toast"] = True
-    append_ops_log("✅ Refresh Complete!")
-    try:
-        load_open_rmas.clear()
-    except Exception as e:
-        append_ops_log(f"Failed to clear open-RMA cache: {e}", level="error")
-    st.rerun()
-
-# ==========================================
-# 6. MUTATIONS
-# ==========================================
-def push_tracking_update(rma_id, shipment_id, tracking_number):
-    headers = {**rg_headers(), "Content-Type": "application/json"}
-    payload = {
-        "status": "LabelCreated",
-        "carrierName": "CourierGuy",
-        "trackingNumber": tracking_number,
-        "trackingURL": f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}",
-        "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
-    }
-
-    try:
-        res: Optional[requests.Response] = rg_request("PUT", api_url(f"/shipment/{shipment_id}"), headers=headers, timeout=15, json_body=payload)
-        if res is not None and res.status_code == 200:
-            fetch_rma_detail(rma_id, force=True)
-            return True, "Success"
-        if res is None:
-            return False, "API Error: No response"
-        return False, f"API Error {res.status_code}: {res.text}"
-    except Exception as e:
-        return False, str(e)
-
-
-def push_comment_update(rma_id, comment_text):
-    headers = {**rg_headers(), "Content-Type": "application/json"}
-    payload = {"htmlText": comment_text}
-
-    try:
-        res: Optional[requests.Response] = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), headers=headers, timeout=15, json_body=payload)
-        if res is not None and res.status_code in (200, 201):
-            fetch_rma_detail(rma_id, force=True)
-            return True, "Success"
-        if res is None:
-            return False, "API Error: No response"
-        return False, f"API Error {res.status_code}: {res.text}"
-    except Exception as e:
-        return False, str(e)
-
-
-# ==========================================
-# 7. Helpers
-# ==========================================
-def get_event_date_iso(rma_payload: dict, event_name: str) -> str:
-    summary = rma_payload.get("rmaSummary", {}) or {}
-    for e in (summary.get("events") or []):
-        if e.get("eventName") == event_name and e.get("eventDate"):
-            return str(e["eventDate"])
-    return ""
-
-
-def get_received_date_iso(rma_payload: dict) -> str:
-    for name in ("SHIPMENT_RECEIVED", "RMA_RECEIVED", "RMA_STATUS_RECEIVED"):
-        dt = get_event_date_iso(rma_payload, name)
-        if dt:
-            return dt
-
-    for c in (rma_payload.get("comments") or []):
-        txt = (c.get("htmlText", "") or "").lower()
-        if "shipment" in txt and "received" in txt and c.get("datetime"):
-            return str(c.get("datetime"))
-
-    return str(rma_payload.get("_local_received_first_seen") or "")
-
-
-def pretty_resolution(rt: Optional[str]) -> str:
-    if not rt:
-        return ""
-    out = re.sub(r"([a-z])([A-Z])", r"\1 \2", rt).strip()
-    return out.replace("To ", "to ")
-
-
-def get_resolution_type(rma_payload: dict) -> str:
-    items = (
-        rma_payload.get("items")
-        or (rma_payload.get("rmaSummary", {}) or {}).get("items")
-        or []
-    )
-    types = {i.get("resolutionType") for i in items if isinstance(i, dict) and i.get("resolutionType")}
-    if len(types) > 1:
-        return "Mix"
-    if len(types) == 1:
-        return pretty_resolution(next(iter(types)))
-    return ""
-
-
-def is_resolution_actioned(rma_payload: dict, comment_texts: Optional[list] = None) -> bool:
-    for t in (rma_payload.get("transactions") or []):
-        if (t.get("status") or "").lower() == "success":
-            return True
-    ex_orders = rma_payload.get("exchangeOrders") or []
-    if isinstance(ex_orders, list) and len(ex_orders) > 0:
-        return True
-    if comment_texts is None:
-        comment_texts = [(c.get("htmlText", "") or "").lower() for c in (rma_payload.get("comments") or [])]
-    for txt in comment_texts:
-        if "transaction id" in txt and ("refund" in txt or "credited" in txt):
-            return True
-        if "exchange order" in txt and "released" in txt:
-            return True
-        if "total refund amount" in txt:
-            return True
-    return False
-
-
-def resolution_actioned_label(rma_payload: dict) -> str:
-    for t in (rma_payload.get("transactions") or []):
-        if (t.get("status") or "").lower() == "success":
-            typ = (t.get("type") or "").strip()
-            return pretty_resolution(typ) if typ else "Yes"
-    ex_orders = rma_payload.get("exchangeOrders") or []
-    if isinstance(ex_orders, list) and len(ex_orders) > 0:
-        return "Exchange released"
-    return "No"
-
-
-def tracking_update_comment(old_tracking: Optional[str], new_tracking: Optional[str]) -> str:
-    old_value = old_tracking.strip() if old_tracking else "None"
-    new_value = new_tracking.strip() if new_tracking else "None"
-    return f"Updated Shipment tracking number from {old_value} to {new_value}."
-
-
-def has_tracking_update_comment(comment_texts: list[str]) -> bool:
-    pattern = re.compile(r"updated shipment", re.IGNORECASE)
-    for text in comment_texts:
-        if pattern.search(text):
-            return True
-    return False
-
-
-def failure_flags(
-    comment_texts: list[str],
-    *,
-    status: str,
-    approved_iso: str,
-    has_tracking: bool,
-) -> tuple[bool, bool, bool, str]:
-    joined = " ".join(comment_texts).lower()
-    has_refund_failure = "refund failed" in joined
-    has_upload_failed = "missing required media" in joined
-    has_shipment_failure = False
-
-    if status == "Approved" and not has_tracking and approved_iso:
-        try:
-            approved_dt = datetime.fromisoformat(approved_iso)
-            if approved_dt.tzinfo is None:
-                approved_dt = approved_dt.replace(tzinfo=timezone.utc)
-            if (_now_utc() - approved_dt) >= timedelta(hours=1):
-                has_shipment_failure = True
-        except ValueError:
-            pass
-
-    labels = []
-    if has_refund_failure:
-        labels.append("refund_failure")
-    if has_upload_failed:
-        labels.append("upload_failed")
-    if has_shipment_failure:
-        labels.append("shipment_failure")
-    return has_refund_failure, has_upload_failed, has_shipment_failure, ", ".join(labels)
-
-
-def parse_yyyy_mm_dd(s: str) -> Optional[datetime]:
-    try:
-        if not s or s == "N/A":
-            return None
-        return datetime.fromisoformat(s[:10])
-    except Exception:
-        return None
-
-
-def days_since(dt_str: str, today: Optional[date] = None) -> str:
-    d = parse_yyyy_mm_dd(dt_str)
-    if not d:
-        return "N/A"
-    if today is None:
-        today = datetime.now().date()
-    return str((today - d.date()).days)
-
-
-def format_api_limit_display() -> Tuple[str, str]: # type: ignore
-    with RATE_LIMIT_LOCK:
-        remaining = RATE_LIMIT_INFO.get("remaining")
-        limit = RATE_LIMIT_INFO.get("limit")
-        reset = RATE_LIMIT_INFO.get("reset")
-        updated_at = RATE_LIMIT_INFO.get("updated_at")
-
-    if remaining is None and limit is None:
-        main = "API Limit: --"
-    elif remaining is not None and limit is not None:
-        main = f"API Left: {remaining}/{limit}"
-    else:
-        main = f"API Left: {remaining}" if remaining is not None else f"API Limit: {limit}"
-
-    sub = "Updated: --"
-    if isinstance(reset, int):
-        try:
-            reset_dt = datetime.fromtimestamp(reset, tz=timezone.utc).astimezone()
-            sub = f"Resets: {reset_dt.strftime('%H:%M')}"
-        except (ValueError, TypeError, OSError):
-            sub = f"Reset: {reset}" # type: ignore
-    elif reset:
-        sub = f"Reset: {reset}"
-    elif updated_at and isinstance(updated_at, datetime):
-        sub = f"Updated: {updated_at.astimezone().strftime('%H:%M')}"
-
-    return main, sub
-
-
-def format_tracking_status_with_icon(status: str) -> str:
-    if not status:
-        return "❓ Unknown"
-
-    if status == "Unknown":
-        return "❓ Unknown"
-
-    if status == "No tracking number":
-        return "🚫 No tracking number"
-
-    status_lower = status.lower()
-    if "return" in status_lower and "sender" in status_lower:
-        return f"↩️ {status}"
-
-    status_patterns = [
-        ("🛑", ["cancel", "failed", "exception", "rejected"]),
-        ("✅", ["delivered"]),
-        ("🚚", ["out for delivery", "out-for-delivery"]),
-        ("📬", ["collected", "picked"]),
-        ("📦", ["in transit", "transit", "on the way"]),
-    ]
-    for icon, keywords in status_patterns:
-        if any(keyword in status_lower for keyword in keywords):
-            return f"{icon} {status}"
-
-    return f"📍 {status}"
-
-
-def toggle_filter(name: str):
-    s: Set[str] = set(st.session_state.active_filters)
-    if name in s:
-        s.remove(name)
-        logger.info("Filter deselected: %s", name)
-    else:
-        s.add(name)
-        logger.info("Filter selected: %s", name)
-    st.session_state.active_filters = s  # type: ignore
-    st.rerun() # type: ignore
-
-
-def clear_all_filters():
-    st.session_state.active_filters = set()  # type: ignore
-    st.session_state.search_query_input = ""
-    st.session_state.status_multi = []
-    st.session_state.res_multi = []
-    st.session_state.actioned_multi = []
-    st.session_state.tracking_status_multi = []
-    st.session_state.req_dates_selected = []
-    st.session_state.failure_refund = False
-    st.session_state.failure_upload = False
-    st.session_state.failure_shipment = False
-
-
-def update_data_table_log(rows: list):
-    if "data_table_log" not in st.session_state:
-        st.session_state.data_table_log = []
-    if "data_table_prev" not in st.session_state:
-        st.session_state.data_table_prev = {}
-
-    prev_map: Dict[str, Dict[str, str]] = st.session_state.data_table_prev # type: ignore
-    current_map = {}
-    new_entries = []
-    timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
-    for row in rows:
-        rma_id = row.get("_rma_id_text") or row.get("RMA ID")
-        if not rma_id:
-            continue
-        status = row.get("Current Status", "Unknown")
-        resolution = row.get("resolutionType", "N/A")
-        current_map[rma_id] = {"status": status, "resolution": resolution}
-
-        prev = prev_map.get(rma_id)
-        if not prev:
-            continue
-        if prev.get("status") != status:
-            new_entries.append(f"{timestamp} | RMA {rma_id}: {prev.get('status')} → {status}")
-        if prev.get("resolution") != resolution:
-            new_entries.append(
-                f"{timestamp} | RMA {rma_id}: Resolution {prev.get('resolution')} → {resolution}"
-            )
-
-    if new_entries:
-        st.session_state.data_table_log = (new_entries + st.session_state.data_table_log)[:100]
-    st.session_state.data_table_prev = {**prev_map, **current_map} # type: ignore
-
-
-def header_last_sync_display(scopes: list) -> str:
-    scope_key = ",".join(scopes)
-    ts = get_last_sync(scope_key)
-    if not ts:
-        stamps = [get_last_sync(s) for s in scopes]
-        stamps = [stamp for stamp in stamps if stamp]
-        ts = max(stamps) if stamps else None
-    if not ts:
-        return "--"
-    return ts.astimezone().strftime("%H:%M")
-
-
-def format_time_ago(last_sync_ts: Optional[datetime]) -> str:
-    if not last_sync_ts:
-        return "Never"
-    time_ago = (_now_utc() - last_sync_ts).total_seconds()
-    if time_ago < 60:
-        return f"{int(time_ago)}s ago"
-    if time_ago < 3600:
-        return f"{int(time_ago / 60)}m ago"
-    return f"{int(time_ago / 3600)}h ago"
-
-
-def inject_command_center_css():
-    st.markdown(
-        """
-        <style>
-        /* ═══════════════════════════════════════════════════════════
-           COMMAND CENTER CORE THEME - REFINED
-           ═══════════════════════════════════════════════════════════ */
-
-        :root {
-            --cc-primary: #3b82f6;
-            --cc-success: #22c55e;
-            --cc-warning: #f59e0b;
-            --cc-danger: #ef4444;
-            --cc-surface: rgba(15, 23, 42, 0.35);
-            --cc-surface-hover: rgba(31, 41, 55, 0.6);
-            --cc-border-neutral: rgba(148, 163, 184, 0.15);
-            --cc-border-active: #22c55e;
-            --cc-glow: rgba(34, 197, 94, 0.4);
-            --cc-text-primary: #f1f5f9;
-            --cc-text-secondary: #94a3b8;
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           GLASSMORPHIC TILE SYSTEM - NO PILLS
-           ═══════════════════════════════════════════════════════════ */
-
-        .command-tile {
-            position: relative;
-            background: linear-gradient(
-                135deg,
-                var(--cc-surface) 0%,
-                rgba(30, 41, 59, 0.4) 100%
-            );
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border: 1px solid var(--cc-border-neutral);
-            border-radius: 16px;
-            padding: 24px 20px;
-            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow:
-                0 4px 6px -1px rgba(0, 0, 0, 0.1),
-                0 2px 4px -1px rgba(0, 0, 0, 0.06),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
-            overflow: hidden;
-        }
-
-        /* Selected tiles keep neutral borders (highlight only on action button) */
-        .command-tile.selected {
-            border-color: var(--cc-border-neutral);
-            box-shadow:
-                0 4px 6px -1px rgba(0, 0, 0, 0.1),
-                0 2px 4px -1px rgba(0, 0, 0, 0.06),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
-        }
-
-        .command-tile:hover {
-            transform: translateY(-2px);
-            box-shadow:
-                0 10px 15px -3px rgba(0, 0, 0, 0.2),
-                0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        }
-
-        /* Remove top accent bar */
-        .command-tile::before {
-            display: none;
-        }
-
-        /* Pulse animation for urgent tiles only */
-        @keyframes pulse-glow {
-            0%, 100% {
-                box-shadow:
-                    0 4px 6px -1px rgba(0, 0, 0, 0.1),
-                    0 0 0 1px var(--cc-border-active),
-                    0 0 20px -5px var(--cc-glow);
-            }
-            50% {
-                box-shadow:
-                    0 4px 6px -1px rgba(0, 0, 0, 0.1),
-                    0 0 0 1px var(--cc-border-active),
-                    0 0 30px -5px var(--cc-glow);
-            }
-        }
-
-        .command-tile.urgent.selected {
-            animation: none;
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           HERO COUNT & TYPOGRAPHY (No color pills)
-           ═══════════════════════════════════════════════════════════ */
-
-        .tile-count {
-            font-size: 3rem;
-            font-weight: 800;
-            line-height: 1;
-            color: var(--cc-text-primary);
-            margin: 0;
-            font-variant-numeric: tabular-nums;
-            letter-spacing: -0.02em;
-            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-        }
-
-        .tile-label {
-            font-size: 0.875rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: var(--cc-text-secondary);
-            margin: 0 0 16px 0;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .tile-label-icon {
-            font-size: 1rem;
-            opacity: 0.7;
-        }
-
-        .tile-divider {
-            width: 100%;
-            height: 1px;
-            background: linear-gradient(
-                90deg,
-                transparent,
-                rgba(148, 163, 184, 0.2) 50%,
-                transparent
-            );
-            margin: 16px 0 12px 0;
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           VIEW DETAILS BUTTON - GREEN BORDER WHEN SELECTED
-           ═══════════════════════════════════════════════════════════ */
-
-        .command-tile div[data-testid="stButton"] > button {
-            all: unset;
-            width: 100%;
-            padding: 10px 16px;
-            background: rgba(255, 255, 255, 0.03);
-            border: 2px solid var(--cc-border-neutral);
-            border-radius: 8px;
-            color: var(--cc-text-primary);
-            font-size: 0.8rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            text-align: center;
-            display: block;
-            box-sizing: border-box;
-        }
-
-        .command-tile div[data-testid="stButton"] > button:focus,
-        .command-tile div[data-testid="stButton"] > button:focus-visible,
-        .command-tile div[data-testid="stButton"] > button:active {
-            outline: none;
-            border-color: var(--cc-border-active);
-            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
-        }
-
-        /* Hover state - green border preview */
-        .command-tile div[data-testid="stButton"] > button:hover {
-            background: rgba(34, 197, 94, 0.08);
-            border-color: var(--cc-border-active);
-            transform: translateY(-1px);
-            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
-        }
-
-        /* Selected state - constant green border */
-        .command-tile.selected div[data-testid="stButton"] > button {
-            border-color: var(--cc-border-active);
-            background: rgba(34, 197, 94, 0.12);
-            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
-        }
-
-        .command-tile.selected div[data-testid="stButton"] > button:hover {
-            background: rgba(34, 197, 94, 0.18);
-            box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.2);
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           REFRESH BUTTON - INLINE WITH COUNT
-           ═══════════════════════════════════════════════════════════ */
-
-        .tile-header-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 4px;
-        }
-
-        .tile-count-wrapper {
-            flex: 0 0 50%;
-            min-width: 0;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .tile-refresh-btn {
-            flex: 0 0 50%;
-            display: flex;
-            justify-content: flex-end;
-        }
-
-        .tile-refresh-btn div[data-testid="stButton"] {
-            margin: 0 !important;
-        }
-
-        .tile-refresh-btn button {
-            all: unset;
-            width: 32px;
-            height: 32px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid var(--cc-border-neutral);
-            border-radius: 6px;
-            color: var(--cc-text-secondary);
-            cursor: pointer;
-            transition: all 0.2s ease;
-            font-size: 1rem;
-        }
-
-        .command-tile.selected .tile-refresh-btn div[data-testid="stButton"] > button {
-            border-color: var(--cc-border-neutral);
-            background: rgba(255, 255, 255, 0.03);
-            box-shadow: none;
-        }
-
-        .tile-refresh-btn button:hover {
-            background: rgba(255, 255, 255, 0.08);
-            border-color: var(--cc-primary);
-            color: var(--cc-text-primary);
-            transform: rotate(90deg);
-        }
-
-        .tile-time {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 0.8rem;
-            color: var(--cc-text-secondary);
-            white-space: nowrap;
-        }
-
-        .tile-status-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: var(--cc-success);
-            animation: pulse-dot 2s ease-in-out infinite;
-        }
-
-        @keyframes pulse-dot {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.4; }
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           RESPONSIVE ADJUSTMENTS
-           ═══════════════════════════════════════════════════════════ */
-
-        @media (max-width: 768px) {
-            .command-tile {
-                padding: 20px 16px;
-            }
-
-            .tile-count {
-                font-size: 2.5rem;
-            }
-
-            .tile-header-row {
-                flex-direction: column;
-            }
-
-            .tile-count-wrapper,
-            .tile-refresh-btn {
-                flex: 0 0 100%;
-                width: 100%;
-            }
-
-            .tile-refresh-btn {
-                margin-top: 8px;
-                align-self: flex-end;
-            }
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           STREAMLIT OVERRIDES
-           ═══════════════════════════════════════════════════════════ */
-
-        .command-tile [data-testid="column"] {
-            padding: 0 !important;
-        }
-
-        .command-tile .stMarkdown {
-            margin: 0 !important;
-        }
-
-        .command-tile .element-container {
-            margin: 0 !important;
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           API ACTION BAR
-           ═══════════════════════════════════════════════════════════ */
-
-        .api-action-bar {
-            background: var(--cc-surface);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--cc-border-neutral);
-            border-radius: 12px;
-            padding: 20px 24px;
-            margin: 24px 0;
-            box-shadow:
-                0 4px 6px -1px rgba(0, 0, 0, 0.1),
-                inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
-        }
-
-        .api-action-bar-title {
-            font-size: 0.7rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: var(--cc-text-secondary);
-            margin-bottom: 12px;
-        }
-
-        .api-action-bar.compact {
-            padding: 0;
-            margin: 12px 0 0 0;
-            background: transparent;
-            border: none;
-            box-shadow: none;
-        }
-
-        .api-action-bar.compact .api-action-bar-title {
-            font-size: 0.6rem;
-            margin-bottom: 8px;
-        }
-
-        .api-action-bar.compact button[kind="primary"] {
-            padding: 8px 14px !important;
-            font-size: 0.75rem !important;
-        }
-
-        .api-action-bar [data-baseweb="select"] {
-            background: rgba(15, 23, 42, 0.8) !important;
-            border: 1px solid var(--cc-border-neutral) !important;
-            border-radius: 8px !important;
-        }
-
-        .api-action-bar [data-baseweb="select"]:hover {
-            border-color: var(--cc-primary) !important;
-            box-shadow: 0 0 0 1px var(--cc-primary) !important;
-        }
-
-        .api-action-bar button[kind="primary"] {
-            background: linear-gradient(135deg, var(--cc-primary), #2563eb) !important;
-            border: none !important;
-            border-radius: 8px !important;
-            padding: 10px 24px !important;
-            font-weight: 600 !important;
-            text-transform: uppercase !important;
-            letter-spacing: 0.05em !important;
-            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3) !important;
-            transition: all 0.2s ease !important;
-        }
-
-        .api-action-bar button[kind="primary"]:hover {
-            transform: translateY(-2px) !important;
-            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4) !important;
-        }
-
-        /* ═══════════════════════════════════════════════════════════
-           UTILITIES
-           ═══════════════════════════════════════════════════════════ */
-
-        .fade-in {
-            animation: fadeIn 0.6s ease-out;
-        }
-
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ==========================================
-# 12. FILTER DEFINITIONS (multi-select)
-# ==========================================
-FilterFn = Callable[[pd.DataFrame], pd.Series]
-
-FILTERS: Dict[str, Dict[str, Any]] = {
-    "Pending Requests": {
-        "icon": "⏳",
-        "count_key": "PendingRequests",
-        "scope": "Pending",
-        "fn": lambda d: d["Current Status"] == "Pending",
-    },
-    "Approved - Submitted": {
-        "icon": "📬",
-        "count_key": "ApprovedSubmitted",
-        "scope": "FILTER_ApprovedSubmitted",
-        "fn": lambda d: (
-            (d["Current Status"] == "Approved")
-            & (d["Tracking Status"].str.contains("Submitted to Courier", case=False, na=False))
-        ),
-    },
-    "Approved - In Transit": {
-        "icon": "🚚",
-        "count_key": "ApprovedInTransit",
-        "scope": "FILTER_ApprovedInTransit",
-        "fn": lambda d: (
-            (d["Current Status"] == "Approved")
-            & (d["DisplayTrack"] != "")
-            & (d["Tracking Status"].str.contains("routing delivery", case=False, na=False))
-        ),
-    },
-    "Received": {
-        "icon": "📦",
-        "count_key": "Received",
-        "scope": "Received",
-        "fn": lambda d: d["Current Status"] == "Received",
-    },
-    "No Tracking": {
-        "icon": "🚫",
-        "count_key": "NoTracking",
-        "scope": "FILTER_NoTracking",
-        "fn": lambda d: d["is_nt"],
-    },
-    "Flagged": {
-        "icon": "🚩",
-        "count_key": "Flagged",
-        "scope": "FILTER_Flagged",
-        "fn": lambda d: d["is_fg"],
-    },
-    "Courier Cancelled": {
-        "icon": "🛑",
-        "count_key": "CourierCancelled",
-        "scope": "FILTER_CourierCancelled",
-        "fn": lambda d: d["is_cc"],
-    },
-    "Approved - Delivered": {
-        "icon": "📬",
-        "count_key": "ApprovedDelivered",
-        "scope": "FILTER_ApprovedDelivered",
-        "fn": lambda d: d["is_ad"],
-    },
-    "Resolution Actioned": {
-        "icon": "💳",
-        "count_key": "ResolutionActioned",
-        "scope": "FILTER_ResolutionActioned",
-        "fn": lambda d: d["is_ra"],
-    },
-    "No Resolution Actioned": {
-        "icon": "⏸️",
-        "count_key": "NoResolutionActioned",
-        "scope": "FILTER_NoResolutionActioned",
-        "fn": lambda d: d["is_nra"],
-    },
-}
-
-API_OPERATIONS = {
-    "Sync: Pending Requests": {
-        "type": "status_sync",
-        "statuses": ["Pending"],
-        "scope": "Pending",
-    },
-    "Sync: Approved - Submitted": {
-        "type": "filter_sync",
-        "statuses": ["Approved"],
-        "scope": "FILTER_ApprovedSubmitted",
-        "filter_name": "Approved - Submitted",
-    },
-    "Sync: Approved - In Transit": {
-        "type": "filter_sync",
-        "statuses": ["Approved"],
-        "scope": "FILTER_ApprovedInTransit",
-        "filter_name": "Approved - In Transit",
-    },
-    "Sync: Received": {
-        "type": "status_sync",
-        "statuses": ["Received"],
-        "scope": "Received",
-    },
-    "Sync: All Open (Pending, Approved, Received)": {
-        "type": "status_sync",
-        "statuses": ACTIVE_STATUSES,
-        "scope": "ALL_OPEN",
-    },
-    "RMA Details (/rma/{id})": {
-        "type": "rma_detail",
-        "requires_context": True,
-    },
-    "Batch Refresh Courier Status": {
-        "type": "batch_courier",
-    },
-    "Export to CSV": {
-        "type": "export_csv",
-    },
-}
-
-
-def current_filter_mask(df: pd.DataFrame) -> pd.Series:
-    """
-    Apply active filters and return a boolean mask.
-    Handles multi-select with OR logic.
-    """ # type: ignore
-    active: Set[str] = st.session_state.active_filters  # type: ignore
-    if df.empty:
-        return pd.Series([], dtype=bool)
-    if not active:
-        return pd.Series([True] * len(df), index=df.index)
-
-    masks = []
-    for name in active:
-        cfg = FILTERS.get(name)
-        if not cfg:
-            continue
-        fn: FilterFn = cfg["fn"]
-        masks.append(fn(df))
-
-    if not masks:
-        return pd.Series([True] * len(df), index=df.index)
-
-    combined_mask = masks[0].copy()
-    for m in masks[1:]:
-        combined_mask = combined_mask | m
-    return combined_mask
-
-
-def deduplicate_filtered_rmas(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove duplicate RMAs that appear in multiple filters.
-    Keep only the instance with the most recent update timestamp.
-
-    Args:
-        df: Filtered DataFrame (already masked by current_filter_mask)
-
-    Returns:
-        DataFrame with duplicates removed based on most recent 'last_fetched'
-    """
-    if df.empty:
-        return df
-
-    if "_rma_id_text" not in df.columns:
-        logger.warning("Cannot deduplicate: _rma_id_text column missing")
-        return df
-
-    def get_last_fetched_ts(row: pd.Series) -> datetime:
-        try:
-            # Prioritize the pre-fetched timestamp from the DataFrame
-            last_fetched_iso = row.get("_last_fetched_iso")
-            if last_fetched_iso:
-                try:
-                    return datetime.fromisoformat(last_fetched_iso)
-                except (ValueError, TypeError):
-                    pass
-
-            # Fallback to requested date if the primary timestamp is missing
-            req_date = row.get("Requested date", "")
-            if req_date and req_date != "N/A":
-                try:
-                    # Parse only the date part and make it timezone-aware for safe comparison
-                    return datetime.fromisoformat(req_date[:10]).replace(tzinfo=timezone.utc)
-                except (ValueError, TypeError):
-                    pass
-
-            return datetime.min.replace(tzinfo=timezone.utc)
-        except Exception:
-            return datetime.min.replace(tzinfo=timezone.utc)
-
-    df_work = df.copy()
-    df_work["_dedup_ts"] = df_work.apply(get_last_fetched_ts, axis=1)
-
-    df_deduped = (
-        df_work.sort_values(["_rma_id_text", "_dedup_ts"], ascending=[True, False])
-        .drop_duplicates(subset="_rma_id_text", keep="first")
-        .drop(columns=["_dedup_ts"])
-    )
-
-    num_removed = len(df_work) - len(df_deduped)
-    if num_removed > 0:
-        logger.info("Removed %s duplicate RMAs (kept most recent)", num_removed)
-
-    return df_deduped
-
-
-def ids_for_filter(name: str) -> list:
-    """Get RMA IDs that match a specific filter."""
-    if df_view.empty:
-        return []
-    cfg = FILTERS.get(name)
-    if not cfg:
-        logger.warning("Filter '%s' not found in FILTERS config", name)
-        return []
-    fn: FilterFn = cfg["fn"]
-    try:
-        mask = fn(df_view)
-        if mask is None or mask.empty:
-            return []
-
-        filtered_df = df_view.loc[mask].copy()
-        if len(st.session_state.active_filters) > 1:
-            filtered_df = deduplicate_filtered_rmas(filtered_df)
-
-        return filtered_df["_rma_id_text"].astype(str).tolist()
-    except Exception as exc:
-        logger.error("Error getting IDs for filter '%s': %s", name, exc)
-        return []
-
-
-# ==========================================
-# 13. COMMAND CENTER TILE UI
-# ==========================================
-def render_command_tile(
-    col,
-    name: str,
-    refresh_scope: str,
-    semantic_label: str,
-    icon: str,
-):
-    """
-    Render a glassmorphic command center tile with inline refresh button.
-
-    Args:
-        col: Streamlit column to render into
-        name: Filter name (e.g., "Pending Requests")
-        refresh_scope: Scope key for sync operations
-        semantic_label: Human-readable action label (e.g., "PENDING REQUESTS")
-        icon: Emoji icon
-    """
-    cfg = FILTERS.get(name)
-    if not cfg:
-        st.error(f"Filter '{name}' not found in FILTERS config")
-        return
-
-    count_key = cfg["count_key"]
-
-    active: Set[str] = st.session_state.active_filters  # type: ignore
-    is_selected = name in active
-    is_urgent = name == "Flagged"
-
-    count_val = counts.get(count_key, 0)
-    last_sync_ts = get_last_sync(refresh_scope)
-    time_ago_str = format_time_ago(last_sync_ts)
-
-    with col:
-        tile_classes = ["command-tile", "fade-in"]
-        if is_selected:
-            tile_classes.append("selected")
-        if is_urgent and is_selected:
-            tile_classes.append("urgent")
-
-        st.markdown(f"<div class='{' '.join(tile_classes)}'>", unsafe_allow_html=True)
-
-        st.markdown("<div class='tile-header-row'>", unsafe_allow_html=True)
-        st.markdown("<div class='tile-count-wrapper'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='tile-count'>{count_val}</div>", unsafe_allow_html=True)
-        st.markdown(
-            f"<div class='tile-time'>"
-            f"<span class='tile-status-dot'></span>"
-            f"<span>Updated {time_ago_str}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='tile-refresh-btn'>", unsafe_allow_html=True)
-        if st.button("⟳", key=f"ref_{name}", help=f"Refresh {semantic_label}"):
-            force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown(
-            f"<div class='tile-label'>"
-            f"<span class='tile-label-icon'>{icon}</span>"
-            f"<span>{semantic_label}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-        button_label = "✓ VIEWING" if is_selected else "VIEW DETAILS"
-        if st.button(
-            button_label,
-            key=f"tile_{name}",
-            use_container_width=True,
-        ):
-            toggle_filter(name) # type: ignore
-
-        st.markdown("<div class='tile-divider'></div>", unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_api_action_bar(*, compact: bool = False):
-    """Render the centralized API operation control panel."""
-    wrapper_class = "api-action-bar compact" if compact else "api-action-bar"
-    st.markdown(f"<div class='{wrapper_class}'>", unsafe_allow_html=True)
-    st.markdown("<div class='api-action-bar-title'>🔌 API Operations</div>", unsafe_allow_html=True)
-
-    column_ratio = [2, 1] if compact else [3, 1]
-    col1, col2 = st.columns(column_ratio)
-
-    with col1:
-        api_endpoint = st.selectbox(
-            "Select Operation",
-            options=list(API_OPERATIONS.keys()),
-            key="api_endpoint_selector", # type: ignore
-            label_visibility="collapsed",
-        )
-
-    with col2:
-        operation = API_OPERATIONS.get(api_endpoint, {})
-        if operation.get("requires_context"):
-            st.text_input(
-                "RMA ID",
-                key="api_context_input", # type: ignore
-                placeholder="Enter ID...",
-                label_visibility="collapsed",
-            )
-        else:
-            if st.button("⚡ Execute", key="api_execute_btn", type="primary", use_container_width=True):
-                execute_api_operation(api_endpoint, "")
-                return
-
-    if operation.get("requires_context"):
-        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", use_container_width=True): # type: ignore
-            execute_api_operation(api_endpoint, st.session_state.get("api_context_input", ""))
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def execute_api_operation(endpoint: str, context: str = ""):
-    """Execute the selected API operation."""
-    global df_view
-
-    if st.session_state.get("disconnected"):
-        append_ops_log("System is disconnected. Login again to run API operations.", level="warning")
-        return
-
-    logger.info("Executing API operation: %s (context: %s)", endpoint, context or "none")
-
-    operation = API_OPERATIONS.get(endpoint)
-    if not operation:
-        append_ops_log(f"Unknown operation: {endpoint}", level="error")
-        logger.error("Unknown API operation: %s", endpoint)
-        return
-
-    op_type = operation.get("type")
-    if not op_type:
-        append_ops_log(f"Operation '{endpoint}' has no type defined in API_OPERATIONS", level="error")
-        logger.error("Operation '%s' missing type field", endpoint)
-        return
-
-    if op_type == "status_sync":
-        statuses = operation["statuses"]
-        perform_sync(statuses=statuses, full=False)
-        return
-
-    if op_type == "filter_sync":
-        statuses = operation.get("statuses")
-        filter_name = operation.get("filter_name")
-        scope = operation.get("scope")
-
-        append_ops_log(f"Syncing {filter_name}...")
-        perform_sync(statuses=statuses, full=False, rerun=False)
-
-        if filter_name and filter_name in FILTERS and scope:
-            matching_ids = ids_for_filter(filter_name)
-            if matching_ids:
-                force_refresh_rma_ids(matching_ids, scope)
-            else:
-                append_ops_log(f"No RMAs match {filter_name} filter.")
-        elif filter_name and filter_name in FILTERS and not scope:
-            append_ops_log(f"Operation '{endpoint}' missing required 'scope' field", level="error")
-        return
-
-    if op_type == "rma_detail":
-        if not context: # type: ignore
-            append_ops_log("Please enter an RMA ID", level="error")
-            return
-        append_ops_log(f"Fetching RMA {context}...")
-        rma_data = fetch_rma_detail(context, force=True)
-        if rma_data:
-            append_ops_log(f"✅ Refreshed RMA {context}")
-            st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
-            st.rerun()
-        else:
-            append_ops_log(f"Failed to fetch RMA {context}", level="error")
-        return
-
-    if op_type == "batch_courier":
-        if df_view.empty:
-            append_ops_log("No data loaded. Sync dashboard first.", level="warning")
-            return
-
-        rmas_with_tracking = df_view[df_view["DisplayTrack"] != ""].copy()
-        rma_ids = rmas_with_tracking["_rma_id_text"].tolist()
-
-        if not rma_ids:
-            append_ops_log("No RMAs with tracking numbers found.")
-            return
-
-        force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH") # type: ignore
-        return
-
-    if op_type == "export_csv":
-        if df_view.empty:
-            append_ops_log("No data to export. Sync dashboard first.", level="warning")
-            return
-
-        csv = df_view.to_csv(index=False)
-        st.download_button(
-            label="📥 Download CSV",
-            data=csv,
-            file_name=f"returngo_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-        )
-        return
-
-    append_ops_log(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'", level="error")
-    logger.error("Unknown operation type '%s' for endpoint '%s'", op_type, endpoint)
-
-
-def main(): # type: ignore
-    global df_view, counts
-
-    st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
-    inject_command_center_css()
-
-    # --- Preserve scroll position across reruns (page scroll) ---
-    components.html( # type: ignore
-        """
-        <script>
-        const y = window.localStorage.getItem("scrollY");
-        if (y) window.scrollTo(0, parseInt(y));
-        window.addEventListener("scroll", () => {
-          window.localStorage.setItem("scrollY", window.scrollY);
-        }, { passive: true });
-        </script>
-        """,
-        height=0,
-    )
-
-
-    # ==========================================
-    # 0. UI: Sync Dashboard in Sidebar
-    # ==========================================
-    with st.sidebar:
-        st.subheader("Data Operations")
-
-        if st.button("🚀 Fetch from ReturnGo API", key="btn_sync_all", type="primary", help="Fetch latest data from the ReturnGO API for all stores and statuses. This may take several minutes."):
-            st.session_state.last_sync_pressed = datetime.now()
-            perform_sync(full=True) # type: ignore
-        
-        if st.button("🔄 Update From Database", help="Reload data from the local database cache without calling the API."):
-            st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
-            append_ops_log("✅ Dashboard updated from database")
-            st.rerun()
-
-        st.divider()
-
-        is_connected = bool(engine) and not st.session_state.get("disconnected")
-        db_status_led = "db-led-on" if is_connected else "db-led-off"
-        db_status_text = "✅ Database connection" if is_connected else "⚪ Database connection"
-        st.markdown(
-            f"<div class='db-status-line'><span class='db-led {db_status_led}'></span>{db_status_text}</div>",
-            unsafe_allow_html=True,
-        )
-
-        with st.expander("ℹ️ Database Info"):
-            if engine:
-                try:
-                    with engine.connect() as connection:
-                        rma_count_result = connection.execute(text("SELECT COUNT(*) FROM rmas")).scalar_one_or_none()
-                        rma_count = rma_count_result if rma_count_result is not None else 0
-
-                        sync_count_result = connection.execute(text("SELECT COUNT(*) FROM sync_logs")).scalar_one_or_none()
-                        sync_count = sync_count_result if sync_count_result is not None else 0
-
-                    st.info(f"📊 Database contains: **{rma_count}** RMAs, **{sync_count}** sync logs")
-                except Exception as e:
-                    st.warning(f"Could not read database stats: {e}")
-            else:
-                st.warning("⚠️ Database engine not initialized.")
-
-        if st.button("🗑️ Reset Cache", key="btn_reset", help="⚠️ Delete ALL cached data from database. Use only for troubleshooting. Next sync will take longer."):
-            if clear_db(): # This function now truncates the PostgreSQL tables
-                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
-                append_ops_log("Database has been cleared!")
-                st.rerun()
-            else:
-                append_ops_log("Failed to clear the database.", level="error")
-
-        if st.button("🔬 Verify DB Schema", key="btn_verify_schema", help="Inspect table and column availability for the current database connection."):
-            with st.spinner("Inspecting database..."):
-                from sqlalchemy import inspect
-
-                # Display connection info first
-                try:
-                    conn_details = {
-                        "host": st.secrets.connections.postgresql.host,
-                        "database": st.secrets.connections.postgresql.database,
-                        "username": st.secrets.connections.postgresql.username
-                    }
-                    append_schema_log(
-                        f"Connection target: {conn_details['host']} / {conn_details['database']} ({conn_details['username']})"
-                    )
-                except Exception as e:
-                    append_schema_log(
-                        f"Could not read connection secrets from secrets.toml: {e}", level="error"
-                    )
-
-
-                def get_schema_info(engine):
-                    if engine is None:
-                        return {"error": "Database engine is not initialized."}
-                    try:
-                        inspector = inspect(engine)
-                        table_names = inspector.get_table_names()
-                        if not table_names:
-                            return {"error": "No tables found in the database. The 'init_database' function may have failed or the database is empty."}
-                        
-                        schemas = {}
-                        for table_name in table_names:
-                            schemas[table_name] = []
-                            columns = inspector.get_columns(table_name)
-                            for column in columns:
-                                schemas[table_name].append(f"{column['name']} ({column['type']})")
-                        return schemas
-                    except Exception as e:
-                        return {"error": f"An error occurred while inspecting the schema: {e}"}
-
-                schema_info = get_schema_info(engine)
-                
-                if "error" in schema_info:
-                    append_schema_log(schema_info["error"], level="error")
-                else:
-                    summary = []
-                    for table_name, columns in schema_info.items():
-                        summary.append(f"{table_name} ({len(columns)} columns)")
-                    append_schema_log("Schema inspection complete.")
-                    append_schema_log("Tables: " + ", ".join(summary))
-
-        render_api_action_bar(compact=True)
-
-        st.markdown("<div class='schema-log-title'>Database Schema</div>", unsafe_allow_html=True)
-        schema_log_entries = st.session_state.get("schema_log", [])
-        schema_log_text = "\n".join(schema_log_entries) if schema_log_entries else "No schema checks yet."
-        st.markdown(
-            f"<div class='schema-log-box'><pre>{html.escape(schema_log_text)}</pre></div>",
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("<div class='ops-log-title'>Activity Log</div>", unsafe_allow_html=True)
-        ops_log_entries = st.session_state.get("ops_log", [])
-        ops_log_text = "\n".join(ops_log_entries) if ops_log_entries else "No activity yet."
-        st.markdown(
-            f"<div class='ops-log-box'><pre>{html.escape(ops_log_text)}</pre></div>",
-            unsafe_allow_html=True,
-        )
-
-    # ==========================================
-    # 1b. STYLING + STICKY HEADER
-    # ==========================================
-    st.markdown(
-        """
-        <style>
-          .stApp {
-            background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
-                        radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
-                        #0b1f3a;
-            color: #e5e7eb;
-          }
-
-          /* Title */
-          .title-wrap h1 {
-            font-size: 6.2rem;
-            margin-bottom: 0.15rem;
-            letter-spacing: 0.2px;
-            font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-weight: 700;
-            background: linear-gradient(90deg, rgba(255,255,255,0.92), rgba(255,255,255,0.78));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-shadow: 0 12px 30px rgba(15, 23, 42, 0.45);
-          }
-
-          .subtitle-bar {
-            display: inline-flex;
-            gap: 10px;
-            align-items: center;
-            padding: 8px 14px;
-            border-radius: 999px;
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            background: rgba(17, 24, 39, 0.55);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.20);
-            font-size: 1.05rem;
-            color: #cbd5e1;
-          }
-          .subtitle-bar b { color: #e5e7eb; }
-          .subtitle-dot {
-            width: 7px; height: 7px;
-            border-radius: 50%;
-            background: rgba(196,18,48,0.9);
-            display: inline-block;
-          }
-
-          .block-container {
-            background: transparent !important;
-          }
-
-          /* Cards */
-          .card {
-            position: relative;
-            background: transparent;
-            border: none;
-            border-radius: 14px;
-            padding: 0;
-            box-shadow: none;
-            display: flex;
-            flex-direction: column;
-          }
-
-          .card.selected {
-            background: transparent;
-          }
-
-          .tile-inner {
-            position: relative;
-            flex: 1;
-          }
-
-          .status-tile {
-            width: 70%;
-            margin: 0 auto;
-            display: flex;
-            flex-direction: column;
-            gap: 0;
-          }
-          /* Remove Streamlit block spacing between count, button, and refresh rows. */
-          .status-tile .stMarkdown,
-          .status-tile div[data-testid="stButton"] {
-            margin-top: 0 !important;
-            margin-bottom: 0 !important;
-          }
-          .status-tile > div {
-            margin-top: 0 !important;
-            margin-bottom: 0 !important;
-          }
-          .status-tile div[data-testid="stButton"] {
-            padding: 0 !important;
-            border: none !important;
-            background: transparent !important;
-            box-shadow: none !important;
-          }
-
-          .count-banner {
-            width: 100%;
-            height: 40px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 800;
-            font-size: 1.35rem;
-            color: #ffffff;
-            background: rgba(148, 163, 184, 0.22);
-            border: 1px solid rgba(148, 163, 184, 0.25);
-            margin-bottom: 0;
-          }
-
-          .card.selected .count-banner {
-            background: rgba(34, 197, 94, 0.18);
-            border-color: rgba(34, 197, 94, 0.4);
-            color: #22c55e;
-          }
-
-          .status-button {
-            position: relative;
-            padding-top: 0;
-            margin-bottom: 0;
-          }
-          .status-button div.stButton {
-            margin-bottom: 0 !important;
-          }
-          .status-button div.stButton > button {
-            width: 100% !important;
-            background: rgba(15, 23, 42, 0.82) !important;
-            border: 1px solid rgba(148, 163, 184, 0.25) !important;
-            color: #e5e7eb !important;
-            box-shadow: none !important;
-            border-radius: 10px !important;
-            padding: 8px 12px !important;
-            text-transform: uppercase !important;
-            margin: 0 !important;
-            white-space: normal !important;
-            transition: all 0.2s ease !important;
-          }
-
-          .card.selected .status-button div.stButton > button {
-            border: 2.5px solid #22c55e !important;
-            background: rgba(34, 197, 94, 0.12) !important;
-            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15) !important;
-          }
-
-          .status-button div.stButton > button:hover {
-            border-color: rgba(148, 163, 184, 0.45) !important;
-            transform: translateY(-1px);
-          }
-
-          .card.selected .status-button div.stButton > button:hover {
-            border-color: #22c55e !important;
-          }
-
-          /* Refresh row under each tile */
-          .refresh-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            width: 100%;
-            /* Pull the Refresh row flush under the status button. */
-            margin-top: -6px;
-            padding-top: 0;
-          }
-          .refresh-row div.stButton {
-            margin: 0 !important;
-          }
-          .refresh-row div[data-testid="stButton"] {
-            padding: 0 !important;
-            border: none !important;
-            background: transparent !important;
-            box-shadow: none !important;
-          }
-          .refresh-row div.stButton > button {
-            width: auto !important;
-            padding: 0 !important;
-            border: none !important;
-            background: transparent !important;
-            box-shadow: none !important;
-            font-size: 13px !important;
-            font-style: italic !important;
-            color: #ffffff !important;
-            text-decoration: underline !important;
-            line-height: 1 !important;
-            margin: 0 !important;
-          }
-          .refresh-row div.stButton > button:hover {
-            color: #e2e8f0 !important;
-            transform: none !important;
-          }
-          .updated-time {
-            font-size: 12px;
-            color: rgba(226, 232, 240, 0.9);
-            white-space: nowrap;
-          }
-
-          /* Sticky container */
-          .sticky-top {
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 999 !important;
-            background: rgba(14,17,23,0.82) !important;
-            backdrop-filter: blur(10px);
-            border-bottom: 1px solid rgba(148,163,184,0.16);
-            padding-bottom: 10px;
-            margin-bottom: 8px;
-          }
-
-          /* Data editor: attempt “fit content” */
-          [data-testid="stDataFrame"] {
-            border-radius: 14px;
-            overflow-x: auto;
-            border: 1px solid rgba(148,163,184,0.18);
-          }
-          [data-testid="stDataFrame"] table {
-            table-layout: auto !important;
-          }
-
-          /* Dialog */
-          div[data-testid="stDialog"] {
-            background-color: rgba(17, 24, 39, 0.95);
-            border: 1px solid rgba(196,18,48,0.55);
-            border-radius: 16px;
-            width: min(96vw, 1200px) !important;
-            max-width: 96vw !important;
-          }
-
-          /* Smaller Reset Cache button look (lighter) */
-          .reset-wrap {
-            position: relative;
-          }
-          .reset-wrap div.stButton > button {
-            background: rgba(148,163,184,0.18) !important;
-            border-color: rgba(148,163,184,0.25) !important;
-            padding: 4px 8px !important;
-            font-size: 12px !important;
-            width: 50% !important;
-          }
-          .sync-dashboard-btn button {
-            min-height: 4rem !important;
-            padding: 0.9rem 1.2rem !important;
-            text-transform: uppercase !important;
-          }
-          .sync-time-bar {
-            text-align: right;
-            margin: 0 0 -8px 0;
-            font-size: 1.025rem;
-            color: rgba(226,232,240,0.9);
-          }
-          .db-status-line {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 0.95rem;
-            font-weight: 600;
-            color: #e2e8f0;
-            margin-bottom: 8px;
-          }
-          .db-led {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            display: inline-block;
-            box-shadow: 0 0 6px rgba(0, 0, 0, 0.35);
-          }
-          .db-led-on {
-            background: #22c55e;
-            box-shadow: 0 0 8px rgba(34, 197, 94, 0.65);
-          }
-          .db-led-off {
-            background: #64748b;
-          }
-          .schema-log-title,
-          .ops-log-title {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-            color: rgba(148, 163, 184, 0.9);
-            margin: 12px 0 6px 0;
-          }
-          .schema-log-box,
-          .ops-log-box {
-            background: rgba(15, 23, 42, 0.75);
-            border: 1px solid rgba(148, 163, 184, 0.22);
-            border-radius: 12px;
-            padding: 10px 12px;
-            min-height: 140px;
-            max-height: 320px;
-            overflow-y: auto;
-            font-size: 12px;
-            color: #e2e8f0;
-          }
-          .schema-log-box pre,
-          .ops-log-box pre {
-            margin: 0;
-            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-            white-space: pre-wrap;
-          }
-          .power-btn button {
-            width: 115px !important;
-            height: 115px !important;
-            min-width: 115px !important;
-            min-height: 115px !important;
-            border-radius: 14px !important;
-            background: rgba(239, 68, 68, 0.18) !important;
-            border: 2px solid rgba(239, 68, 68, 0.55) !important;
-            color: #fee2e2 !important;
-            font-size: 2.4rem !important;
-            font-weight: 700 !important;
-            box-shadow: 0 10px 24px rgba(239, 68, 68, 0.25) !important;
-          }
-          .power-btn button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 12px 28px rgba(239, 68, 68, 0.35) !important;
-          }
-          .disconnect-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(2, 6, 23, 0.92);
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            animation: fadeIn 0.6s ease-out;
-          }
-          .disconnect-card {
-            background: rgba(15, 23, 42, 0.95);
-            border: 1px solid rgba(148, 163, 184, 0.3);
-            border-radius: 18px;
-            padding: 24px 28px;
-            width: min(420px, 88vw);
-            text-align: center;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.45);
-          }
-          .disconnect-card h2 {
-            margin: 0 0 10px 0;
-            font-size: 1.6rem;
-          }
-          .disconnect-card p {
-            margin: 0;
-            color: rgba(226, 232, 240, 0.8);
-          }
-          .table-actions-left {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-          }
-          .table-actions-left button {
-            background: rgba(15, 23, 42, 0.72) !important;
-            border-color: rgba(148, 163, 184, 0.22) !important;
-            font-size: 13px !important;
-            padding: 6px 10px !important;
-          }
-          .reset-wrap:hover::after {
-            content: attr(data-tooltip);
-            position: absolute;
-            right: 0;
-            top: -42px;
-            background: rgba(15, 23, 42, 0.95);
-            border: 1px solid rgba(148,163,184,0.35);
-            color: #e2e8f0;
-            padding: 6px 10px;
-            border-radius: 10px;
-            font-size: 0.75rem;
-            white-space: nowrap;
-            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
-            z-index: 5;
-          }
-          .data-table-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 12px;
-            align-items: center;
-          }
-          .data-log-tab div.stButton > button {
-            background: rgba(15, 23, 42, 0.72) !important;
-            border-color: rgba(148, 163, 184, 0.22) !important;
-            font-size: 14px !important;
-            padding: 8px 12px !important;
-          }
-          .copy-all-btn div.stButton > button {
-            background: rgba(59, 130, 246, 0.18) !important;
-            border-color: rgba(59,130,246,0.35) !important;
-          }
-          .rows-count {
-            font-size: 18px;
-            font-weight: 700;
-          }
-          .rows-count .value {
-            font-weight: 800;
-          }
-
-          /* Responsive filter tiles */
-          @media (max-width: 768px) {
-            [data-testid="column"] {
-              min-width: 100% !important;
-              flex: 0 0 100% !important;
-            }
-            .status-tile {
-              width: 85% !important;
-            }
-            .title-wrap h1 {
-              font-size: 4rem !important;
-            }
-            .subtitle-bar {
-              font-size: 0.85rem !important;
-              flex-wrap: wrap;
-              gap: 6px !important;
-            }
-          }
-
-          @media (min-width: 769px) and (max-width: 1024px) {
-            [data-testid="column"] {
-              min-width: 50% !important;
-              flex: 0 0 50% !important;
-            }
-            .status-tile {
-              width: 80% !important;
-            }
-          }
-
-          @media (min-width: 1025px) {
-            .status-tile {
-              width: 70%;
-            }
-          }
-
-          .card {
-            position: relative;
-            min-height: 140px;
-            margin-bottom: 12px;
-          }
-
-          .status-button div.stButton > button {
-            margin-top: 6px !important;
-            margin-bottom: 6px !important;
-          }
-
-          .refresh-row {
-            margin-top: 4px !important;
-            padding: 6px 0 4px 0;
-            gap: 8px;
-          }
-
-          .count-banner {
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-          }
-
-          .card:hover .count-banner {
-            transform: scale(1.05);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-          }
-
-          .card.selected {
-            background: transparent;
-          }
-
-          [data-testid="stDataFrame"] tbody tr:nth-child(even) {
-            background: rgba(255, 255, 255, 0.02) !important;
-          }
-
-          [data-testid="stDataFrame"] tbody tr:hover {
-            background: rgba(59, 130, 246, 0.08) !important;
-            cursor: pointer;
-          }
-
-          [data-testid="stDataFrame"] th {
-            background: rgba(15, 23, 42, 0.82) !important;
-            color: #f1f5f9 !important;
-            font-weight: 700 !important;
-            text-transform: uppercase !important;
-            font-size: 13px !important;
-            letter-spacing: 0.5px !important;
-            border-bottom: 2px solid rgba(148, 163, 184, 0.3) !important;
-          }
-
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Sticky anchor + JS
-    st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True) # type: ignore
-    components.html(
-        """
-        <script>
-          function applySticky() {
-            const anchor = window.parent.document.querySelector('.sticky-anchor');
-            if (!anchor) return;
-
-            let el = anchor;
-            for (let i = 0; i < 12; i++) {
-              if (!el) break;
-              if (el.getAttribute && el.getAttribute("data-testid") === "stVerticalBlock") {
-                el.classList.add("sticky-top");
-                return;
-              }
-              el = el.parentElement;
-            }
-            if (anchor.parentElement) anchor.parentElement.classList.add("sticky-top");
-          }
-
-          function styleSyncDashboardButton() {
-            const buttons = window.parent.document.querySelectorAll('button');
-            buttons.forEach((button) => {
-              if (button.textContent && button.textContent.trim().includes('Sync Dashboard')) {
-                const wrapper = button.closest('[data-testid="stButton"]');
-                if (wrapper) wrapper.classList.add('sync-dashboard-btn');
-              }
-            });
-          }
-
-          function stylePowerButton() {
-            const buttons = window.parent.document.querySelectorAll('button');
-            buttons.forEach((button) => {
-              if (button.textContent && button.textContent.trim() === '⏻') {
-                const wrapper = button.closest('[data-testid="stButton"]');
-                if (wrapper) wrapper.classList.add('power-btn');
-              }
-            });
-          }
-
-          applySticky();
-          styleSyncDashboardButton();
-          stylePowerButton();
-          setTimeout(applySticky, 250);
-          setTimeout(applySticky, 800);
-          setTimeout(styleSyncDashboardButton, 250);
-          setTimeout(styleSyncDashboardButton, 800);
-          setTimeout(stylePowerButton, 250);
-          setTimeout(stylePowerButton, 800);
-        </script>
-        """,
-        height=0,
-    )
-
-    # ==========================================
-    # 8. STATE
-    # ==========================================
-    if "active_filters" not in st.session_state: # type: ignore
-        st.session_state.active_filters = set()
-        logger.info("Initialized active_filters session state")
-    if "search_query_input" not in st.session_state:
-        st.session_state.search_query_input = ""
-    if "status_multi" not in st.session_state:
-        st.session_state.status_multi = []
-    if "res_multi" not in st.session_state:
-        st.session_state.res_multi = []
-    if "actioned_multi" not in st.session_state:
-        st.session_state.actioned_multi = []
-    if "tracking_status_multi" not in st.session_state:
-        st.session_state.tracking_status_multi = []
-    if "req_dates_selected" not in st.session_state:
-        st.session_state.req_dates_selected = []
-    if "failure_refund" not in st.session_state:
-        st.session_state.failure_refund = False
-    if "failure_upload" not in st.session_state:
-        st.session_state.failure_upload = False
-    if "failure_shipment" not in st.session_state:
-        st.session_state.failure_shipment = False
-    if "cache_version" not in st.session_state:
-        st.session_state.cache_version = 0
-    if "ops_log" not in st.session_state:
-        st.session_state.ops_log = []
-    if "schema_log" not in st.session_state:
-        st.session_state.schema_log = []
-    if "table_autosize" not in st.session_state:
-        st.session_state.table_autosize = False
-    if "disconnected" not in st.session_state:
-        st.session_state.disconnected = False
-
-    filter_migration = {
-        "Pending": "Pending Requests",
-        "Approved": "Approved - Submitted",
-    } # type: ignore
-    active: Set[str] = st.session_state.active_filters # type: ignore
-    migrated = set()
-    for old_name in active:
-        migrated.add(filter_migration.get(old_name, old_name))
-    valid_filters = set(FILTERS.keys())
-    migrated = {name for name in migrated if name in valid_filters}
-    if migrated != active:
-        st.session_state.active_filters = migrated  # type: ignore
-        logger.info("Migrated filters: %s -> %s", active, migrated) # type: ignore
-
-    if st.session_state.get("show_toast"):
-        append_ops_log("✅ Updated!", level="info")
-        st.session_state["show_toast"] = False
-
-    if RATE_LIMIT_HIT.is_set():
-        st.warning(
-            "ReturnGO rate limit reached (429). Sync is slowing down and retrying. "
-            "If this happens often, sync less frequently or request a higher quota key."
-        )
-        RATE_LIMIT_HIT.clear()
-
-    # ==========================================
-    # 10. HEADER (STICKY)
-    # ==========================================
-    header_left, header_right = st.columns([8, 1], vertical_alignment="center")
-    with header_left:
-        st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
-        st.title("Levi's ReturnGO Ops Dashboard")
-        st.markdown(
-            f"""
-            <div class="subtitle-bar">
-                <span class="subtitle-dot"></span>
-                <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
-                <span style="opacity:.45">|</span>
-                <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-    with header_right:
-        if st.button("⏻", key="disconnect_btn", help="Disconnect database and API sessions"):
-            append_ops_log("Session disconnected. Awaiting login.", level="warning")
-            st.session_state.disconnected = True
-
-
-    st.write("")
-
-    if st.session_state.get("disconnected"):
-        st.markdown(
-            """
-            <div class="disconnect-overlay">
-              <div class="disconnect-card">
-                <h2>Session disconnected</h2>
-                <p>Please login again to reconnect the database and API.</p>
-                <div id="reconnect-slot"></div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        reconnect_clicked = st.button("Login again", key="reconnect_btn")
-        # NOTE: This DOM move is brittle because it relies on Streamlit's
-        # button markup and the exact button label. If Streamlit updates DOM
-        # structure or copy, this may need to be revisited.
-        components.html(
-            """
-            <script>
-              const slot = window.parent.document.querySelector('#reconnect-slot');
-              const buttons = window.parent.document.querySelectorAll('button');
-              buttons.forEach((button) => {
-                if (button.textContent && button.textContent.trim() === 'Login again') {
-                  const wrapper = button.closest('[data-testid="stButton"]');
-                  if (wrapper && slot) slot.appendChild(wrapper);
-                }
-              });
-            </script>
-            """,
-            height=0,
-        )
-        if reconnect_clicked:
-            st.session_state.disconnected = False
-            append_ops_log("✅ Reconnected. Ready to resume.", level="info")
-            st.rerun()
-        st.stop()
-
-    # ==========================================
-    # 11. LOAD + PROCESS OPEN RMAs # type: ignore
-    # ========================================== # type: ignore
-    raw_data = load_open_rmas(st.session_state.cache_version)
-    processed_rows = []
- # type: ignore
-    counts = {
-        "PendingRequests": 0,
-        "ApprovedSubmitted": 0, # type: ignore
-        "ApprovedInTransit": 0,
-        "Received": 0,
-        "NoTracking": 0,
-        "Flagged": 0,
-        "CourierCancelled": 0,
-        "ApprovedDelivered": 0,
-        "ResolutionActioned": 0,
-        "NoResolutionActioned": 0,
-    }
-    failure_counts = {
-        "refund_failure": 0, # type: ignore
-        "upload_failed": 0,
-        "shipment_failure": 0,
-    }
-
-    search_query = st.session_state.get("search_query_input", "")
-    search_query_lower = search_query.lower().strip()
-    search_active = bool(search_query_lower)
-    today: date = datetime.now().date()
-    rmas_needing_courier_refresh = []
-    for rma in raw_data:
-        summary = rma.get("rmaSummary", {}) or {}
-        shipments = rma.get("shipments", []) or []
-        comments = rma.get("comments", []) or []
-
-        status = summary.get("status", "Unknown")
-        rma_id = summary.get("rmaId", "N/A")
-        order_name = summary.get("order_name", summary.get("orderName", "N/A"))
-
-        track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")] # type: ignore
-        track_str = ", ".join(track_nums) if track_nums else ""
-        shipment_id = shipments[0].get("shipmentId") if shipments else None
- # type: ignore
-        local_tracking_status = rma.get("_local_courier_status") or "Unknown"
-        local_tracking_status_display = format_tracking_status_with_icon(local_tracking_status)
-        local_tracking_status_lower = local_tracking_status.lower()
-        track_link_url = f"https://portal.thecourierguy.co.za/track?ref={track_nums[0]}" if track_nums else ""
-
-        requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
-        approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
-        received_iso = get_received_date_iso(rma)
-        resolution_type = get_resolution_type(rma) # type: ignore
-        is_nt: bool = not track_nums # type: ignore
-        req_dt = pd.to_datetime(requested_iso) if requested_iso else None
-        is_fg = (
-            status == "Pending" and isinstance(req_dt, datetime) and (today - req_dt.date()).days >= 7
-        )  # type: ignore
-
-        comment_texts = [(c.get("htmlText", "") or "") for c in comments]
-        comment_texts_lower = [c.lower() for c in comment_texts]
-        is_cc = "courier cancelled" in local_tracking_status_lower
-        is_ad = status == "Approved" and "delivered" in local_tracking_status_lower
-        actioned: bool = is_resolution_actioned(rma, comment_texts_lower)
-        actioned_label = resolution_actioned_label(rma)
-        is_ra = (actioned_label != "No") and is_ad
-        is_nra = (status == "Received") and (not actioned)
-        is_tracking_updated = "Yes" if has_tracking_update_comment(comment_texts) else "No"
-        has_refund_failure, has_upload_failed, has_shipment_failure, failures = failure_flags(
-            comment_texts_lower,
-            status=status,
-            approved_iso=str(approved_iso) if approved_iso else "", # type: ignore
-            has_tracking=bool(track_nums),
-        )
-
-        if track_nums and should_refresh_courier(rma):
-            rmas_needing_courier_refresh.append((rma_id, rma, requested_iso, status))
-
-        if has_refund_failure:
-            failure_counts["refund_failure"] += 1
-        if has_upload_failed:
-            failure_counts["upload_failed"] += 1
-        if has_shipment_failure:
-            failure_counts["shipment_failure"] += 1
-
-        if not search_active or (
-            search_query_lower in str(rma_id).lower()
-            or search_query_lower in str(order_name).lower()
-            or search_query_lower in str(track_str).lower()
-        ):
-            processed_rows.append( # type: ignore
-                {
-                    "No": "",
-                    "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
-                    "Order": order_name,
-                    "Current Status": status,
-                    "Tracking Number": track_link_url,
-                    "Tracking Status": local_tracking_status_display,
-                    "Requested date": str(requested_iso)[:10] if requested_iso else "N/A",
-                    "Approved date": str(approved_iso)[:10] if approved_iso else "N/A",
-                    "Received date": str(received_iso)[:10] if received_iso else "N/A",
-                    "Days since requested": days_since(str(requested_iso)[:10] if requested_iso else "N/A", today=today),
-                    "resolutionType": resolution_type if resolution_type else "N/A",
-                    "Resolution actioned": actioned_label,
-                    "Is_tracking_updated": is_tracking_updated,
-                    "failures": failures,
-                    "has_refund_failure": has_refund_failure,
-                    "has_upload_failed": has_upload_failed,
-                    "has_shipment_failure": has_shipment_failure,
-                    "DisplayTrack": track_str,
-                    "shipment_id": shipment_id,
-                    "full_data": rma,
-                    "_rma_id_text": rma_id,
-                    "is_nt": is_nt,
-                    "is_fg": is_fg,
-                    "is_cc": is_cc,
-                    "is_ad": is_ad,
-                    "is_ra": is_ra,
-                    "is_nra": is_nra,
-                }
-            )
-
-    df_view = pd.DataFrame(processed_rows)
-    update_data_table_log(processed_rows)
-
-    for filter_name, cfg in FILTERS.items():
-        count_key = cfg["count_key"]  # type: ignore
-        fn: FilterFn = cfg["fn"]  # type: ignore
-        if df_view.empty: # type: ignore
-            counts[count_key] = 0
-        else:
-            try:
-                mask = fn(df_view)
-                counts[count_key] = int(mask.sum())
-            except Exception as exc:
-                logger.error("Error calculating count for %s: %s", filter_name, exc)
-                counts[count_key] = 0
-
-    if rmas_needing_courier_refresh:
-        def refresh_courier_batch():
-            for rma_id, rma_payload, requested_iso, status in rmas_needing_courier_refresh:
-                try: # type: ignore
-                    courier_status, courier_checked = maybe_refresh_courier(rma_payload)
-                    if courier_status:
-                        upsert_rma(
-                            rma_id=str(rma_id),
-                            status=status,
-                            created_at=requested_iso or "",
-                            payload=rma_payload,
-                            courier_status=courier_status,
-                            courier_checked_iso=courier_checked,
-                        ) # type: ignore
-                except Exception as exc:
-                    logger.warning("Background courier refresh failed for %s: %s", rma_id, exc)
-
-        refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
-        refresh_thread.start()
-        if len(rmas_needing_courier_refresh) > 5:
-            append_ops_log(
-                f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
-            )
-
-    st.divider()
-
-    if not df_view.empty and "Requested date" in df_view.columns and "Current Status" in df_view.columns:
-        st.markdown("### 📅 Request Timeline") # type: ignore
-
-        # Filter to open statuses (defensive: df_view may include non-active if search/filters applied)
-        timeline_df = df_view[df_view["Current Status"].isin(ACTIVE_STATUSES)].copy()
-        timeline_df["_req_date_parsed"] = pd.to_datetime(
-            timeline_df["Requested date"], errors="coerce"
-        )
-        timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
-
-        if not timeline_df.empty:
-            date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # pyright: ignore[reportAttributeAccessIssue]
-                .size() # type: ignore
-                .reset_index(name="Count")
-            )
-            date_counts.columns = ["Date", "Count"]
-            st.line_chart(date_counts.set_index("Date"), height=450)
-        else:
-            st.info("No valid requested dates found for charting.")
-
-        st.write("")
-
-    
-    st.markdown("### 📊 Command Center")
-    st.write("")
-
-    # Row 1: Primary statuses # type: ignore
-    r1 = st.columns(5) # type: ignore
-    render_command_tile(r1[0], "Pending Requests", "Pending", "PENDING REQUESTS", "⏳")
-    render_command_tile(
-        r1[1], "Approved - Submitted", "FILTER_ApprovedSubmitted", "SUBMITTED TO COURIER", "📬"
-    )
-    render_command_tile(r1[2], "Approved - In Transit", "FILTER_ApprovedInTransit", "IN TRANSIT", "🚚")
-    render_command_tile(r1[3], "Received", "Received", "RECEIVED / AT WAREHOUSE", "📦")
-    render_command_tile(r1[4], "No Tracking", "FILTER_NoTracking", "NO TRACKING NUMBER", "🚫")
-
-    st.write("")
-
-    # Row 2: Secondary statuses # type: ignore
-    r2 = st.columns(5) # type: ignore
-    render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "FLAGGED", "🚩")
-    render_command_tile(r2[1], "Courier Cancelled", "FILTER_CourierCancelled", "CANCELLED", "🛑")
-    render_command_tile(
-        r2[2], "Approved - Delivered", "FILTER_ApprovedDelivered", "APPROVED > DELIVERED", "📬"
-    )
-    render_command_tile(r2[3], "Resolution Actioned", "FILTER_ResolutionActioned", "RESOLVED", "💳")
-    render_command_tile(
-        r2[4],
-        "No Resolution Actioned",
-        "FILTER_NoResolutionActioned",
-        "PENDING RESOLUTION",
-        "⏸️",
-    )
-
-    st.write("")
-
-    # ==========================================
-    # 14. SEARCH + VIEW ALL + FILTER BAR
-    # ==========================================
-    sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
-    with sc1:
-        st.text_input(
-            "Search", # type: ignore
-            placeholder="🔍 Search Order, RMA, or Tracking...",
-            label_visibility="collapsed",
-            key="search_query_input",
-        )
-    with sc2:
-        pass # Placeholder for sc2 content
-    with sc3:
-        if st.button("📋 View All", width="stretch"): # type: ignore
-            st.session_state.active_filters = set()  # type: ignore
-            st.rerun()
-
-    # Extra filter bar/drop (under search)
-    with st.expander("Additional filters", expanded=True):
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 1], vertical_alignment="center") # type: ignore
-
-        def multi_select_with_state(label: str, options: list, key: str):
-            old = st.session_state.get(key, [])
-            selections = [x for x in old if x in options]
-            if selections != old:
-                st.session_state[key] = selections
-            return st.multiselect(label, options=options, key=key)
-
-        with c1:
-            multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi") # type: ignore
-        with c2:
-            res_opts = []
-            if not df_view.empty and "resolutionType" in df_view.columns:
-                res_opts = sorted(
-                    [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
-                ) # type: ignore
-            multi_select_with_state("Resolution type", res_opts, "res_multi") # type: ignore
-        with c3:
-            multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi") # type: ignore
-        with c4:
-            tracking_opts = [
-                format_tracking_status_with_icon(status) for status in COURIER_STATUS_OPTIONS
-            ]
-        with c5:
-            req_dates = [] # type: ignore
-            if not df_view.empty and "Requested date" in df_view.columns:
-                req_dates = sorted(
-                    [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
-                    reverse=True, # type: ignore
-                )
-        with c6:
-            st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters) # type: ignore
-
-        st.markdown("**Failure filters**")
-        f1, f2, f3, _ = st.columns([1.3, 1.3, 1.3, 3], vertical_alignment="center")
-        with f1: # type: ignore
-            st.checkbox(
-                f"refund_failure ({failure_counts['refund_failure']})",
-                key="failure_refund",
-            )
-        with f2: # type: ignore
-            st.checkbox(
-                f"upload_failed ({failure_counts['upload_failed']})",
-                key="failure_upload",
-            )
-        with f3: # type: ignore
-            st.checkbox(
-                f"shipment_failure ({failure_counts['shipment_failure']})",
-                key="failure_shipment",
-            )
-
-    st.divider()
-
-    # ==========================================
-    # 15. TABLE VIEW
-    # ==========================================
-    if df_view.empty: # type: ignore
-        st.warning("Database empty. Click 'Fetch from ReturnGo API' to start.")
-        st.stop()
-
-    display_df = df_view[current_filter_mask(df_view)].copy()
-    if len(st.session_state.active_filters) > 1:
-        display_df = deduplicate_filtered_rmas(display_df)
-
-    # Apply extra filters (AND logic)
-    status_multi = st.session_state.get("status_multi", [])
-    res_multi = st.session_state.get("res_multi", [])
-    actioned_multi = st.session_state.get("actioned_multi", [])
-    tracking_status_multi = st.session_state.get("tracking_status_multi", [])
-    req_dates_selected = st.session_state.get("req_dates_selected", [])
-    failure_selected = [
-        label
-        for label, key in (
-                ("refund_failure", "failure_refund"), # type: ignore
-            ("upload_failed", "failure_upload"),
-            ("shipment_failure", "failure_shipment"),
-        )
-        if st.session_state.get(key)
-    ]
-
-    if status_multi:
-        display_df = display_df[display_df["Current Status"].isin(status_multi)] # type: ignore
-    if res_multi:
-        display_df = display_df[display_df["resolutionType"].isin(res_multi)] # type: ignore
-    if actioned_multi:
-        actioned_set: Set[str] = set(actioned_multi) # type: ignore
-        if actioned_set == {"Yes"}:
-            display_df = display_df[display_df["Resolution actioned"] != "No"]
-        elif actioned_set == {"No"}:
-            display_df = display_df[display_df["Resolution actioned"] == "No"]
-    if tracking_status_multi:
-        display_df = display_df[display_df["Tracking Status"].isin(tracking_status_multi)]
-    if req_dates_selected:
-        display_df = display_df[display_df["Requested date"].isin(req_dates_selected)]
-    if failure_selected:
-        failure_mask = pd.Series(False, index=display_df.index) # type: ignore
-        if st.session_state.get("failure_refund"):
-            failure_mask |= display_df["has_refund_failure"]
-        if st.session_state.get("failure_upload"):
-            failure_mask |= display_df["has_upload_failed"]
-        if st.session_state.get("failure_shipment"):
-            failure_mask |= display_df["has_shipment_failure"]
-        display_df = display_df[failure_mask] # type: ignore
-
-    if display_df.empty:
-        st.info("No matching records found.")
-        st.stop()
-    
-    # Defensive check: Ensure 'Requested date' column exists before sorting
-    if "Requested date" not in display_df.columns:
-        logger.error("KeyError: 'Requested date' column missing from display_df. Columns: %s", display_df.columns.tolist())
-        st.error("Internal error: 'Requested date' column is missing from the data table. Please try syncing again.")
-        st.stop()
-
-    display_df = display_df.sort_values(by="Requested date", ascending=False).reset_index(drop=True)
-    display_df["No"] = (display_df.index + 1).astype(str)
- # type: ignore
-    @st.dialog("Data table log")
-    def show_data_table_log():
-        logs = st.session_state.get("data_table_log", [])
-        if not logs:
-            st.info("No edits recorded yet.")
-        else:
-            for entry in logs:
-                st.markdown(f"- {entry}")
-
-    @st.dialog("RMA Actions")
-    def show_rma_actions_dialog(row: pd.Series):
-        rma_url = row.get("RMA ID", "") # type: ignore
-        rma_id_text = row.get("_rma_id_text", "")
-        shipment_id = row.get("shipment_id")
-        track_existing = row.get("DisplayTrack", "")
-
-        tab1, tab2 = st.tabs(["Update tracking", "View timeline"])
-
-        with tab1:
-            st.markdown(f"### RMA `{rma_id_text}`")
-            if rma_url:
-                st.markdown(f"[Open in ReturnGO]({rma_url})")
-
-            with st.form("upd_track_form", clear_on_submit=False):
-                new_track = st.text_input("Tracking number", value=track_existing)
-                submitted = st.form_submit_button("Save changes")
-                if submitted:
-                    if not shipment_id:
-                        st.error("No Shipment ID available for this RMA.")
-                    else:
-                        new_track_value = new_track.strip() if new_track else ""
-                        ok, msg = push_tracking_update(rma_id_text, shipment_id, new_track_value)
-                        if ok:
-                            if new_track_value != track_existing:
-                                comment_payload = tracking_update_comment(track_existing, new_track_value)
-                                push_comment_update(rma_id_text, comment_payload)
-                            st.success("Tracking updated.")
-                            time.sleep(0.2) # type: ignore
-                            perform_sync(["Approved", "Received"])
-                        else:
-                            st.error(msg)
-
-        with tab2:
-            st.markdown(f"### Timeline for `{rma_id_text}`")
-
-            with st.expander("➕ Add comment", expanded=False):
-                with st.form("add_comment_form", clear_on_submit=True):
-                    comment_text = st.text_area("New internal note")
-                    if st.form_submit_button("Post comment"):
-                        comment = (comment_text or "").strip()
-                        if not comment:
-                            st.error("Comment cannot be empty.")
-                        else:
-                            ok, msg = push_comment_update(rma_id_text, comment)
-                            if ok:
-                                st.success("Comment posted.")
-                                time.sleep(0.2)
-                                perform_sync(["Approved", "Received"])
-                            else:
-                                st.error(msg)
-
-            full: Dict[str, Any] = row.get("full_data", {}) or {}
-            timeline = full.get("comments", []) or []
-            if not timeline:
-                st.info("No timeline events found.")
-            else:
-                for t in timeline:
-                    d_str = (t.get("datetime", "") or "")[:16].replace("T", " ")
-                    trig = t.get("triggeredBy", "System") or "System"
-                    txt = t.get("htmlText", "") or ""
-                    st.markdown(f"**{d_str}** | `{trig}`\n> {txt}")
-                    st.divider()
-
-    display_cols = [
-        "No",
-        "RMA ID",
-        "Order",
-        "Current Status",
-        "Tracking Number",
-        "Tracking Status",
-        "Requested date",
-        "Approved date",
-        "Received date",
-        "Days since requested",
-        "resolutionType",
-        "Resolution actioned",
-        "Is_tracking_updated",
-        "failures",
-    ]
-
-    base_column_config = {
-        "No": st.column_config.TextColumn("No"),
-        "RMA ID": st.column_config.LinkColumn(
-            "RMA ID",
-            display_text=r"rmaid=([^&]+)",
-        ),
-        "Order": st.column_config.TextColumn("Order"),
-        "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)"),
-        "Tracking Status": st.column_config.TextColumn("Tracking Status"),
-        "Requested date": st.column_config.TextColumn("Requested date"),
-        "Approved date": st.column_config.TextColumn("Approved date"),
-        "Received date": st.column_config.TextColumn("Received date"),
-        "Days since requested": st.column_config.TextColumn("Days since requested"),
-        "resolutionType": st.column_config.TextColumn("resolutionType"),
-        "Resolution actioned": st.column_config.TextColumn("Resolution actioned"),
-        "Is_tracking_updated": st.column_config.TextColumn("Is_tracking_updated"),
-        "failures": st.column_config.TextColumn("failures"),
-    }
-
-    table_df = display_df[display_cols].copy()
-
-    def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
-        if column not in data.columns or data.empty:
-            return "medium"
-        max_len = int(data[column].astype(str).map(len).max())
-        if max_len <= 8:
-            return "small"
-        if max_len <= 20:
-            return "medium"
-        return "large"
-
-    link_column_configs = {
-        "RMA ID": {"display_text": r"rmaid=([^&]+)"},
-        "Tracking Number": {"display_text": r"ref=(.*)"},
-    }
-
-    if st.session_state.get("table_autosize"):
-        column_config = {}
-        for key in display_cols:
-            width = _autosize_width(key, table_df)
-            if key in link_column_configs:
-                column_config[key] = st.column_config.LinkColumn(
-                    key,
-                    display_text=link_column_configs[key]["display_text"],
-                    width=width,
-                )
-            else:
-                column_config[key] = st.column_config.TextColumn(
-                    key,
-                    width=width,
-                )
-    else:
-        column_config = base_column_config
-
-    total_rows = len(table_df)
-    tsv_rows = [display_cols] + table_df.astype(str).values.tolist()
-    tsv_text = "\n".join(["\t".join(row) for row in tsv_rows])
-    action_left, _ = st.columns([3, 5], vertical_alignment="center")
-    with action_left:
-        st.markdown("<div class='table-actions-left'>", unsafe_allow_html=True)
-        csv_payload = table_df.to_csv(index=False)
-        st.download_button(
-            label="⬇️ CSV",
-            data=csv_payload,
-            file_name=f"returngo_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            key="download_table_csv",
-        )
-        if st.button("Autosize", key="autosize_btn"):
-            st.session_state.table_autosize = not st.session_state.get("table_autosize", False)
-        st.markdown("</div>", unsafe_allow_html=True)
-    count_col, action_col = st.columns([5, 3], vertical_alignment="center")
-    with count_col:
-        st.markdown( # type: ignore
-            f"<div class='rows-count'>Rows in table: <span class='value'>{total_rows}</span></div>",
-            unsafe_allow_html=True,
-        )
-    with action_col:
-        st.markdown("<div class='data-table-actions'>", unsafe_allow_html=True)
-        log_col, copy_col = st.columns([1, 1])
-        with log_col:
-            st.markdown("<div class='data-log-tab'>", unsafe_allow_html=True)
-            if st.button("Data table log", key="btn_data_table_log", width="stretch"):
-                st.session_state["suppress_row_dialog"] = True
-                show_data_table_log()
-            st.markdown("</div>", unsafe_allow_html=True)
-        with copy_col:
-            st.markdown("<div class='copy-all-btn'>", unsafe_allow_html=True)
-            if st.button("📋 Copy all", width="stretch"):
-                st.session_state["copy_all_payload"] = tsv_text
-                st.session_state["suppress_row_dialog"] = True
-            st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    if st.session_state.get("copy_all_payload"):
-        copy_payload = st.session_state.pop("copy_all_payload")
-        json_payload = json.dumps(copy_payload)
-        components.html(
-            f"""
-            <script>
-              (async () => {{
-                const payload = JSON.parse({json_payload});
-                try {{
-                  await navigator.clipboard.writeText(payload);
-                }} catch (err) {{
-                  console.warn("navigator.clipboard.writeText failed, using fallback.", err);
-                  const textArea = document.createElement('textarea');
-                  textArea.value = payload;
-                  textArea.style.position = 'fixed';
-                  textArea.style.opacity = '0';
-                  document.body.appendChild(textArea);
-                  textArea.focus();
-                  textArea.select();
-                  try {{
-                    document.execCommand('copy');
-                  }} catch (copyErr) {{
-                    console.error("Fallback clipboard copy failed.", copyErr);
-                  }}
-                  document.body.removeChild(textArea);
-                }}
-              }})();
-            </script>
-            """,
-            height=0,
-        )
-        append_ops_log("📋 Copied table to clipboard.")
-
-    def highlight_problematic_rows(row: pd.Series):
-        """Applies highlighting to rows based on a set of problem conditions."""
-        highlight = False
-
-        # Condition 1: Approved/Received without tracking
-        if (row.get("Current Status") in ["Approved", "Received"]) and not row.get("DisplayTrack"):
-            highlight = True
-
-        # Condition 2: Failures exist (non-empty 'failures' string)
-        if row.get("failures"):
-            highlight = True
-
-        # Condition 3: Courier Cancelled
-        if row.get("is_cc"):
-            highlight = True
-
-        # Condition 4: Flagged
-        if row.get("is_fg"):
-            highlight = True
-
-        if highlight:
-            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
-
-        return [""] * len(row)
-
-    cols_for_styling = list(
-        dict.fromkeys(display_cols + ["DisplayTrack", "failures", "is_cc", "is_fg"])
-    )
-    styling_df = display_df[cols_for_styling].copy()
-    styled_table = styling_df.style.apply(highlight_problematic_rows, axis=1)
-    cols_to_hide = [col for col in styling_df.columns if col not in display_cols]
-    if cols_to_hide:
-        styled_table = styled_table.hide(cols_to_hide, axis="columns")
-
-    table_key = "rma_table"
-    sel_event = st.dataframe( # type: ignore
-        styled_table,
-        width="stretch",
-        height=700,
-        hide_index=True,
-        column_config=column_config,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=table_key,
-    )
-
-    sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and hasattr(sel_event.selection, "rows") else []) or [] # type: ignore
-    if sel_rows:
-        if st.session_state.pop("suppress_row_dialog", False):
-            table_state = st.session_state.get(table_key, {})
-            if isinstance(table_state, dict):
-                table_state["selection"] = {"rows": []}
-                st.session_state[table_key] = table_state
-        else:
-            idx = int(sel_rows[0])
-            show_rma_actions_dialog(display_df.iloc[idx])
-
-
-    try:
-        remaining = RATE_LIMIT_INFO.get("remaining")
-        limit = RATE_LIMIT_INFO.get("limit")
-        if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
-            remain_int = int(remaining)
-            limit_int = int(limit)
-            if remain_int < limit_int * 0.2:
-                st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
-    except (ValueError, TypeError):
-        pass
-    
-    last_sync_time = st.session_state.get("last_sync_time")
-    last_sync_display = (
-        last_sync_time.strftime("%Y-%m-%d %H:%M:%S")
-        if last_sync_time
-        else "Never"
-    )
-    st.markdown(
-        f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>", # type: ignore
-        unsafe_allow_html=True,
-    )
-
-
-if __name__ == "__main__":
-    main()
+        return cached[
