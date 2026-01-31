@@ -2447,7 +2447,6 @@ def main(): # type: ignore
             /* background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
                         radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
                         #0b1f3a; */
-            color: #e5e7eb;
           }
           .stApp {
             position: relative;
