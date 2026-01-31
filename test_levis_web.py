@@ -1,19 +1,20 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import sqlite3
 import requests
 import json
 import pandas as pd
-import os
-import threading
 import time
 import re
 import logging
+import os
+import threading
+import html
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import concurrent.futures
-from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping
+from sqlalchemy import create_engine, text, Engine
+import concurrent.futures # Keep this import, it's used in force_refresh_rma_ids
+from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List
 from returngo_api import api_url, RMA_COMMENT_PATH
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,91 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # ==========================================
 # 1a. CONFIGURATION
 # ==========================================
-MY_API_KEY: Optional[str] = None
+
+@st.cache_resource
+def init_database() -> Optional[Engine]:
+    """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
+    logger.info("Initializing database connection from Streamlit secrets...")
+    try:
+        creds = st.secrets["connections"]["postgresql"]
+        dialect = creds.get("dialect", "postgresql")
+        driver = creds.get("driver")
+        user = creds["username"]
+        password = creds["password"]
+        host = creds["host"]
+        port = creds["port"]
+        database = creds["database"]
+
+        # Construct the database URL, including the driver if specified
+        db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
+
+        connect_args = {"timeout": 60}
+
+        # Handle SSL settings based on the specified driver
+        if driver == "pg8000" and creds.get("sslmode") == "require":
+            # pg8000 uses 'ssl_context' in connect_args
+            connect_args["ssl_context"] = True
+        elif "sslmode" in creds:
+            # Other drivers like psycopg2 expect 'sslmode' as a URL parameter
+            db_url += f"?sslmode={creds['sslmode']}"
+
+        logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
+
+        engine = create_engine(
+            db_url,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
+
+        # Use a single transaction to create both tables if they don't exist
+        with engine.begin() as connection:
+            connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS rmas (
+                rma_id TEXT PRIMARY KEY,
+                store_url TEXT,
+                status TEXT,
+                created_at TIMESTAMP WITH TIME ZONE,
+                json_data JSONB,
+                last_fetched TIMESTAMP WITH TIME ZONE,
+                courier_status TEXT,
+                courier_last_checked TIMESTAMP WITH TIME ZONE,
+                received_first_seen TIMESTAMP WITH TIME ZONE
+            );
+            """))
+            connection.execute(text("""
+            CREATE TABLE IF NOT EXISTS sync_logs (
+                scope TEXT PRIMARY KEY,
+                last_sync_iso TIMESTAMP WITH TIME ZONE
+            );
+            """))
+        logger.info("Database tables verified and connection is ready.")
+        return engine
+
+    except KeyError as e:
+        logger.critical(f"Database configuration error: Missing key {e} in [connections.postgresql] secrets.")
+        st.error(f"Application error: Database configuration is missing required key: {e}. Please check your secrets.toml file.")
+        st.stop()
+        return None
+    except Exception as e:
+        logger.critical(f"Fatal error during database initialization: {e}", exc_info=True)
+        st.error(f"Application error: Could not connect to the database. Details: {e}")
+        st.stop()
+        return None
+        
+# Initialize the database connection engine at the module level
+engine = init_database()
+
+# Load API secrets
+try:
+    # Standardize API key name as per error message and rma_web.py context
+    MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
+    PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
+except KeyError:
+    st.error("Application error: Missing 'RETURNGO_API_KEY' in Streamlit secrets.")
+    st.stop()
+    MY_API_KEY = None
+    PARCEL_NINJA_TOKEN = None
 STORE_URL = "levis-sa.myshopify.com"
-DB_FILE = "levis_cache.db"
-DB_LOCK = threading.Lock()
 
 # Efficiency controls
 CACHE_EXPIRY_HOURS = 24
@@ -55,8 +137,7 @@ COURIER_STATUS_OPTIONS = [
     "In Transit",
     "Delivered",
     "Courier Cancelled",
-    "Tracking Not Found",
-    "Unknown",
+    "No tracking number",
     ]
 
 RATE_LIMIT_HIT = threading.Event()
@@ -82,6 +163,26 @@ def _iso_utc(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def _append_log_entry(log_key: str, message: str, *, level: str = "info", limit: int = 200) -> None:
+    if not message:
+        return
+    ts = datetime.now().strftime("%H:%M:%S")
+    entry = f"[{ts}] {message}"
+    if level and level != "info":
+        entry = f"[{ts}] {level.upper()}: {message}"
+    log_entries: List[str] = st.session_state.get(log_key, [])
+    log_entries.append(entry)
+    st.session_state[log_key] = log_entries[-limit:]
+
+
+def append_ops_log(message: str, *, level: str = "info") -> None:
+    _append_log_entry("ops_log", message, level=level)
+
+
+def append_schema_log(message: str, *, level: str = "info") -> None:
+    _append_log_entry("schema_log", message, level=level)
 
 
 def _sleep_for_rate_limit():
@@ -183,6 +284,7 @@ def update_rate_limit_info(headers: Mapping[str, Optional[str]]):
 
 
 def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=None):
+    logger.info(f"rg_request: Making {method} request to {url}")
     session: requests.Session = get_thread_session()
     headers = headers or rg_headers()
 
@@ -190,7 +292,9 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
     res = None
     for _attempt in range(1, 6):
         _sleep_for_rate_limit()
+        logger.info(f"rg_request: Attempt {_attempt}...")
         res = session.request(method, url, headers=headers, timeout=timeout, json=json_body)
+        logger.info(f"rg_request: Request completed with status {res.status_code if res else 'None'}")
         update_rate_limit_info(res.headers)
         if res.status_code != 429:
             return res # type: ignore
@@ -212,140 +316,84 @@ def rg_request(method: str, url: str, *, headers=None, timeout=15, json_body=Non
 # ==========================================
 # 3. DATABASE
 # ==========================================
-def init_db():
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rmas (
-                rma_id TEXT PRIMARY KEY,
-                store_url TEXT,
-                status TEXT,
-                created_at TEXT,
-                json_data TEXT,
-                last_fetched TEXT,
-                courier_status TEXT
-            )
-            """
-        )
-
-        existing_cols = {row[1] for row in c.execute("PRAGMA table_info(rmas)").fetchall()}
-
-        def add_col(col_name: str, col_type: str):
-            if col_name not in existing_cols:
-                try:
-                    c.execute(f"ALTER TABLE rmas ADD COLUMN {col_name} {col_type}")
-                except Exception:
-                    pass
-
-        add_col("courier_last_checked", "TEXT")
-        add_col("received_first_seen", "TEXT")
-
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sync_logs (
-                scope TEXT PRIMARY KEY,
-                last_sync_iso TEXT
-            )
-            """
-        )
-
-        conn.commit()
-        conn.close()
 
 
-def clear_db():
-    with DB_LOCK:
+
+
+def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
+               courier_status: Optional[str] = None, courier_checked_iso: Optional[str] = None):
+    now_iso = _iso_utc(_now_utc())
+    
+    # Convert created_at to a timezone-aware datetime object
+    created_at_dt = None
+    if created_at:
         try:
-            if os.path.exists(DB_FILE):
-                os.remove(DB_FILE)
-            init_db()
-            return True
+            created_at_dt = pd.to_datetime(created_at).tz_localize('UTC')
         except Exception:
-            return False
+            created_at_dt = None
 
+    courier_checked_dt = None
+    if courier_checked_iso:
+        try:
+            courier_checked_dt = pd.to_datetime(courier_checked_iso).tz_localize('UTC')
+        except Exception:
+            courier_checked_dt = None
 
-def upsert_rma(
-    rma_id: str,
-    status: str,
-    created_at: str,
-    payload: dict,
-    courier_status: Optional[str] = None,
-    courier_checked_iso: Optional[str] = None,
-):
-    max_retries = 3
-    for attempt in range(max_retries):
-        with DB_LOCK:
-            conn = None
-            try:
-                conn = sqlite3.connect(DB_FILE, timeout=20)
-                conn.execute("PRAGMA busy_timeout = 20000")
-                c = conn.cursor()
-                now_iso = _iso_utc(_now_utc())
+    if engine is None:
+        logger.error("Database engine not initialized, cannot upsert RMA %s", rma_id)
+        return
+        
+    with engine.connect() as connection:
+        # First, select the existing values
+        select_query = text("SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=:rma_id")
+        result = connection.execute(select_query, {"rma_id": rma_id}).fetchone()
 
-                c.execute(
-                    "SELECT courier_status, courier_last_checked, received_first_seen FROM rmas WHERE rma_id=?",
-                    (str(rma_id),),
-                )
-                row = c.fetchone()
-                existing_cstat = row[0] if row else None
-                existing_cchk = row[1] if row else None
-                existing_received = row[2] if row else None
+        existing_cstat = result[0] if result else None
+        existing_cchk = result[1] if result else None
+        existing_received = result[2] if result else None
 
-                if courier_status is None:
-                    courier_status = existing_cstat
-                if courier_checked_iso is None:
-                    courier_checked_iso = existing_cchk
+        if courier_status is None:
+            courier_status = existing_cstat
+        if courier_checked_iso is None and existing_cchk:
+            courier_checked_dt = existing_cchk
+        
+        received_seen = existing_received
+        if status == "Received" and not existing_received:
+            received_seen = now_iso
 
-                received_seen = existing_received
-                if status == "Received" and not existing_received:
-                    received_seen = now_iso
-
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO rmas
-                    (rma_id, store_url, status, created_at, json_data, last_fetched,
-                     courier_status, courier_last_checked, received_first_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(rma_id),
-                        STORE_URL,
-                        status,
-                        created_at,
-                        json.dumps(payload),
-                        now_iso,
-                        courier_status,
-                        courier_checked_iso,
-                        received_seen,
-                    ),
-                )
-                conn.commit()
-                break
-            except sqlite3.OperationalError as exc:
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "DB upsert failed for RMA %s, retry %s/%s",
-                        rma_id,
-                        attempt + 1,
-                        max_retries,
-                    )
-                    time.sleep(0.1 * (attempt + 1))
-                    continue
-                logger.error("Failed to upsert RMA %s after %s attempts: %s", rma_id, max_retries, exc)
-                raise
-            finally:
-                if conn is not None:
-                    conn.close() # type: ignore
+        insert_query = text("""
+        INSERT INTO rmas (rma_id, store_url, status, created_at, json_data, last_fetched, courier_status, courier_last_checked, received_first_seen)
+        VALUES (:rma_id, :store_url, :status, :created_at, CAST(:json_data AS JSONB), :last_fetched, :courier_status, :courier_last_checked, :received_first_seen)
+        ON CONFLICT (rma_id) DO UPDATE SET
+            store_url = EXCLUDED.store_url,
+            status = EXCLUDED.status,
+            created_at = EXCLUDED.created_at,
+            json_data = EXCLUDED.json_data,
+            last_fetched = EXCLUDED.last_fetched,
+            courier_status = EXCLUDED.courier_status,
+            courier_last_checked = EXCLUDED.courier_last_checked,
+            received_first_seen = EXCLUDED.received_first_seen;
+        """)
+        
+        connection.execute(insert_query, {
+            "rma_id": str(rma_id),
+            "store_url": STORE_URL,
+            "status": status, # type: ignore
+            "created_at": created_at_dt,
+            "json_data": payload,
+            "last_fetched": now_iso,
+            "courier_status": courier_status,
+            "courier_last_checked": courier_checked_dt,
+            "received_first_seen": received_seen
+        })
+        connection.commit()
 
 
 def delete_rmas(rma_ids):
-    if not rma_ids:
+    if not rma_ids: # type: ignore
         return
-    if isinstance(rma_ids, (str, bytes)):
-        rma_ids = [rma_ids]
+    if isinstance(rma_ids, (str, bytes)): # type: ignore
+        rma_ids = [rma_ids] # type: ignore
 
     seen: Set[str] = set()
     normalized_ids = []
@@ -361,120 +409,125 @@ def delete_rmas(rma_ids):
         normalized_ids.append(s)
     if not normalized_ids:
         return
-    with DB_LOCK:
-        try:
-            with sqlite3.connect(DB_FILE, timeout=10) as conn:
-                conn.execute("PRAGMA busy_timeout = 10000")
-                conn.executemany(
-                    "DELETE FROM rmas WHERE rma_id=? AND store_url=?",
-                    [(i, STORE_URL) for i in normalized_ids],
-                )
-                if "cache_version" in st.session_state:
-                    st.session_state.cache_version += 1
-                logger.info("Deleted %s RMAs from cache", len(normalized_ids))
-        except sqlite3.DatabaseError as e:
-            logger.error("Failed to delete RMAs: %s", e)
-            st.error(f"Failed to delete RMAs: {e}")
-            raise
+    
+    if engine is None:
+        return
+        
+    try:
+        with engine.connect() as connection:
+            delete_query = text("DELETE FROM rmas WHERE rma_id = ANY(:rma_ids) AND store_url=:store_url")
+            connection.execute(delete_query, {"rma_ids": normalized_ids, "store_url": STORE_URL})
+            connection.commit()
+            if "cache_version" in st.session_state:
+                st.session_state.cache_version += 1
+            logger.info("Deleted %s RMAs from cache", len(normalized_ids))
+    except Exception as e:
+        logger.error("Failed to delete RMAs: %s", e)
+        st.error(f"Failed to delete RMAs: {e}")
+        raise
 
 
 def get_rma(rma_id: str):
-    with DB_LOCK: # type: ignore
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute(
-            "SELECT json_data, last_fetched, courier_status, courier_last_checked, received_first_seen "
-            "FROM rmas WHERE rma_id=?",
-            (str(rma_id),),
-        )
-        row = c.fetchone()
-        conn.close()
+    if engine is None:
+        return None
+
+    with engine.connect() as connection:
+        query = text("""
+            SELECT json_data, last_fetched, courier_status, courier_last_checked, received_first_seen 
+            FROM rmas WHERE rma_id=:rma_id
+        """)
+        row = connection.execute(query, {"rma_id": str(rma_id)}).fetchone()
 
     if not row:
         return None
 
-    payload = json.loads(row[0])
+    payload = row[0]
     payload["_local_courier_status"] = row[2]
-    payload["_local_courier_checked"] = row[3]
-    payload["_local_received_first_seen"] = row[4]
-    return payload, row[1]
+    payload["_local_courier_checked"] = row[3].isoformat() if row[3] else None
+    payload["_local_received_first_seen"] = row[4].isoformat() if row[4] else None
+    return payload, row[1].isoformat() if row[1] else None
 
 
 def get_all_open_from_db():
-    with DB_LOCK: # type: ignore
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
-        c.execute(
-            f"""
+    if engine is None:
+        return []
+
+    with engine.connect() as connection:
+        query = text(f"""
             SELECT json_data, courier_status, courier_last_checked, received_first_seen
             FROM rmas
-            WHERE store_url=? AND status IN ({placeholders})
-            """,
-            (STORE_URL, *ACTIVE_STATUSES),
-        )
-        rows = c.fetchall()
-        conn.close()
+            WHERE store_url=:store_url AND status = ANY(:statuses)
+        """)
+        rows = connection.execute(query, {"store_url": STORE_URL, "statuses": ACTIVE_STATUSES}).fetchall()
 
     results = []
     for js, cstat, cchk, rcv_seen in rows:
-        data = json.loads(js)
+        data = js
         data["_local_courier_status"] = cstat
-        data["_local_courier_checked"] = cchk
-        data["_local_received_first_seen"] = rcv_seen
+        data["_local_courier_checked"] = cchk.isoformat() if cchk else None
+        data["_local_received_first_seen"] = rcv_seen.isoformat() if rcv_seen else None
         results.append(data)
     return results
 
 
-def db_mtime() -> float:
-    try:
-        return os.path.getmtime(DB_FILE)
-    except OSError:
-        return 0.0
-
-
 @st.cache_data(show_spinner=False, ttl=60)
-def load_open_rmas(_db_mtime: float, _cache_buster: str):
+def load_open_rmas(_cache_version: int):
+    """
+    Loads all RMAs with an 'active' status from the PostgreSQL database.
+    This function is cached by Streamlit. The cache is invalidated when `_cache_version`
+    is changed, forcing a fresh read from the database.
+    """
     return get_all_open_from_db()
 
 
 def get_local_ids_for_status(status: str):
-    with DB_LOCK: # type: ignore
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT rma_id FROM rmas WHERE store_url=? AND status=?", (STORE_URL, status))
-        rows = c.fetchall()
-        conn.close()
+    if engine is None:
+        return set()
+    with engine.connect() as connection:
+        query = text("SELECT rma_id FROM rmas WHERE store_url=:store_url AND status=:status")
+        rows = connection.execute(query, {"store_url": STORE_URL, "status": status}).fetchall()
     return {r[0] for r in rows}
 
 
 def set_last_sync(scope: str, dt: datetime):
-    with DB_LOCK: # type: ignore
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute(
-            "INSERT OR REPLACE INTO sync_logs (scope, last_sync_iso) VALUES (?, ?)",
-            (scope, _iso_utc(dt)),
-        )
-        conn.commit()
-        conn.close()
+    if engine is None:
+        return
+    with engine.connect() as connection:
+        query = text("""
+            INSERT INTO sync_logs (scope, last_sync_iso) 
+            VALUES (:scope, :last_sync_iso)
+            ON CONFLICT (scope) DO UPDATE SET last_sync_iso = :last_sync_iso;
+        """)
+        connection.execute(query, {"scope": scope, "last_sync_iso": dt})
+        connection.commit()
 
 
 def get_last_sync(scope: str) -> Optional[datetime]:
-    with DB_LOCK: # type: ignore
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        try:
-            c.execute("SELECT last_sync_iso FROM sync_logs WHERE scope=?", (scope,))
-            row = c.fetchone()
-            if row and row[0]:
-                try:
-                    return datetime.fromisoformat(row[0])
-                except Exception:
-                    return None
-            return None
-        finally:
-            conn.close()
+    if engine is None:
+        return None
+        
+    with engine.connect() as connection:
+        query = text("SELECT last_sync_iso FROM sync_logs WHERE scope=:scope")
+        row = connection.execute(query, {"scope": scope}).fetchone()
+        if row and row[0]:
+            try:
+                # The value from postgres is already a datetime object
+                return row[0]
+            except Exception:
+                return None
+        return None
+
+def clear_db():
+    if engine is None:
+        return False
+    try:
+        with engine.begin() as connection: # Use begin() for a transaction
+            connection.execute(text("TRUNCATE TABLE rmas, sync_logs;"))
+        return True
+    except Exception as e:
+        logger.error(f"Failed to clear PostgreSQL tables: {e}")
+        st.error(f"Failed to clear PostgreSQL tables: {e}")
+        return False
 
 # ==========================================
 # 4. COURIER STATUS
@@ -698,6 +751,7 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
         return "Tracking check failed (ERR_UNKNOWN)"
 
 
+@st.cache_data(ttl=COURIER_REFRESH_HOURS * 3600, show_spinner=False)
 def check_courier_status(tracking_number: str) -> str:
     if not tracking_number:
         return "No tracking number"
@@ -758,15 +812,18 @@ def should_refresh_detail(rma_id: str) -> bool:
     if not cached:
         return True
     _, last_fetched_iso = cached
+    if not last_fetched_iso:
+        return True
     try:
         last_dt = datetime.fromisoformat(last_fetched_iso)
-    except Exception:
+    except (ValueError, TypeError):
         return True
     if last_dt.tzinfo is None:
         last_dt = last_dt.replace(tzinfo=timezone.utc)
     return (_now_utc() - last_dt) > timedelta(hours=CACHE_EXPIRY_HOURS)
 
 
+@st.cache_data(ttl=COURIER_REFRESH_HOURS * 3600, show_spinner=False)
 def should_refresh_courier(rma_payload: dict) -> bool:
     cached_checked = rma_payload.get("_local_courier_checked")
     if not cached_checked:
@@ -776,10 +833,11 @@ def should_refresh_courier(rma_payload: dict) -> bool:
         if last_chk.tzinfo is None:
             last_chk = last_chk.replace(tzinfo=timezone.utc)
         return (_now_utc() - last_chk) > timedelta(hours=COURIER_REFRESH_HOURS)
-    except Exception:
+    except (ValueError, TypeError):
         return True
 
 
+# This function would now primarily orchestrate fetching and caching of courier status
 def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[str]]:
     shipments = rma_payload.get("shipments", []) or []
     track_no = None
@@ -792,14 +850,16 @@ def maybe_refresh_courier(rma_payload: dict) -> Tuple[Optional[str], Optional[st
 
     cached_status = rma_payload.get("_local_courier_status")
     cached_checked = rma_payload.get("_local_courier_checked")
-
-    if not should_refresh_courier(rma_payload):
-        logger.debug("Using cached courier status for tracking %s: %s", track_no, cached_status)
-        return cached_status, cached_checked
-
-    logger.info("Refreshing courier status for tracking number: %s", track_no)
-    status = check_courier_status(track_no)
-    checked_iso = _iso_utc(_now_utc())
+    
+    # Use the cached check_courier_status directly
+    status = check_courier_status(track_no) # This call is now cached by st.cache_data
+    
+    # If the status was just refreshed (i.e., cache miss for check_courier_status), update checked_iso
+    # Otherwise, use the existing cached_checked
+    if status != cached_status or cached_checked is None: # Simple heuristic to detect refresh
+        checked_iso = _iso_utc(_now_utc())
+    else:
+        checked_iso = cached_checked
     return status, checked_iso
 
 
@@ -808,6 +868,7 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
     if (not force) and cached and not should_refresh_detail(rma_id):
         return cached[0]
 
+    
     url = api_url(f"/rma/{rma_id}")
     res: Optional[requests.Response] = rg_request("GET", url, timeout=20)
     if res is None:
@@ -818,9 +879,9 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
         return cached[0] if cached else None
 
     data = res.json() if res.content else {}
-    # type: ignore
     summary = data.get("rmaSummary", {}) or {}
 
+    
     if cached:
         data["_local_courier_status"] = cached[0].get("_local_courier_status")
         data["_local_courier_checked"] = cached[0].get("_local_courier_checked")
@@ -828,7 +889,7 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
 
     courier_status, courier_checked = maybe_refresh_courier(data)
     
-    try:
+    try: # type: ignore
         upsert_rma(
             rma_id=str(rma_id),
             status=summary.get("status", "Unknown"),
@@ -837,7 +898,7 @@ def fetch_rma_detail(rma_id: str, *, force: bool = False):
             courier_status=courier_status,
             courier_checked_iso=courier_checked,
         )
-        # refresh local fields for UI
+        # Refresh local fields for UI
         fresh = get_rma(str(rma_id))
         if fresh:
             data["_local_received_first_seen"] = fresh[0].get("_local_received_first_seen")
@@ -858,24 +919,26 @@ def get_incremental_since(statuses, full: bool) -> Optional[datetime]:
 
 
 def perform_sync(statuses=None, *, full=False, rerun: bool = True):
-    status_msg = st.empty()
-    status_msg.info("⏳ Connecting to ReturnGO...")
+    if st.session_state.get("disconnected"):
+        append_ops_log("System is disconnected. Login again to resume sync.", level="warning")
+        return
+    failed_fetches = 0
+    successful_fetches = 0
+    append_ops_log("⏳ Connecting to ReturnGO...")
 
     if statuses is None:
         statuses = ACTIVE_STATUSES
 
     since_dt = get_incremental_since(statuses, full)
 
-    list_bar = st.progress(0, text="Fetching RMA list from ReturnGO...")
+    append_ops_log("Calling fetch_rma_list...")
     summaries, ok, err = fetch_rma_list(statuses, since_dt)
+    append_ops_log(f"fetch_rma_list returned. ok={ok}, error='{err}'")
     if not ok:
-        list_bar.empty()
         msg = f"ReturnGO sync failed: {err}" if err else "ReturnGO sync failed."
-        status_msg.error(msg)
+        append_ops_log(msg, level="error")
         return
-    list_bar.progress(1.0, text=f"Fetched {len(summaries)} RMAs")
-    time.sleep(0.08)
-    list_bar.empty()
+    append_ops_log(f"Fetched {len(summaries)} RMAs.")
 
     api_ids = {s.get("rmaId") for s in summaries if s.get("rmaId")}
 
@@ -883,17 +946,18 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
     if set(statuses) == set(ACTIVE_STATUSES) and not full and since_dt is not None:
         local_active_ids = set()
         for stt in ACTIVE_STATUSES:
-            local_active_ids |= get_local_ids_for_status(stt)
+            local_active_ids |= get_local_ids_for_status(stt) # type: ignore
         stale = local_active_ids - api_ids # type: ignore
         logger.info("Removing %s stale RMAs no longer in active statuses", len(stale))
         delete_rmas(stale)
     elif full:
-        with DB_LOCK:
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("SELECT rma_id FROM rmas WHERE store_url=?", (STORE_URL,))
-            all_local_ids = {r[0] for r in c.fetchall()}
-            conn.close()
+        if engine is None:
+            return
+        with engine.connect() as connection:
+            query = text("SELECT rma_id FROM rmas WHERE store_url=:store_url")
+            result = connection.execute(query, {"store_url": STORE_URL})
+            all_local_ids = {r[0] for r in result.fetchall()}
+        # Fetch all local IDs from the DB
         stale_full = all_local_ids - api_ids # type: ignore
         if stale_full:
             logger.info("Full sync: removing %s RMAs not in API response", len(stale_full))
@@ -908,22 +972,26 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         force = False
 
     total = len(to_fetch)
-    status_msg.info(f"⏳ Syncing {total} records...")
+    append_ops_log(f"⏳ Syncing {total} records...")
 
+    successful_fetches = 0
+    failed_fetches = 0
     if total > 0:
-        successful_fetches = 0
-        failed_fetches = 0
-        bar = st.progress(0, text="Downloading Details...")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [ex.submit(fetch_rma_detail, rid, force=force) for rid in to_fetch]
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                done = i + 1
-                bar.progress(done / total, text=f"Syncing: {done}/{total}")
-                # Get the result (or exception)
-                result = future.result()
-                if result is not None: successful_fetches += 1
-                else: failed_fetches += 1
-        bar.empty()
+        append_ops_log(f"Starting to fetch details for {total} RMAs one by one...")
+
+        for i, rid in enumerate(to_fetch):
+            done = i + 1
+            if done == 1 or done % 5 == 0 or done == total:
+                append_ops_log(f"[{done}/{total}] Fetching detail for RMA: {rid}")
+
+            result = fetch_rma_detail(rid, force=force)
+
+            if result is not None:
+                successful_fetches += 1
+            else:
+                failed_fetches += 1
+
+        append_ops_log("Finished fetching all details.")
 
     now = _now_utc()
     scope = ",".join(statuses)
@@ -932,22 +1000,26 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         set_last_sync(s, now)
 
     if failed_fetches == 0:
-        status_msg.success(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
+        append_ops_log(f"✅ Sync Complete! {successful_fetches} RMAs updated.")
     else:
-        status_msg.warning(f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed.")
+        append_ops_log(
+            f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed."
+        )
     st.session_state["show_toast"] = True
-    status_msg.success("✅ Sync Complete!")
     try:
         load_open_rmas.clear()
     except Exception:
-        st.error("Failed to clear open-RMA cache")
+        append_ops_log("Failed to clear open-RMA cache", level="error")
     if rerun:
         st.rerun()
  # type: ignore
 
 def force_refresh_rma_ids(rma_ids, scope_label: str):
+    if st.session_state.get("disconnected"):
+        append_ops_log("System is disconnected. Login again to refresh data.", level="warning")
+        return
     ids = [str(i) for i in set(rma_ids) if i]
-    if not ids:
+    if not ids: # type: ignore
         set_last_sync(scope_label, _now_utc())
         st.session_state["show_toast"] = True
         st.rerun()
@@ -955,30 +1027,27 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
         # from reaching this return; it exists to satisfy type checkers / static analyzers.
         return
 
-    msg = st.empty()
-    msg.info(f"⏳ Refreshing {len(ids)} records...")
+    append_ops_log(f"⏳ Refreshing {len(ids)} records...")
 
-    bar = st.progress(0, text="Downloading Details...")
     total = len(ids)
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_rma_detail, rid, force=True) for rid in ids]
         done = 0
         for _ in concurrent.futures.as_completed(futures):
             done += 1
-            bar.progress(done / total, text=f"Refreshing: {done}/{total}")
-    bar.empty()
+            if done == 1 or done % 10 == 0 or done == total:
+                append_ops_log(f"Refreshing progress: {done}/{total}")
 
     set_last_sync(scope_label, _now_utc())
     st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
     st.session_state["show_toast"] = True
-    msg.success("✅ Refresh Complete!")
+    append_ops_log("✅ Refresh Complete!")
     try:
         load_open_rmas.clear()
-    except Exception:
-        st.error("Failed to clear open-RMA cache")
+    except Exception as e:
+        append_ops_log(f"Failed to clear open-RMA cache: {e}", level="error")
     st.rerun()
 
- # type: ignore
 # ==========================================
 # 6. MUTATIONS
 # ==========================================
@@ -1633,8 +1702,11 @@ def inject_command_center_css():
         }
 
         .api-action-bar.compact {
-            padding: 12px 14px;
+            padding: 0;
             margin: 12px 0 0 0;
+            background: transparent;
+            border: none;
+            box-shadow: none;
         }
 
         .api-action-bar.compact .api-action-bar-title {
@@ -2050,17 +2122,21 @@ def execute_api_operation(endpoint: str, context: str = ""):
     """Execute the selected API operation."""
     global df_view
 
+    if st.session_state.get("disconnected"):
+        append_ops_log("System is disconnected. Login again to run API operations.", level="warning")
+        return
+
     logger.info("Executing API operation: %s (context: %s)", endpoint, context or "none")
 
     operation = API_OPERATIONS.get(endpoint)
     if not operation:
-        st.error(f"Unknown operation: {endpoint}")
+        append_ops_log(f"Unknown operation: {endpoint}", level="error")
         logger.error("Unknown API operation: %s", endpoint)
         return
 
     op_type = operation.get("type")
     if not op_type:
-        st.error(f"Operation '{endpoint}' has no type defined in API_OPERATIONS")
+        append_ops_log(f"Operation '{endpoint}' has no type defined in API_OPERATIONS", level="error")
         logger.error("Operation '%s' missing type field", endpoint)
         return
 
@@ -2074,43 +2150,43 @@ def execute_api_operation(endpoint: str, context: str = ""):
         filter_name = operation.get("filter_name")
         scope = operation.get("scope")
 
-        with st.spinner(f"Syncing {filter_name}..."):
-            perform_sync(statuses=statuses, full=False, rerun=False)
+        append_ops_log(f"Syncing {filter_name}...")
+        perform_sync(statuses=statuses, full=False, rerun=False)
 
-            if filter_name and filter_name in FILTERS and scope:
-                matching_ids = ids_for_filter(filter_name)
-                if matching_ids:
-                    force_refresh_rma_ids(matching_ids, scope)
-                else:
-                    st.info(f"No RMAs match {filter_name} filter.")
-            elif filter_name and filter_name in FILTERS and not scope:
-                st.error(f"Operation '{endpoint}' missing required 'scope' field")
+        if filter_name and filter_name in FILTERS and scope:
+            matching_ids = ids_for_filter(filter_name)
+            if matching_ids:
+                force_refresh_rma_ids(matching_ids, scope)
+            else:
+                append_ops_log(f"No RMAs match {filter_name} filter.")
+        elif filter_name and filter_name in FILTERS and not scope:
+            append_ops_log(f"Operation '{endpoint}' missing required 'scope' field", level="error")
         return
 
     if op_type == "rma_detail":
-        if not context:
-            st.error("Please enter an RMA ID")
+        if not context: # type: ignore
+            append_ops_log("Please enter an RMA ID", level="error")
             return
-        with st.spinner(f"Fetching RMA {context}..."): # type: ignore
-            rma_data = fetch_rma_detail(context, force=True)
+        append_ops_log(f"Fetching RMA {context}...")
+        rma_data = fetch_rma_detail(context, force=True)
         if rma_data:
-            st.success(f"✅ Refreshed RMA {context}")
+            append_ops_log(f"✅ Refreshed RMA {context}")
             st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
             st.rerun()
         else:
-            st.error(f"Failed to fetch RMA {context}")
+            append_ops_log(f"Failed to fetch RMA {context}", level="error")
         return
 
     if op_type == "batch_courier":
         if df_view.empty:
-            st.warning("No data loaded. Sync dashboard first.")
+            append_ops_log("No data loaded. Sync dashboard first.", level="warning")
             return
 
         rmas_with_tracking = df_view[df_view["DisplayTrack"] != ""].copy()
         rma_ids = rmas_with_tracking["_rma_id_text"].tolist()
 
         if not rma_ids:
-            st.info("No RMAs with tracking numbers found.")
+            append_ops_log("No RMAs with tracking numbers found.")
             return
 
         force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH") # type: ignore
@@ -2118,7 +2194,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
 
     if op_type == "export_csv":
         if df_view.empty:
-            st.warning("No data to export. Sync dashboard first.")
+            append_ops_log("No data to export. Sync dashboard first.", level="warning")
             return
 
         csv = df_view.to_csv(index=False)
@@ -2130,18 +2206,18 @@ def execute_api_operation(endpoint: str, context: str = ""):
         )
         return
 
-    st.error(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'")
+    append_ops_log(f"Unknown operation type '{op_type}' for endpoint '{endpoint}'", level="error")
     logger.error("Unknown operation type '%s' for endpoint '%s'", op_type, endpoint)
 
-# type: ignore
-def main():
-    global MY_API_KEY, PARCEL_NINJA_TOKEN, df_view, counts
+
+def main(): # type: ignore
+    global df_view, counts
 
     st.set_page_config(page_title="Levi's ReturnGO Ops", layout="wide", page_icon="📤")
-    inject_command_center_css() # This function is defined later in the file, consider moving it up or ensuring it's called after definition.
+    inject_command_center_css()
 
     # --- Preserve scroll position across reruns (page scroll) ---
-    components.html(
+    components.html( # type: ignore
         """
         <script>
         const y = window.localStorage.getItem("scrollY");
@@ -2154,20 +2230,122 @@ def main():
         height=0,
     )
 
-    # --- ACCESS SECRETS ---
-    try:
-        MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-    except (FileNotFoundError, KeyError, AttributeError):
-        MY_API_KEY = None
 
-    if not MY_API_KEY:
-        st.error("API Key not found! Please set 'RETURNGO_API_KEY_BOUNTY_BOUNTY' in your Streamlit secrets (`.streamlit/secrets.toml`).")
-        st.stop()
+    # ==========================================
+    # 0. UI: Sync Dashboard in Sidebar
+    # ==========================================
+    with st.sidebar:
+        st.subheader("Data Operations")
 
-    try:
-        PARCEL_NINJA_TOKEN = st.secrets["PARCEL_NINJA_TOKEN"]
-    except Exception:
-        PARCEL_NINJA_TOKEN = os.environ.get("PARCEL_NINJA_TOKEN", PARCEL_NINJA_TOKEN)
+        if st.button("🚀 Fetch from ReturnGo API", key="btn_sync_all", type="primary", help="Fetch latest data from the ReturnGO API for all stores and statuses. This may take several minutes."):
+            st.session_state.last_sync_pressed = datetime.now()
+            perform_sync(full=True) # type: ignore
+        
+        if st.button("🔄 Update From Database", help="Reload data from the local database cache without calling the API."):
+            st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
+            append_ops_log("✅ Dashboard updated from database")
+            st.rerun()
+
+        st.divider()
+
+        db_status_led = "db-led-on" if engine else "db-led-off"
+        db_status_text = "✅ Database connection" if engine else "⚪ Database connection"
+        st.markdown(
+            f"<div class='db-status-line'><span class='db-led {db_status_led}'></span>{db_status_text}</div>",
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("ℹ️ Database Info"):
+            if engine:
+                try:
+                    with engine.connect() as connection:
+                        rma_count_result = connection.execute(text("SELECT COUNT(*) FROM rmas")).scalar_one_or_none()
+                        rma_count = rma_count_result if rma_count_result is not None else 0
+
+                        sync_count_result = connection.execute(text("SELECT COUNT(*) FROM sync_logs")).scalar_one_or_none()
+                        sync_count = sync_count_result if sync_count_result is not None else 0
+
+                    st.info(f"📊 Database contains: **{rma_count}** RMAs, **{sync_count}** sync logs")
+                except Exception as e:
+                    st.warning(f"Could not read database stats: {e}")
+            else:
+                st.warning("⚠️ Database engine not initialized.")
+
+        if st.button("🗑️ Reset Cache", key="btn_reset", help="⚠️ Delete ALL cached data from database. Use only for troubleshooting. Next sync will take longer."):
+            if clear_db(): # This function now truncates the PostgreSQL tables
+                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+                append_ops_log("Database has been cleared!")
+                st.rerun()
+            else:
+                append_ops_log("Failed to clear the database.", level="error")
+
+        if st.button("🔬 Verify DB Schema", key="btn_verify_schema", help="Inspect table and column availability for the current database connection."):
+            with st.spinner("Inspecting database..."):
+                from sqlalchemy import inspect
+
+                # Display connection info first
+                try:
+                    conn_details = {
+                        "host": st.secrets.connections.postgresql.host,
+                        "database": st.secrets.connections.postgresql.database,
+                        "username": st.secrets.connections.postgresql.username
+                    }
+                    append_schema_log(
+                        f"Connection target: {conn_details['host']} / {conn_details['database']} ({conn_details['username']})"
+                    )
+                except Exception as e:
+                    append_schema_log(
+                        f"Could not read connection secrets from secrets.toml: {e}", level="error"
+                    )
+
+
+                def get_schema_info(engine):
+                    if engine is None:
+                        return {"error": "Database engine is not initialized."}
+                    try:
+                        inspector = inspect(engine)
+                        table_names = inspector.get_table_names()
+                        if not table_names:
+                            return {"error": "No tables found in the database. The 'init_database' function may have failed or the database is empty."}
+                        
+                        schemas = {}
+                        for table_name in table_names:
+                            schemas[table_name] = []
+                            columns = inspector.get_columns(table_name)
+                            for column in columns:
+                                schemas[table_name].append(f"{column['name']} ({column['type']})")
+                        return schemas
+                    except Exception as e:
+                        return {"error": f"An error occurred while inspecting the schema: {e}"}
+
+                schema_info = get_schema_info(engine)
+                
+                if "error" in schema_info:
+                    append_schema_log(schema_info["error"], level="error")
+                else:
+                    summary = []
+                    for table_name, columns in schema_info.items():
+                        summary.append(f"{table_name} ({len(columns)} columns)")
+                    append_schema_log("Schema inspection complete.")
+                    append_schema_log("Tables: " + ", ".join(summary))
+
+        render_api_action_bar(compact=True)
+
+        st.markdown("<div class='schema-log-title'>Database Schema</div>", unsafe_allow_html=True)
+        schema_log_entries = st.session_state.get("schema_log", [])
+        schema_log_text = "\n".join(schema_log_entries) if schema_log_entries else "No schema checks yet."
+        st.markdown(
+            f"<div class='schema-log-box'><pre>{html.escape(schema_log_text)}</pre></div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("<div class='ops-log-title'>Activity Log</div>", unsafe_allow_html=True)
+        ops_log_entries = st.session_state.get("ops_log", [])
+        ops_log_text = "\n".join(ops_log_entries) if ops_log_entries else "No activity yet."
+        st.markdown(
+            f"<div class='ops-log-box'><pre>{html.escape(ops_log_text)}</pre></div>",
+            unsafe_allow_html=True,
+        )
 
     # ==========================================
     # 1b. STYLING + STICKY HEADER
@@ -2176,15 +2354,15 @@ def main():
         """
         <style>
           .stApp {
-            background: radial-gradient(1200px 600px at 20% 0%, rgba(196,18,48,0.08), transparent 60%),
-                        radial-gradient(900px 500px at 90% 10%, rgba(59,130,246,0.08), transparent 55%),
-                        #0e1117;
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
+                        radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
+                        #0b1f3a;
             color: #e5e7eb;
           }
 
           /* Title */
           .title-wrap h1 {
-            font-size: 3.1rem;
+            font-size: 6.2rem;
             margin-bottom: 0.15rem;
             letter-spacing: 0.2px;
             font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
@@ -2417,6 +2595,110 @@ def main():
             font-size: 1.025rem;
             color: rgba(226,232,240,0.9);
           }
+          .db-status-line {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            margin-bottom: 8px;
+          }
+          .db-led {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 6px rgba(0, 0, 0, 0.35);
+          }
+          .db-led-on {
+            background: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.65);
+          }
+          .db-led-off {
+            background: #64748b;
+          }
+          .schema-log-title,
+          .ops-log-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: rgba(148, 163, 184, 0.9);
+            margin: 12px 0 6px 0;
+          }
+          .schema-log-box,
+          .ops-log-box {
+            background: rgba(15, 23, 42, 0.75);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 12px;
+            padding: 10px 12px;
+            min-height: 140px;
+            max-height: 320px;
+            overflow-y: auto;
+            font-size: 12px;
+            color: #e2e8f0;
+          }
+          .schema-log-box pre,
+          .ops-log-box pre {
+            margin: 0;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            white-space: pre-wrap;
+          }
+          .power-btn button {
+            width: 115px !important;
+            height: 115px !important;
+            min-width: 115px !important;
+            min-height: 115px !important;
+            border-radius: 14px !important;
+            background: rgba(239, 68, 68, 0.18) !important;
+            border: 2px solid rgba(239, 68, 68, 0.55) !important;
+            color: #fee2e2 !important;
+            font-size: 2.4rem !important;
+            font-weight: 700 !important;
+            box-shadow: 0 10px 24px rgba(239, 68, 68, 0.25) !important;
+          }
+          .power-btn button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 12px 28px rgba(239, 68, 68, 0.35) !important;
+          }
+          .disconnect-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.92);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: fadeIn 0.6s ease-out;
+          }
+          .disconnect-card {
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            border-radius: 18px;
+            padding: 24px 28px;
+            width: min(420px, 88vw);
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+          }
+          .disconnect-card h2 {
+            margin: 0 0 10px 0;
+            font-size: 1.6rem;
+          }
+          .disconnect-card p {
+            margin: 0;
+            color: rgba(226, 232, 240, 0.8);
+          }
+          .table-actions-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+          }
+          .table-actions-left button {
+            background: rgba(15, 23, 42, 0.72) !important;
+            border-color: rgba(148, 163, 184, 0.22) !important;
+            font-size: 13px !important;
+            padding: 6px 10px !important;
+          }
           .reset-wrap:hover::after {
             content: attr(data-tooltip);
             position: absolute;
@@ -2466,7 +2748,7 @@ def main():
               width: 85% !important;
             }
             .title-wrap h1 {
-              font-size: 2.2rem !important;
+              font-size: 4rem !important;
             }
             .subtitle-bar {
               font-size: 0.85rem !important;
@@ -2546,7 +2828,7 @@ def main():
     )
 
     # Sticky anchor + JS
-    st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True) # type: ignore
     components.html(
         """
         <script>
@@ -2576,12 +2858,25 @@ def main():
             });
           }
 
+          function stylePowerButton() {
+            const buttons = window.parent.document.querySelectorAll('button');
+            buttons.forEach((button) => {
+              if (button.textContent && button.textContent.trim() === '⏻') {
+                const wrapper = button.closest('[data-testid="stButton"]');
+                if (wrapper) wrapper.classList.add('power-btn');
+              }
+            });
+          }
+
           applySticky();
           styleSyncDashboardButton();
+          stylePowerButton();
           setTimeout(applySticky, 250);
           setTimeout(applySticky, 800);
           setTimeout(styleSyncDashboardButton, 250);
           setTimeout(styleSyncDashboardButton, 800);
+          setTimeout(stylePowerButton, 250);
+          setTimeout(stylePowerButton, 800);
         </script>
         """,
         height=0,
@@ -2590,7 +2885,7 @@ def main():
     # ==========================================
     # 8. STATE
     # ==========================================
-    if "active_filters" not in st.session_state:
+    if "active_filters" not in st.session_state: # type: ignore
         st.session_state.active_filters = set()
         logger.info("Initialized active_filters session state")
     if "search_query_input" not in st.session_state:
@@ -2613,11 +2908,19 @@ def main():
         st.session_state.failure_shipment = False
     if "cache_version" not in st.session_state:
         st.session_state.cache_version = 0
+    if "ops_log" not in st.session_state:
+        st.session_state.ops_log = []
+    if "schema_log" not in st.session_state:
+        st.session_state.schema_log = []
+    if "table_autosize" not in st.session_state:
+        st.session_state.table_autosize = False
+    if "disconnected" not in st.session_state:
+        st.session_state.disconnected = False
 
     filter_migration = {
         "Pending": "Pending Requests",
         "Approved": "Approved - Submitted",
-    }
+    } # type: ignore
     active: Set[str] = st.session_state.active_filters # type: ignore
     migrated = set()
     for old_name in active:
@@ -2629,7 +2932,7 @@ def main():
         logger.info("Migrated filters: %s -> %s", active, migrated) # type: ignore
 
     if st.session_state.get("show_toast"):
-        st.toast("✅ Updated!", icon="🔄")
+        append_ops_log("✅ Updated!", level="info")
         st.session_state["show_toast"] = False
 
     if RATE_LIMIT_HIT.is_set():
@@ -2642,73 +2945,74 @@ def main():
     # ==========================================
     # 10. HEADER (STICKY)
     # ==========================================
-    h1, h2 = st.columns([3, 1], vertical_alignment="top")
-
-    with h1:
+    header_left, header_right = st.columns([8, 1], vertical_alignment="center")
+    with header_left:
         st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
         st.title("Levi's ReturnGO Ops Dashboard")
         st.markdown(
             f"""
             <div class="subtitle-bar">
-              <span class="subtitle-dot"></span>
-              <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
-              <span style="opacity:.45">|</span>
-              <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
+                <span class="subtitle-dot"></span>
+                <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
+                <span style="opacity:.45">|</span>
+                <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
+    with header_right:
+        if st.button("⏻", key="disconnect_btn", help="Disconnect database and API sessions"):
+            append_ops_log("Session disconnected. Awaiting login.", level="warning")
+            st.session_state.disconnected = True
 
-    with h2:
-        last_sync = st.session_state.get("last_sync_pressed")
-        last_sync_display = (
-            last_sync.strftime("%d/%m/%Y %H:%M:%S") if isinstance(last_sync, datetime) else "--" # type: ignore
-        )
-        with RATE_LIMIT_LOCK:
-            remaining = RATE_LIMIT_INFO.get("remaining")
-            limit = RATE_LIMIT_INFO.get("limit")
-        if remaining is not None and limit is not None:
-            try:
-                if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
-                    remain_int = int(remaining)
-                    limit_int = int(limit)
-                    if remain_int < limit_int * 0.2:
-                        st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
-            except (ValueError, TypeError):
-                pass
-        st.markdown(
-            f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
-            unsafe_allow_html=True,
-        )
-        if st.button("🔄 Sync Dashboard", key="btn_sync_all", width="stretch"):
-            st.session_state.last_sync_pressed = datetime.now()
-            perform_sync()
-        st.markdown( # type: ignore
-            "<div class='reset-wrap' data-tooltip='Clears the cached database so the next sync fetches fresh data.'>",
-            unsafe_allow_html=True,
-        )
-        if st.button("🗑️ Reset Cache", key="btn_reset", width="content"):
-            if clear_db():
-                st.cache_data.clear()
-                st.success("Cache cleared!")
-                st.rerun()
-            else:
-                st.warning("No database file to reset.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        render_api_action_bar(compact=True)
 
     st.write("")
 
+    if st.session_state.get("disconnected"):
+        st.markdown(
+            """
+            <div class="disconnect-overlay">
+              <div class="disconnect-card">
+                <h2>Session disconnected</h2>
+                <p>Please login again to reconnect the database and API.</p>
+                <div id="reconnect-slot"></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        reconnect_clicked = st.button("Login again", key="reconnect_btn")
+        components.html(
+            """
+            <script>
+              const slot = window.parent.document.querySelector('#reconnect-slot');
+              const buttons = window.parent.document.querySelectorAll('button');
+              buttons.forEach((button) => {
+                if (button.textContent && button.textContent.trim() === 'Login again') {
+                  const wrapper = button.closest('[data-testid="stButton"]');
+                  if (wrapper && slot) slot.appendChild(wrapper);
+                }
+              });
+            </script>
+            """,
+            height=0,
+        )
+        if reconnect_clicked:
+            st.session_state.disconnected = False
+            append_ops_log("✅ Reconnected. Ready to resume.", level="info")
+            st.rerun()
+        st.stop()
+
     # ==========================================
-    # 11. LOAD + PROCESS OPEN RMAs
-    # ==========================================
-    raw_data = load_open_rmas(db_mtime(), str(st.session_state.cache_version))
+    # 11. LOAD + PROCESS OPEN RMAs # type: ignore
+    # ========================================== # type: ignore
+    raw_data = load_open_rmas(st.session_state.cache_version)
     processed_rows = []
  # type: ignore
     counts = {
         "PendingRequests": 0,
-        "ApprovedSubmitted": 0,
+        "ApprovedSubmitted": 0, # type: ignore
         "ApprovedInTransit": 0,
         "Received": 0,
         "NoTracking": 0,
@@ -2719,7 +3023,7 @@ def main():
         "NoResolutionActioned": 0,
     }
     failure_counts = {
-        "refund_failure": 0,
+        "refund_failure": 0, # type: ignore
         "upload_failed": 0,
         "shipment_failure": 0,
     }
@@ -2728,7 +3032,6 @@ def main():
     search_query_lower = search_query.lower().strip()
     search_active = bool(search_query_lower)
     today: date = datetime.now().date()
-
     rmas_needing_courier_refresh = []
     for rma in raw_data:
         summary = rma.get("rmaSummary", {}) or {}
@@ -2739,7 +3042,7 @@ def main():
         rma_id = summary.get("rmaId", "N/A")
         order_name = summary.get("order_name", summary.get("orderName", "N/A"))
 
-        track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
+        track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")] # type: ignore
         track_str = ", ".join(track_nums) if track_nums else ""
         shipment_id = shipments[0].get("shipmentId") if shipments else None
  # type: ignore
@@ -2751,9 +3054,9 @@ def main():
         requested_iso = get_event_date_iso(rma, "RMA_CREATED") or (summary.get("createdAt") or "")
         approved_iso = get_event_date_iso(rma, "RMA_APPROVED")
         received_iso = get_received_date_iso(rma)
-        resolution_type = get_resolution_type(rma)
-        is_nt: bool = not track_nums
-        req_dt = parse_yyyy_mm_dd(str(requested_iso)[:10] if requested_iso else "")
+        resolution_type = get_resolution_type(rma) # type: ignore
+        is_nt: bool = not track_nums # type: ignore
+        req_dt = pd.to_datetime(requested_iso) if requested_iso else None
         is_fg = (
             status == "Pending" and isinstance(req_dt, datetime) and (today - req_dt.date()).days >= 7
         )  # type: ignore
@@ -2789,7 +3092,7 @@ def main():
             or search_query_lower in str(order_name).lower()
             or search_query_lower in str(track_str).lower()
         ):
-            processed_rows.append(
+            processed_rows.append( # type: ignore
                 {
                     "No": "",
                     "RMA ID": f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={rma_id}",
@@ -2857,14 +3160,14 @@ def main():
         refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
         refresh_thread.start()
         if len(rmas_needing_courier_refresh) > 5:
-            st.info(
+            append_schema_log(
                 f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
             )
 
     st.divider()
 
     if not df_view.empty and "Requested date" in df_view.columns and "Current Status" in df_view.columns:
-        st.markdown("### 📅 Request Timeline")
+        st.markdown("### 📅 Request Timeline") # type: ignore
 
         # Filter to open statuses (defensive: df_view may include non-active if search/filters applied)
         timeline_df = df_view[df_view["Current Status"].isin(ACTIVE_STATUSES)].copy()
@@ -2876,21 +3179,22 @@ def main():
         if not timeline_df.empty:
             date_counts = (
                 timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # pyright: ignore[reportAttributeAccessIssue]
-                .size()
+                .size() # type: ignore
                 .reset_index(name="Count")
             )
             date_counts.columns = ["Date", "Count"]
-            st.line_chart(date_counts.set_index("Date"), height=300)
+            st.line_chart(date_counts.set_index("Date"), height=450)
         else:
             st.info("No valid requested dates found for charting.")
 
         st.write("")
 
+    
     st.markdown("### 📊 Command Center")
     st.write("")
 
     # Row 1: Primary statuses # type: ignore
-    r1 = st.columns(5)
+    r1 = st.columns(5) # type: ignore
     render_command_tile(r1[0], "Pending Requests", "Pending", "PENDING REQUESTS", "⏳")
     render_command_tile(
         r1[1], "Approved - Submitted", "FILTER_ApprovedSubmitted", "SUBMITTED TO COURIER", "📬"
@@ -2902,7 +3206,7 @@ def main():
     st.write("")
 
     # Row 2: Secondary statuses # type: ignore
-    r2 = st.columns(5)
+    r2 = st.columns(5) # type: ignore
     render_command_tile(r2[0], "Flagged", "FILTER_Flagged", "FLAGGED", "🚩")
     render_command_tile(r2[1], "Courier Cancelled", "FILTER_CourierCancelled", "CANCELLED", "🛑")
     render_command_tile(
@@ -2922,7 +3226,6 @@ def main():
     # ==========================================
     # 14. SEARCH + VIEW ALL + FILTER BAR
     # ==========================================
-    st.write("")
     sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
     with sc1:
         st.text_input(
@@ -2932,7 +3235,7 @@ def main():
             key="search_query_input",
         )
     with sc2:
-        st.button("🧹 Clear", width="stretch", on_click=clear_all_filters)
+        pass # Placeholder for sc2 content
     with sc3:
         if st.button("📋 View All", width="stretch"): # type: ignore
             st.session_state.active_filters = set()  # type: ignore
@@ -2940,7 +3243,7 @@ def main():
 
     # Extra filter bar/drop (under search)
     with st.expander("Additional filters", expanded=True):
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 1], vertical_alignment="center")
+        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 1], vertical_alignment="center") # type: ignore
 
         def multi_select_with_state(label: str, options: list, key: str):
             old = st.session_state.get(key, [])
@@ -2950,31 +3253,29 @@ def main():
             return st.multiselect(label, options=options, key=key)
 
         with c1:
-            multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi")
+            multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi") # type: ignore
         with c2:
             res_opts = []
             if not df_view.empty and "resolutionType" in df_view.columns:
                 res_opts = sorted(
                     [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
                 ) # type: ignore
-            multi_select_with_state("Resolution type", res_opts, "res_multi")
+            multi_select_with_state("Resolution type", res_opts, "res_multi") # type: ignore
         with c3:
-            multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi")
+            multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi") # type: ignore
         with c4:
             tracking_opts = [
                 format_tracking_status_with_icon(status) for status in COURIER_STATUS_OPTIONS
             ]
-            multi_select_with_state("Tracking status", tracking_opts, "tracking_status_multi")
         with c5:
-            req_dates = []
+            req_dates = [] # type: ignore
             if not df_view.empty and "Requested date" in df_view.columns:
                 req_dates = sorted(
                     [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
                     reverse=True, # type: ignore
                 )
-            multi_select_with_state("Requested date (multi-select)", req_dates, "req_dates_selected")
         with c6:
-            st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters)
+            st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters) # type: ignore
 
         st.markdown("**Failure filters**")
         f1, f2, f3, _ = st.columns([1.3, 1.3, 1.3, 3], vertical_alignment="center")
@@ -3000,7 +3301,7 @@ def main():
     # 15. TABLE VIEW
     # ==========================================
     if df_view.empty: # type: ignore
-        st.warning("Database empty. Click Sync Dashboard to start.")
+        st.warning("Database empty. Click 'Fetch from ReturnGo API' to start.")
         st.stop()
 
     display_df = df_view[current_filter_mask(df_view)].copy()
@@ -3087,7 +3388,7 @@ def main():
                 new_track = st.text_input("Tracking number", value=track_existing)
                 submitted = st.form_submit_button("Save changes")
                 if submitted:
-                    if not shipment_id: # type: ignore
+                    if not shipment_id:
                         st.error("No Shipment ID available for this RMA.")
                     else:
                         new_track_value = new_track.strip() if new_track else ""
@@ -3113,7 +3414,7 @@ def main():
                         if not comment:
                             st.error("Comment cannot be empty.")
                         else:
-                            ok, msg = push_comment_update(rma_id_text, comment) # type: ignore
+                            ok, msg = push_comment_update(rma_id_text, comment)
                             if ok:
                                 st.success("Comment posted.")
                                 time.sleep(0.2)
@@ -3121,7 +3422,7 @@ def main():
                             else:
                                 st.error(msg)
 
-            full: Dict[str, Any] = row.get("full_data", {}) or {} # type: ignore
+            full: Dict[str, Any] = row.get("full_data", {}) or {}
             timeline = full.get("comments", []) or []
             if not timeline:
                 st.info("No timeline events found.")
@@ -3150,7 +3451,7 @@ def main():
         "failures",
     ]
 
-    column_config = {
+    base_column_config = {
         "No": st.column_config.TextColumn("No"),
         "RMA ID": st.column_config.LinkColumn(
             "RMA ID",
@@ -3170,15 +3471,62 @@ def main():
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    _table_df = display_df[display_cols + ["_rma_id_text", "DisplayTrack", "shipment_id", "full_data"]].copy()
+    table_df = display_df[display_cols].copy()
 
-    total_rows = len(_table_df)
-    tsv_rows = [display_cols] + _table_df[display_cols].astype(str).values.tolist()
+    def _autosize_width(column: str, data: pd.DataFrame) -> str:
+        if column not in data.columns or data.empty:
+            return "medium"
+        max_len = int(data[column].astype(str).map(len).max())
+        if max_len <= 8:
+            return "small"
+        if max_len <= 20:
+            return "medium"
+        return "large"
+
+    if st.session_state.get("table_autosize"):
+        column_config = {}
+        for key in display_cols:
+            width = _autosize_width(key, table_df)
+            if key == "RMA ID":
+                column_config[key] = st.column_config.LinkColumn(
+                    key,
+                    display_text=r"rmaid=([^&]+)",
+                    width=width,
+                )
+            elif key == "Tracking Number":
+                column_config[key] = st.column_config.LinkColumn(
+                    key,
+                    display_text=r"ref=(.*)",
+                    width=width,
+                )
+            else:
+                column_config[key] = st.column_config.TextColumn(
+                    key,
+                    width=width,
+                )
+    else:
+        column_config = base_column_config
+
+    total_rows = len(table_df)
+    tsv_rows = [display_cols] + table_df.astype(str).values.tolist()
     tsv_text = "\n".join(["\t".join(row) for row in tsv_rows])
-
+    action_left, _ = st.columns([3, 5], vertical_alignment="center")
+    with action_left:
+        st.markdown("<div class='table-actions-left'>", unsafe_allow_html=True)
+        csv_payload = table_df.to_csv(index=False)
+        st.download_button(
+            label="⬇️ CSV",
+            data=csv_payload,
+            file_name=f"returngo_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            key="download_table_csv",
+        )
+        if st.button("Autosize", key="autosize_btn"):
+            st.session_state.table_autosize = not st.session_state.get("table_autosize", False)
+        st.markdown("</div>", unsafe_allow_html=True)
     count_col, action_col = st.columns([5, 3], vertical_alignment="center")
     with count_col:
-        st.markdown(
+        st.markdown( # type: ignore
             f"<div class='rows-count'>Rows in table: <span class='value'>{total_rows}</span></div>",
             unsafe_allow_html=True,
         )
@@ -3210,9 +3558,17 @@ def main():
                   const payload = JSON.parse({json_payload});
                   if (navigator.clipboard?.writeText) {{
                     await navigator.clipboard.writeText(payload);
-                  }} else {{
-                    console.warn("Clipboard API unavailable.");
+                    return;
                   }}
+                  const textArea = document.createElement('textarea');
+                  textArea.value = payload;
+                  textArea.style.position = 'fixed';
+                  textArea.style.opacity = '0';
+                  document.body.appendChild(textArea);
+                  textArea.focus();
+                  textArea.select();
+                  document.execCommand('copy');
+                  document.body.removeChild(textArea);
                 }} catch (err) {{
                   console.error("Clipboard write failed.", err);
                 }}
@@ -3221,17 +3577,38 @@ def main():
             """,
             height=0,
         )
-        st.toast("Copied table to clipboard.", icon="📋")
+        append_ops_log("📋 Copied table to clipboard.")
 
-    def highlight_missing_tracking(row: pd.Series):
-        if row.get("Current Status") == "Approved" and not row.get("Tracking Number"):
-            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(display_cols)
-        return [""] * len(display_cols)
+    def highlight_problematic_rows(row: pd.Series):
+        """Applies highlighting to rows based on a set of problem conditions."""
+        highlight = False
+        full_row = display_df.loc[row.name] if row.name in display_df.index else row
+        
+        # Condition 1: Approved/Received without tracking
+        if (full_row.get("Current Status") in ["Approved", "Received"]) and not full_row.get("DisplayTrack"):
+            highlight = True
+        
+        # Condition 2: Failures exist (non-empty 'failures' string)
+        if full_row.get("failures"):
+            highlight = True
+            
+        # Condition 3: Courier Cancelled
+        if full_row.get("is_cc"):
+            highlight = True
+            
+        # Condition 4: Flagged
+        if full_row.get("is_fg"):
+            highlight = True
 
-    styled_table = _table_df[display_cols].style.apply(highlight_missing_tracking, axis=1)
+        if highlight:
+            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
+        
+        return [""] * len(row)
+
+    styled_table = table_df.style.apply(highlight_problematic_rows, axis=1)
 
     table_key = "rma_table"
-    sel_event = st.dataframe(
+    sel_event = st.dataframe( # type: ignore
         styled_table,
         width="stretch",
         height=700,
@@ -3254,6 +3631,28 @@ def main():
             show_rma_actions_dialog(display_df.iloc[idx])
 
 
+    try:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
+            remain_int = int(remaining)
+            limit_int = int(limit)
+            if remain_int < limit_int * 0.2:
+                st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
+    except (ValueError, TypeError):
+        pass
+    
+    last_sync_time = st.session_state.get("last_sync_time")
+    last_sync_display = (
+        last_sync_time.strftime("%Y-%m-%d %H:%M:%S")
+        if last_sync_time
+        else "Never"
+    )
+    st.markdown(
+        f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>", # type: ignore
+        unsafe_allow_html=True,
+    )
+
+
 if __name__ == "__main__":
-    init_db()
     main()
