@@ -1,6 +1,4 @@
 import streamlit as st
-from streamlit.runtime.scriptrunner import get_script_run_ctx
-import numpy as np
 import streamlit.components.v1 as components
 import requests
 import json
@@ -11,7 +9,6 @@ import logging
 import os
 import threading
 import html
-import altair as alt
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -128,9 +125,7 @@ STORE_URL = "levis-sa.myshopify.com"
 
 # Efficiency controls
 CACHE_EXPIRY_HOURS = 24
-COURIER_REFRESH_HOURS = 1
-COURIER_REFRESH_WINDOW_UTC_START = 9
-COURIER_REFRESH_WINDOW_UTC_END = 15
+COURIER_REFRESH_HOURS = 12
 MAX_WORKERS = 3
 RG_RPS = 2
 SYNC_OVERLAP_MINUTES = 35
@@ -173,24 +168,10 @@ def _iso_utc(dt: datetime) -> str:
 def _append_log_entry(log_key: str, message: str, *, level: str = "info", limit: int = 200) -> None:
     if not message:
         return
-    
-    ctx = get_script_run_ctx()
     ts = datetime.now().strftime("%H:%M:%S")
     entry = f"[{ts}] {message}"
-    
     if level and level != "info":
         entry = f"[{ts}] {level.upper()}: {message}"
-        
-    if ctx is None:
-        # We're in a background thread, so use standard logging
-        if level == "error":
-            logger.error(message)
-        elif level == "warning":
-            logger.warning(message)
-        else:
-            logger.info(message)
-        return
-        
     log_entries: List[str] = st.session_state.get(log_key, [])
     log_entries.append(entry)
     st.session_state[log_key] = log_entries[-limit:]
@@ -237,15 +218,6 @@ def get_thread_session() -> requests.Session:
     s.mount("https://", HTTPAdapter(max_retries=retries))
     _thread_local.session = s
     return s
-
-
-def in_courier_refresh_window(now_utc: Optional[datetime] = None) -> bool:
-    if now_utc is None:
-        now_utc = _now_utc()
-    hour = now_utc.hour
-    start = COURIER_REFRESH_WINDOW_UTC_START
-    end = COURIER_REFRESH_WINDOW_UTC_END
-    return start <= hour < end
 
 
 def get_parcel_session() -> requests.Session:
@@ -415,7 +387,6 @@ def upsert_rma(rma_id: str, status: str, created_at: str, payload: dict,
             "received_first_seen": received_seen
         })
         connection.commit()
-    append_schema_log(f"Database updated for RMA {rma_id}")
 
 
 def delete_rmas(rma_ids):
@@ -450,7 +421,6 @@ def delete_rmas(rma_ids):
             if "cache_version" in st.session_state:
                 st.session_state.cache_version += 1
             logger.info("Deleted %s RMAs from cache", len(normalized_ids))
-            append_schema_log(f"Database cleanup removed {len(normalized_ids)} RMAs")
     except Exception as e:
         logger.error("Failed to delete RMAs: %s", e)
         st.error(f"Failed to delete RMAs: {e}")
@@ -507,7 +477,6 @@ def load_open_rmas(_cache_version: int):
     This function is cached by Streamlit. The cache is invalidated when `_cache_version`
     is changed, forcing a fresh read from the database.
     """
-    append_schema_log("Loading cached RMAs from database")
     return get_all_open_from_db()
 
 
@@ -531,7 +500,6 @@ def set_last_sync(scope: str, dt: datetime):
         """)
         connection.execute(query, {"scope": scope, "last_sync_iso": dt})
         connection.commit()
-    append_schema_log(f"Sync log updated for scope: {scope}")
 
 
 def get_last_sync(scope: str) -> Optional[datetime]:
@@ -555,7 +523,6 @@ def clear_db():
     try:
         with engine.begin() as connection: # Use begin() for a transaction
             connection.execute(text("TRUNCATE TABLE rmas, sync_logs;"))
-        append_schema_log("Database cache cleared")
         return True
     except Exception as e:
         logger.error(f"Failed to clear PostgreSQL tables: {e}")
@@ -858,7 +825,6 @@ def should_refresh_detail(rma_id: str) -> bool:
 
 @st.cache_data(ttl=COURIER_REFRESH_HOURS * 3600, show_spinner=False)
 def should_refresh_courier(rma_payload: dict) -> bool:
-
     cached_checked = rma_payload.get("_local_courier_checked")
     if not cached_checked:
         return True
@@ -958,7 +924,6 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         return
     failed_fetches = 0
     successful_fetches = 0
-    append_schema_log("Sync started: preparing to update database")
     append_ops_log("⏳ Connecting to ReturnGO...")
 
     if statuses is None:
@@ -1040,7 +1005,6 @@ def perform_sync(statuses=None, *, full=False, rerun: bool = True):
         append_ops_log(
             f"⚠️ Sync Complete with {successful_fetches} RMAs updated and {failed_fetches} failed."
         )
-    append_schema_log(f"Sync completed: {successful_fetches} RMAs updated, {failed_fetches} failed.")
     st.session_state["show_toast"] = True
     try:
         load_open_rmas.clear()
@@ -1064,7 +1028,6 @@ def force_refresh_rma_ids(rma_ids, scope_label: str):
         return
 
     append_ops_log(f"⏳ Refreshing {len(ids)} records...")
-    append_schema_log(f"Refreshing {len(ids)} RMAs for scope {scope_label}")
 
     total = len(ids)
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -1323,15 +1286,6 @@ def format_tracking_status_with_icon(status: str) -> str:
     return f"📍 {status}"
 
 
-def clean_rma_id_for_export(value):
-    if not isinstance(value, str) or not value:
-        return value
-    prefix = "https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid="
-    if value.startswith(prefix):
-        return value[len(prefix):]
-    return value
-
-
 def toggle_filter(name: str):
     s: Set[str] = set(st.session_state.active_filters)
     if name in s:
@@ -1526,12 +1480,6 @@ def inject_command_center_css():
             display: flex;
             align-items: center;
             gap: 6px;
-        }
-        .command-tile.urgent .tile-label {
-            color: #fca5a5;
-        }
-        .command-tile.urgent .tile-count {
-            color: #fee2e2;
         }
 
         .tile-label-icon {
@@ -1775,7 +1723,6 @@ def inject_command_center_css():
             background: rgba(15, 23, 42, 0.8) !important;
             border: 1px solid var(--cc-border-neutral) !important;
             border-radius: 8px !important;
-            white-space: normal !important;
         }
 
         .api-action-bar [data-baseweb="select"]:hover {
@@ -1937,17 +1884,6 @@ API_OPERATIONS = {
     "Export to CSV": {
         "type": "export_csv",
     },
-}
-
-API_OPERATION_HINTS = {
-    "Sync: Pending Requests": "Fetch the latest RMAs with Pending status / Request submitted.",
-    "Sync: Approved - Submitted": "Refresh approved RMAs that are submitted to courier.",
-    "Sync: Approved - In Transit": "Refresh approved RMAs that are in transit.",
-    "Sync: Received": "Pull latest RMAs updated to Received.",
-    "Sync: All Open (Pending, Approved, Received)": "Sync all open RMAs across Pending, Approved, and Received.",
-    "RMA Details (/rma/{id})": "Pull a single RMA by ID for a focused refresh.",
-    "Batch Refresh Courier Status": "Refresh courier statuses for RMAs with tracking numbers.",
-    "Export to CSV": "Download the current dataset as a CSV export.",
 }
 
 
@@ -2135,7 +2071,7 @@ def render_command_tile(
         if st.button(
             button_label,
             key=f"tile_{name}",
-            width="stretch",
+            use_container_width=True,
         ):
             toggle_filter(name) # type: ignore
 
@@ -2160,12 +2096,6 @@ def render_api_action_bar(*, compact: bool = False):
             key="api_endpoint_selector", # type: ignore
             label_visibility="collapsed",
         )
-        hint = API_OPERATION_HINTS.get(api_endpoint, "")
-        if hint:
-            st.markdown(
-                f"<div class='api-operation-hint'>{html.escape(hint)}</div>",
-                unsafe_allow_html=True,
-            )
 
     with col2:
         operation = API_OPERATIONS.get(api_endpoint, {})
@@ -2177,12 +2107,12 @@ def render_api_action_bar(*, compact: bool = False):
                 label_visibility="collapsed",
             )
         else:
-            if st.button("⚡ Execute", key="api_execute_btn", type="primary", width="stretch"):
+            if st.button("⚡ Execute", key="api_execute_btn", type="primary", use_container_width=True):
                 execute_api_operation(api_endpoint, "")
                 return
 
     if operation.get("requires_context"):
-        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", width="stretch"): # type: ignore
+        if st.button("⚡ Execute", key="api_execute_btn_ctx", type="primary", use_container_width=True): # type: ignore
             execute_api_operation(api_endpoint, st.session_state.get("api_context_input", ""))
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -2259,9 +2189,6 @@ def execute_api_operation(endpoint: str, context: str = ""):
             append_ops_log("No RMAs with tracking numbers found.")
             return
 
-        append_ops_log(
-            f"🔄 Refreshing {len(rma_ids)} courier statuses (tracking rows: {len(rmas_with_tracking)})..."
-        )
         force_refresh_rma_ids(rma_ids, "BATCH_COURIER_REFRESH") # type: ignore
         return
 
@@ -2270,10 +2197,7 @@ def execute_api_operation(endpoint: str, context: str = ""):
             append_ops_log("No data to export. Sync dashboard first.", level="warning")
             return
 
-        export_df = df_view.copy()
-        if "RMA ID" in export_df.columns:
-            export_df["RMA ID"] = export_df["RMA ID"].map(clean_rma_id_for_export)
-        csv = export_df.to_csv(index=False)
+        csv = df_view.to_csv(index=False)
         st.download_button(
             label="📥 Download CSV",
             data=csv,
@@ -2316,17 +2240,10 @@ def main(): # type: ignore
         if st.button("🚀 Fetch from ReturnGo API", key="btn_sync_all", type="primary", help="Fetch latest data from the ReturnGO API for all stores and statuses. This may take several minutes."):
             st.session_state.last_sync_pressed = datetime.now()
             perform_sync(full=True) # type: ignore
-        last_fetch = st.session_state.get("last_sync_pressed")
-        if last_fetch:
-            st.markdown(
-                f"<div class='last-fetched'>Last fetched: {last_fetch.strftime('%Y-%m-%d %H:%M:%S')}</div>",
-                unsafe_allow_html=True,
-            )
         
         if st.button("🔄 Update From Database", help="Reload data from the local database cache without calling the API."):
             st.session_state.cache_version = st.session_state.get('cache_version', 0) + 1
             append_ops_log("✅ Dashboard updated from database")
-            append_schema_log("UI refreshed from database cache")
             st.rerun()
 
         st.divider()
@@ -2354,13 +2271,14 @@ def main(): # type: ignore
                     st.warning(f"Could not read database stats: {e}")
             else:
                 st.warning("⚠️ Database engine not initialized.")
-            st.markdown("<div class='schema-log-title'>Database Schema</div>", unsafe_allow_html=True)
-            schema_log_entries = st.session_state.get("schema_log", [])
-            schema_log_text = "\n".join(schema_log_entries) if schema_log_entries else "No schema checks yet."
-            st.markdown(
-                f"<div class='schema-log-box'><pre>{html.escape(schema_log_text)}</pre></div>",
-                unsafe_allow_html=True,
-            )
+
+        if st.button("🗑️ Reset Cache", key="btn_reset", help="⚠️ Delete ALL cached data from database. Use only for troubleshooting. Next sync will take longer."):
+            if clear_db(): # This function now truncates the PostgreSQL tables
+                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
+                append_ops_log("Database has been cleared!")
+                st.rerun()
+            else:
+                append_ops_log("Failed to clear the database.", level="error")
 
         if st.button("🔬 Verify DB Schema", key="btn_verify_schema", help="Inspect table and column availability for the current database connection."):
             with st.spinner("Inspecting database..."):
@@ -2414,6 +2332,14 @@ def main(): # type: ignore
 
         render_api_action_bar(compact=True)
 
+        st.markdown("<div class='schema-log-title'>Database Schema</div>", unsafe_allow_html=True)
+        schema_log_entries = st.session_state.get("schema_log", [])
+        schema_log_text = "\n".join(schema_log_entries) if schema_log_entries else "No schema checks yet."
+        st.markdown(
+            f"<div class='schema-log-box'><pre>{html.escape(schema_log_text)}</pre></div>",
+            unsafe_allow_html=True,
+        )
+
         st.markdown("<div class='ops-log-title'>Activity Log</div>", unsafe_allow_html=True)
         ops_log_entries = st.session_state.get("ops_log", [])
         ops_log_text = "\n".join(ops_log_entries) if ops_log_entries else "No activity yet."
@@ -2422,69 +2348,22 @@ def main(): # type: ignore
             unsafe_allow_html=True,
         )
 
-        st.markdown("<div class='sidebar-bottom'>", unsafe_allow_html=True)
-        if st.button("🗑️ Reset Cache", key="btn_reset", help="⚠️ Delete ALL cached data from database. Use only for troubleshooting. Next sync will take longer."):
-            if clear_db(): # This function now truncates the PostgreSQL tables
-                st.session_state.cache_version = st.session_state.get("cache_version", 0) + 1
-                append_ops_log("Database has been cleared!")
-                st.rerun()
-            else:
-                append_ops_log("Failed to clear the database.", level="error")
-        st.markdown(
-            "<div class='reset-note'>Clears cached RMAs and sync logs; only needed if data is corrupt or stale.</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
     # ==========================================
     # 1b. STYLING + STICKY HEADER
     # ==========================================
     st.markdown(
         """
         <style>
-          html,
-          body {
-            /* background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
-                        radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
-                        #0b1f3a; */
-          }
           .stApp {
-            position: relative;
-            z-index: 0;
-            background: transparent !important;
-            color: inherit;
-          }
-          .stApp::before {
-            content: "";
-            position: fixed;
-            inset: 0;
-            background:
-              linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent 40%),
-              linear-gradient(225deg, rgba(226, 232, 240, 0.06), transparent 45%);
-            pointer-events: none;
-            z-index: -1;
-          }
-          .stApp::after {
-            content: "";
-            position: fixed;
-            top: 0;
-            right: 0;
-            width: 16px;
-            height: 100vh;
-            background: linear-gradient(
-              180deg,
-              rgba(12, 37, 76, 0.95),
-              rgba(12, 37, 76, 0.8),
-              rgba(12, 37, 76, 0.95)
-            );
-            box-shadow: -6px 0 18px rgba(15, 23, 42, 0.45);
-            pointer-events: none;
-            z-index: 2;
+            background: radial-gradient(1200px 600px at 20% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
+                        radial-gradient(900px 500px at 90% 10%, rgba(30, 64, 175, 0.16), transparent 55%),
+                        #0b1f3a;
+            color: #e5e7eb;
           }
 
           /* Title */
           .title-wrap h1 {
-            font-size: 4.8rem;
+            font-size: 6.2rem;
             margin-bottom: 0.15rem;
             letter-spacing: 0.2px;
             font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
@@ -2514,45 +2393,9 @@ def main(): # type: ignore
             background: rgba(196,18,48,0.9);
             display: inline-block;
           }
-          .header-panel {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            padding: 18px 22px;
-            border-radius: 18px;
-            background: linear-gradient(135deg, rgba(15, 23, 42, 0.75), rgba(30, 41, 59, 0.35));
-            border: 1px solid rgba(148, 163, 184, 0.2);
-            box-shadow: 0 18px 40px rgba(2, 6, 23, 0.35);
-          }
-          .header-kicker {
-            font-size: 0.75rem;
-            letter-spacing: 0.3em;
-            text-transform: uppercase;
-            color: rgba(148, 163, 184, 0.8);
-          }
 
           .block-container {
             background: transparent !important;
-            position: relative;
-            z-index: 1;
-          }
-          [data-testid="stAppViewContainer"],
-          [data-testid="stAppViewContainer"] > .main,
-          .main,
-          .main > div {
-            background: transparent !important;
-          }
-          section[data-testid="stSidebar"] {
-            border-right: none !important;
-            box-shadow: none !important;
-          }
-          section[data-testid="stSidebar"] [data-baseweb="select"] {
-            white-space: normal !important;
-          }
-          section[data-testid="stSidebar"] [data-baseweb="select"] div,
-          section[data-testid="stSidebar"] [data-baseweb="select"] span {
-            white-space: normal !important;
-            line-height: 1.2 !important;
           }
 
           /* Cards */
@@ -2802,12 +2645,6 @@ def main(): # type: ignore
             font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
             white-space: pre-wrap;
           }
-          .api-operation-hint {
-            margin-top: 6px;
-            font-size: 0.8rem;
-            color: #f8fafc;
-            line-height: 1.3;
-          }
           .power-btn button {
             width: 115px !important;
             height: 115px !important;
@@ -2825,44 +2662,32 @@ def main(): # type: ignore
             transform: translateY(-1px);
             box-shadow: 0 12px 28px rgba(239, 68, 68, 0.35) !important;
           }
-          .power-note {
-            margin-top: 10px;
-            padding: 8px 12px;
-            border-radius: 12px;
-            background: rgba(15, 23, 42, 0.8);
-            border: 1px solid rgba(148, 163, 184, 0.25);
-            font-size: 0.8rem;
-            text-align: center;
-            color: #e2e8f0;
-          }
-          .disconnect-banner {
-            background: rgba(15, 23, 42, 0.9);
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            border-radius: 18px;
-            padding: 22px 26px;
-            text-align: center;
-            box-shadow: 0 16px 32px rgba(0,0,0,0.35);
-            margin: 12px 0 10px 0;
-            animation: fadeIn 0.45s ease-out;
-          }
-          .disconnect-banner h2 {
-            margin: 0 0 8px 0;
-            font-size: 1.5rem;
-          }
-          .disconnect-banner p {
-            margin: 0;
-            color: rgba(226, 232, 240, 0.82);
-          }
-          .disconnect-actions {
+          .disconnect-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(2, 6, 23, 0.92);
+            z-index: 9999;
             display: flex;
+            align-items: center;
             justify-content: center;
-            margin-bottom: 18px;
+            animation: fadeIn 0.6s ease-out;
           }
-          .disconnect-actions div.stButton > button {
-            background: rgba(59, 130, 246, 0.25) !important;
-            border: 1px solid rgba(59, 130, 246, 0.5) !important;
-            padding: 8px 16px !important;
-            font-weight: 600 !important;
+          .disconnect-card {
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            border-radius: 18px;
+            padding: 24px 28px;
+            width: min(420px, 88vw);
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+          }
+          .disconnect-card h2 {
+            margin: 0 0 10px 0;
+            font-size: 1.6rem;
+          }
+          .disconnect-card p {
+            margin: 0;
+            color: rgba(226, 232, 240, 0.8);
           }
           .table-actions-left {
             display: flex;
@@ -2912,85 +2737,6 @@ def main(): # type: ignore
           }
           .rows-count .value {
             font-weight: 800;
-          }
-          .snapshot-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 16px;
-          }
-          .snapshot-card {
-            background: rgba(15, 23, 42, 0.7);
-            border: 1px solid rgba(148, 163, 184, 0.2);
-            border-radius: 16px;
-            padding: 16px 18px;
-            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-            position: relative;
-          }
-          .snapshot-card.active {
-            border: 2px solid rgba(34, 197, 94, 0.85);
-            box-shadow: 0 0 18px rgba(34, 197, 94, 0.35);
-            transform: translateY(2px);
-          }
-          .snapshot-title {
-            font-size: 0.8rem;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-            color: rgba(148, 163, 184, 0.9);
-            margin-bottom: 6px;
-          }
-          .snapshot-count {
-            font-size: 2.2rem;
-            font-weight: 800;
-            color: #f8fafc;
-            margin-bottom: 8px;
-          }
-          .snapshot-meter {
-            height: 8px;
-            border-radius: 999px;
-            background: rgba(148, 163, 184, 0.25);
-            overflow: hidden;
-          }
-          .snapshot-meter span {
-            display: block;
-            height: 100%;
-            background: linear-gradient(90deg, rgba(34, 197, 94, 0.6), rgba(59, 130, 246, 0.9));
-          }
-          .snapshot-action {
-            position: absolute;
-            inset: 0;
-          }
-          .snapshot-action div.stButton {
-            height: 100%;
-          }
-          .snapshot-action button {
-            width: 100% !important;
-            height: 100% !important;
-            opacity: 0 !important;
-            border: none !important;
-            background: transparent !important;
-            cursor: pointer !important;
-          }
-          .last-fetched {
-            margin-top: 8px;
-            font-size: 0.85rem;
-            color: #f8fafc;
-          }
-          .sidebar-bottom {
-            position: sticky;
-            bottom: 0;
-            padding-top: 16px;
-            background: linear-gradient(180deg, rgba(11, 31, 58, 0), rgba(11, 31, 58, 0.9) 35%);
-          }
-          .reset-note {
-            font-size: 0.75rem;
-            color: rgba(226, 232, 240, 0.75);
-            margin-top: 6px;
-          }
-          .filter-section-title {
-            font-size: 0.95rem;
-            font-weight: 700;
-            margin-bottom: 10px;
-            color: #e2e8f0;
           }
 
           /* Responsive filter tiles */
@@ -3169,10 +2915,6 @@ def main(): # type: ignore
         st.session_state.schema_log = []
     if "table_autosize" not in st.session_state:
         st.session_state.table_autosize = False
-    if "daily_snapshot_filter" not in st.session_state:
-        st.session_state.daily_snapshot_filter = None
-    if "visible_columns" not in st.session_state:
-        st.session_state.visible_columns = []
     if "disconnected" not in st.session_state:
         st.session_state.disconnected = False
 
@@ -3206,29 +2948,24 @@ def main(): # type: ignore
     # ==========================================
     header_left, header_right = st.columns([8, 1], vertical_alignment="center")
     with header_left:
-        st.markdown("<div class='title-wrap header-panel'>", unsafe_allow_html=True)
-        st.markdown("<div class='header-kicker'>ReturnGO Ops</div>", unsafe_allow_html=True)
+        st.markdown("<div class='title-wrap'>", unsafe_allow_html=True)
         st.title("Levi's ReturnGO Ops Dashboard")
         st.markdown(
             f"""
             <div class="subtitle-bar">
                 <span class="subtitle-dot"></span>
-                <span><b>Connected:</b> {STORE_URL.upper()}</span>
+                <span><b>CONNECTED TO:</b> {STORE_URL.upper()}</span>
                 <span style="opacity:.45">|</span>
-                <span><b>Cache:</b> {CACHE_EXPIRY_HOURS}h</span>
+                <span><b>CACHE:</b> {CACHE_EXPIRY_HOURS}h</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
     with header_right:
-        if st.button("⏻", key="disconnect_btn"):
+        if st.button("⏻", key="disconnect_btn", help="Disconnect database and API sessions"):
             append_ops_log("Session disconnected. Awaiting login.", level="warning")
             st.session_state.disconnected = True
-        st.markdown(
-            "<div class='power-note'>Disconnect database + API sessions</div>",
-            unsafe_allow_html=True,
-        )
 
 
     st.write("")
@@ -3236,16 +2973,35 @@ def main(): # type: ignore
     if st.session_state.get("disconnected"):
         st.markdown(
             """
-            <div class="disconnect-banner">
-              <h2>Session disconnected</h2>
-              <p>Please login again to reconnect the database and API.</p>
+            <div class="disconnect-overlay">
+              <div class="disconnect-card">
+                <h2>Session disconnected</h2>
+                <p>Please login again to reconnect the database and API.</p>
+                <div id="reconnect-slot"></div>
+              </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        st.markdown('<div class="disconnect-actions">', unsafe_allow_html=True)
         reconnect_clicked = st.button("Login again", key="reconnect_btn")
-        st.markdown("</div>", unsafe_allow_html=True)
+        # NOTE: This DOM move is brittle because it relies on Streamlit's
+        # button markup and the exact button label. If Streamlit updates DOM
+        # structure or copy, this may need to be revisited.
+        components.html(
+            """
+            <script>
+              const slot = window.parent.document.querySelector('#reconnect-slot');
+              const buttons = window.parent.document.querySelectorAll('button');
+              buttons.forEach((button) => {
+                if (button.textContent && button.textContent.trim() === 'Login again') {
+                  const wrapper = button.closest('[data-testid="stButton"]');
+                  if (wrapper && slot) slot.appendChild(wrapper);
+                }
+              });
+            </script>
+            """,
+            height=0,
+        )
         if reconnect_clicked:
             st.session_state.disconnected = False
             append_ops_log("✅ Reconnected. Ready to resume.", level="info")
@@ -3325,7 +3081,7 @@ def main(): # type: ignore
             has_tracking=bool(track_nums),
         )
 
-        if track_nums and in_courier_refresh_window() and should_refresh_courier(rma):
+        if track_nums and should_refresh_courier(rma):
             rmas_needing_courier_refresh.append((rma_id, rma, requested_iso, status))
 
         if has_refund_failure:
@@ -3374,9 +3130,6 @@ def main(): # type: ignore
 
     df_view = pd.DataFrame(processed_rows)
     update_data_table_log(processed_rows)
-    tracking_row_count = (
-        int((df_view["DisplayTrack"] != "").sum()) if not df_view.empty and "DisplayTrack" in df_view.columns else 0
-    )
 
     for filter_name, cfg in FILTERS.items():
         count_key = cfg["count_key"]  # type: ignore
@@ -3391,9 +3144,9 @@ def main(): # type: ignore
                 logger.error("Error calculating count for %s: %s", filter_name, exc)
                 counts[count_key] = 0
 
-    if rmas_needing_courier_refresh and in_courier_refresh_window():
-        def refresh_courier_batch(rmas_to_refresh):
-            for rma_id, rma_payload, requested_iso, status in rmas_to_refresh:
+    if rmas_needing_courier_refresh:
+        def refresh_courier_batch():
+            for rma_id, rma_payload, requested_iso, status in rmas_needing_courier_refresh:
                 try: # type: ignore
                     courier_status, courier_checked = maybe_refresh_courier(rma_payload)
                     if courier_status:
@@ -3408,17 +3161,12 @@ def main(): # type: ignore
                 except Exception as exc:
                     logger.warning("Background courier refresh failed for %s: %s", rma_id, exc)
 
-        refresh_thread = threading.Thread(
-            target=refresh_courier_batch,
-            args=(rmas_needing_courier_refresh.copy(),),
-            daemon=True
-        )
+        refresh_thread = threading.Thread(target=refresh_courier_batch, daemon=True)
         refresh_thread.start()
-        append_ops_log(
-            "🔄 Refreshing "
-            f"{len(rmas_needing_courier_refresh)} courier statuses in background "
-            f"(tracking rows: {tracking_row_count})..."
-        )
+        if len(rmas_needing_courier_refresh) > 5:
+            append_ops_log(
+                f"🔄 Refreshing {len(rmas_needing_courier_refresh)} courier statuses in background..."
+            )
 
     st.divider()
 
@@ -3428,77 +3176,22 @@ def main(): # type: ignore
         # Filter to open statuses (defensive: df_view may include non-active if search/filters applied)
         timeline_df = df_view[df_view["Current Status"].isin(ACTIVE_STATUSES)].copy()
         timeline_df["_req_date_parsed"] = pd.to_datetime(
-            timeline_df["Requested date"], errors="coerce", utc=True
+            timeline_df["Requested date"], errors="coerce"
         )
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
 
-        date_counts = (
-            timeline_df.groupby(
-                timeline_df["_req_date_parsed"].apply(lambda x: x.date()).rename("Date"), as_index=False
+        if not timeline_df.empty:
+            date_counts = (
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # pyright: ignore[reportAttributeAccessIssue]
+                .size() # type: ignore
+                .reset_index(name="Count")
             )
-            .size() # type: ignore
-            .rename(columns={"size": "Count"})
-            .sort_values("Date")
-        )
-        if date_counts.empty or not np.isfinite(date_counts['Count']).all():
-            st.info("No valid requested dates found for charting.")
+            date_counts.columns = ["Date", "Count"]
+            st.line_chart(date_counts.set_index("Date"), height=450)
         else:
-            chart = (
-                alt.Chart(date_counts, title="Daily RMA Requests")
-                .mark_line(point=alt.OverlayMarkDef(color="#fde047"), color="#60a5fa", strokeWidth=2.5)
-                .encode( # type: ignore
-                    x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%b %d", labelAngle=-45)),
-                    y=alt.Y("Count:Q", title="Number of Requests", axis=alt.Axis(grid=True, gridOpacity=0.2)),
-                    tooltip=[alt.Tooltip("Date:T", title="Date"), alt.Tooltip("Count:Q", title="Requests")],
-                )
-                .properties(height=300, background="transparent")
-                .configure_axis(labelColor="#9ca3af", titleColor="#cbd5e1", domainColor="#4b5563", tickColor="#4b5563")
-                .configure_title(color="#f1f5f9", fontSize=16, anchor="start")
-                .configure_view(stroke=None)
-            )
-            st.altair_chart(chart, theme="streamlit", width='stretch') # type: ignore
+            st.info("No valid requested dates found for charting.")
 
         st.write("")
-
-        def snapshot_count(status_label: str, date_column: str) -> int:
-            if df_view.empty or date_column not in df_view.columns:
-                return 0
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            return int(
-                (
-                    (df_view["Current Status"] == status_label)
-                    & (df_view[date_column].astype(str).str.startswith(today_str))
-                ).sum()
-            )
-
-        pending_today = snapshot_count("Pending", "Requested date")
-        approved_today = snapshot_count("Approved", "Approved date")
-        received_today = snapshot_count("Received", "Received date")
-
-        snapshot_items = [
-            ("Returns Requested Today", pending_today, "snapshot_pending"),
-            ("Returns Approved Today", approved_today, "snapshot_approved"),
-            ("Returns Received Today", received_today, "snapshot_received"),
-        ]
-
-        snapshot_cols = st.columns(3)
-        for (label, count, key), col in zip(snapshot_items, snapshot_cols):
-            with col:
-                is_active = st.session_state.get("daily_snapshot_filter") == key
-                # Simplified, more robust card implementation using native Streamlit elements
-                # The surrounding div with the 'snapshot-card' class is for styling
-                st.markdown(
-                    f"<div class='snapshot-card {'active' if is_active else ''}'>",
-                    unsafe_allow_html=True,
-                )
-                st.metric(label=label, value=count)
-
-                button_label = "Clear Filter" if is_active else "Filter"
-                if st.button(button_label, key=key):
-                    st.session_state.daily_snapshot_filter = None if is_active else key
-                    st.rerun()
-
-                st.markdown("</div>", unsafe_allow_html=True)
 
     
     st.markdown("### 📊 Command Center")
@@ -3552,61 +3245,59 @@ def main(): # type: ignore
             st.session_state.active_filters = set()  # type: ignore
             st.rerun()
 
-    # Extra filter bar (under search)
-    st.markdown("<div class='filter-section-title'>Additional filters</div>", unsafe_allow_html=True)
-    c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 1], vertical_alignment="center") # type: ignore
+    # Extra filter bar/drop (under search)
+    with st.expander("Additional filters", expanded=True):
+        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 2, 2, 3, 1], vertical_alignment="center") # type: ignore
 
-    def multi_select_with_state(label: str, options: list, key: str):
-        old = st.session_state.get(key, [])
-        selections = [x for x in old if x in options]
-        if selections != old:
-            st.session_state[key] = selections
-        return st.multiselect(label, options=options, key=key)
+        def multi_select_with_state(label: str, options: list, key: str):
+            old = st.session_state.get(key, [])
+            selections = [x for x in old if x in options]
+            if selections != old:
+                st.session_state[key] = selections
+            return st.multiselect(label, options=options, key=key)
 
-    with c1:
-        multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi") # type: ignore
-    with c2:
-        res_opts = []
-        if not df_view.empty and "resolutionType" in df_view.columns:
-            res_opts = sorted(
-                [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
-            ) # type: ignore
-        multi_select_with_state("Resolution type", res_opts, "res_multi") # type: ignore
-    with c3:
-        multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi") # type: ignore
-    with c4:
-        tracking_opts = [
-            format_tracking_status_with_icon(status) for status in COURIER_STATUS_OPTIONS
-        ]
-        multi_select_with_state("Tracking status", tracking_opts, "tracking_status_multi") # type: ignore
-    with c5:
-        req_dates = [] # type: ignore
-        if not df_view.empty and "Requested date" in df_view.columns:
-            req_dates = sorted(
-                [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
-                reverse=True, # type: ignore
+        with c1:
+            multi_select_with_state("Status", ACTIVE_STATUSES, "status_multi") # type: ignore
+        with c2:
+            res_opts = []
+            if not df_view.empty and "resolutionType" in df_view.columns:
+                res_opts = sorted(
+                    [x for x in df_view["resolutionType"].dropna().unique().tolist() if x and x != "N/A"]
+                ) # type: ignore
+            multi_select_with_state("Resolution type", res_opts, "res_multi") # type: ignore
+        with c3:
+            multi_select_with_state("Resolution actioned", ["Yes", "No"], "actioned_multi") # type: ignore
+        with c4:
+            tracking_opts = [
+                format_tracking_status_with_icon(status) for status in COURIER_STATUS_OPTIONS
+            ]
+        with c5:
+            req_dates = [] # type: ignore
+            if not df_view.empty and "Requested date" in df_view.columns:
+                req_dates = sorted(
+                    [d for d in df_view["Requested date"].dropna().astype(str).unique().tolist() if d and d != "N/A"],
+                    reverse=True, # type: ignore
+                )
+        with c6:
+            st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters) # type: ignore
+
+        st.markdown("**Failure filters**")
+        f1, f2, f3, _ = st.columns([1.3, 1.3, 1.3, 3], vertical_alignment="center")
+        with f1: # type: ignore
+            st.checkbox(
+                f"refund_failure ({failure_counts['refund_failure']})",
+                key="failure_refund",
             )
-        multi_select_with_state("Requested date", req_dates, "req_dates_selected") # type: ignore
-    with c6:
-        st.button("🧼 Clear filters", width="stretch", on_click=clear_all_filters) # type: ignore
-
-    st.markdown("**Failure filters**")
-    f1, f2, f3, _ = st.columns([1.3, 1.3, 1.3, 3], vertical_alignment="center")
-    with f1: # type: ignore
-        st.checkbox(
-            f"refund_failure ({failure_counts['refund_failure']})",
-            key="failure_refund",
-        )
-    with f2: # type: ignore
-        st.checkbox(
-            f"upload_failed ({failure_counts['upload_failed']})",
-            key="failure_upload",
-        )
-    with f3: # type: ignore
-        st.checkbox(
-            f"shipment_failure ({failure_counts['shipment_failure']})",
-            key="failure_shipment",
-        )
+        with f2: # type: ignore
+            st.checkbox(
+                f"upload_failed ({failure_counts['upload_failed']})",
+                key="failure_upload",
+            )
+        with f3: # type: ignore
+            st.checkbox(
+                f"shipment_failure ({failure_counts['shipment_failure']})",
+                key="failure_shipment",
+            )
 
     st.divider()
 
@@ -3660,23 +3351,6 @@ def main(): # type: ignore
         if st.session_state.get("failure_shipment"):
             failure_mask |= display_df["has_shipment_failure"]
         display_df = display_df[failure_mask] # type: ignore
-    snapshot_filter = st.session_state.get("daily_snapshot_filter")
-    today_prefix = datetime.now().strftime("%Y-%m-%d")
-    if snapshot_filter == "snapshot_pending":
-        display_df = display_df[
-            (display_df["Current Status"] == "Pending")
-            & (display_df["Requested date"].astype(str).str.startswith(today_prefix))
-        ]
-    elif snapshot_filter == "snapshot_approved":
-        display_df = display_df[
-            (display_df["Current Status"] == "Approved")
-            & (display_df["Approved date"].astype(str).str.startswith(today_prefix))
-        ]
-    elif snapshot_filter == "snapshot_received":
-        display_df = display_df[
-            (display_df["Current Status"] == "Received")
-            & (display_df["Received date"].astype(str).str.startswith(today_prefix))
-        ]
 
     if display_df.empty:
         st.info("No matching records found.")
@@ -3801,11 +3475,7 @@ def main(): # type: ignore
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    visible_cols = st.session_state.get("visible_columns") or display_cols
-    visible_cols = [col for col in visible_cols if col in display_cols]
-    if not visible_cols:
-        visible_cols = display_cols
-    table_df = display_df[visible_cols].copy()
+    table_df = display_df[display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
         if column not in data.columns or data.empty:
@@ -3824,7 +3494,7 @@ def main(): # type: ignore
 
     if st.session_state.get("table_autosize"):
         column_config = {}
-        for key in visible_cols:
+        for key in display_cols:
             width = _autosize_width(key, table_df)
             if key in link_column_configs:
                 column_config[key] = st.column_config.LinkColumn(
@@ -3838,11 +3508,25 @@ def main(): # type: ignore
                     width=width,
                 )
     else:
-        column_config = {key: base_column_config[key] for key in visible_cols}
+        column_config = base_column_config
 
     total_rows = len(table_df)
-    tsv_rows = [visible_cols] + table_df.astype(str).values.tolist()
+    tsv_rows = [display_cols] + table_df.astype(str).values.tolist()
     tsv_text = "\n".join(["\t".join(row) for row in tsv_rows])
+    action_left, _ = st.columns([3, 5], vertical_alignment="center")
+    with action_left:
+        st.markdown("<div class='table-actions-left'>", unsafe_allow_html=True)
+        csv_payload = table_df.to_csv(index=False)
+        st.download_button(
+            label="⬇️ CSV",
+            data=csv_payload,
+            file_name=f"returngo_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            key="download_table_csv",
+        )
+        if st.button("Autosize", key="autosize_btn"):
+            st.session_state.table_autosize = not st.session_state.get("table_autosize", False)
+        st.markdown("</div>", unsafe_allow_html=True)
     count_col, action_col = st.columns([5, 3], vertical_alignment="center")
     with count_col:
         st.markdown( # type: ignore
@@ -3865,41 +3549,6 @@ def main(): # type: ignore
                 st.session_state["suppress_row_dialog"] = True
             st.markdown("</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
-
-    action_left, _ = st.columns([3, 5], vertical_alignment="center")
-    with action_left:
-        st.markdown("<div class='table-actions-left'>", unsafe_allow_html=True)
-        export_df = table_df.copy()
-        if "RMA ID" in export_df.columns:
-            export_df["RMA ID"] = export_df["RMA ID"].map(clean_rma_id_for_export)
-        csv_payload = export_df.to_csv(index=False)
-        st.download_button(
-            label="⬇️ CSV",
-            data=csv_payload,
-            file_name=f"returngo_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            key="download_table_csv",
-        )
-        if st.button("Autosize", key="autosize_btn"):
-            st.session_state.table_autosize = not st.session_state.get("table_autosize", False)
-        st.markdown("</div>", unsafe_allow_html=True)
-    hide_label_col, hide_action_col = st.columns([2, 3], vertical_alignment="center")
-    with hide_label_col:
-        st.markdown("**Hide/Unhide**")
-    with hide_action_col:
-        hide_select_col, hide_save_col = st.columns([4, 1], vertical_alignment="center")
-        with hide_select_col:
-            column_selection = st.multiselect(
-                "Visible columns",
-                options=display_cols,
-                default=visible_cols,
-                key="column_visibility_select",
-                label_visibility="collapsed",
-            )
-        with hide_save_col:
-            if st.button("Save", key="save_column_visibility"):
-                st.session_state.visible_columns = column_selection
-                st.rerun()
 
     if st.session_state.get("copy_all_payload"):
         copy_payload = st.session_state.pop("copy_all_payload")
@@ -3960,13 +3609,11 @@ def main(): # type: ignore
         return [""] * len(row)
 
     cols_for_styling = list(
-        dict.fromkeys(
-            visible_cols + ["Current Status", "DisplayTrack", "failures", "is_cc", "is_fg"]
-        )
+        dict.fromkeys(display_cols + ["DisplayTrack", "failures", "is_cc", "is_fg"])
     )
     styling_df = display_df[cols_for_styling].copy()
     styled_table = styling_df.style.apply(highlight_problematic_rows, axis=1)
-    cols_to_hide = [col for col in styling_df.columns if col not in visible_cols]
+    cols_to_hide = [col for col in styling_df.columns if col not in display_cols]
     if cols_to_hide:
         styled_table = styled_table.hide(cols_to_hide, axis="columns")
 
