@@ -228,6 +228,34 @@ def get_event_date(rma_data: dict, event_name: str) -> Optional[datetime]:
     return None
 
 
+def get_received_date_from_events_or_comments(rma_data: dict) -> Optional[datetime]:
+    """
+    Gets the shipment received date, prioritizing the 'SHIPMENT_RECEIVED' event,
+    but falling back to the earliest system comment containing 'RECEIVED'.
+    """
+    # 1. Prioritize the official event
+    event_date = get_event_date(rma_data, "SHIPMENT_RECEIVED")
+    if event_date:
+        return event_date
+
+    # 2. Fallback to searching comments
+    comments = safe_get(rma_data, "comments", [])
+    if not comments:
+        return None
+
+    received_comment_dates = []
+    for comment in comments:
+        html_text = comment.get("htmlText", "")
+        # The user's snippet is: "Shipment &lt;strong&gt;RECEIVED&lt;/strong&gt;"
+        if "RECEIVED" in html_text.upper():
+            comment_date = safe_parse_date_iso(comment.get("datetime"))
+            if comment_date:
+                received_comment_dates.append(comment_date)
+    
+    # Return the earliest date found in comments if any
+    return min(received_comment_dates) if received_comment_dates else None
+
+
 def get_resolution_types(rma_data: dict) -> Set[str]:
     """Gets a set of all unique resolution types from the RMA items."""
     items = safe_get(rma_data, "items", [])
@@ -500,62 +528,29 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         html_content = response.text
-        
-        # Method 1: Try to extract from table using BeautifulSoup-style parsing
-        # Look for the first <td> after a <tr> that contains status information
-        # The table structure typically has: Date | Status | Location
-        
-        # Pattern to match table rows with cells
-        # We want the FIRST data row (not header), which is the most recent
-        table_pattern = r'<table[^>]*>.*?<tbody[^>]*>(.*?)</tbody>'
-        table_match = re.search(table_pattern, html_content, re.DOTALL | re.IGNORECASE)
-        
-        if table_match:
-            tbody_content = table_match.group(1)
-            
-            # Find all rows in tbody
-            row_pattern = r'<tr[^>]*>(.*?)</tr>'
-            rows = re.findall(row_pattern, tbody_content, re.DOTALL | re.IGNORECASE)
-            
-            if rows:
-                # Get first row (most recent entry)
-                first_row = rows[0]
-                
-                # Extract all cells from the first row
-                cell_pattern = r'<td[^>]*>(.*?)</td>'
-                cells = re.findall(cell_pattern, first_row, re.DOTALL | re.IGNORECASE)
-                
-                if len(cells) >= 2:
-                    # Typically: cells[0] = date, cells[1] = status, cells[2] = location
-                    # We want the status (second cell)
-                    status_html = cells[1]
-                    
-                    # Clean HTML tags and get text
-                    status = re.sub(r'<[^>]+>', '', status_html).strip()
-                    
-                    if status:
-                        logger.info(f"Scraped status '{status}' for tracking {tracking_number}")
-                        return status
-        
-        # Method 2: Fallback - look for the first <td> that looks like a status
-        # Common status values: Submitted, In Transit, Delivered, Received, etc.
-        status_pattern = r'<td[^>]*>\s*((?:Submitted|In Transit|Delivered|Received|Collection|Cancelled|Picked Up|Out for Delivery)[^<]*)</td>'
-        status_match = re.search(status_pattern, html_content, re.IGNORECASE)
-        
-        if status_match:
-            status = status_match.group(1).strip()
-            logger.info(f"Scraped status '{status}' for tracking {tracking_number} (fallback method)")
-            return status
-        
-        # Method 3: Generic first <td> approach (original method)
-        match = re.search(r'<td[^>]*>([^<]+)</td>', html_content)
+
+        # Use a single, more robust regex to find the latest status.
+        # This looks for the content of the second <td> in the first <tr> of the <tbody>.
+        pattern = re.compile(r"""
+            <tbody[^>]*>         # Match the opening tbody tag
+            .*?                   # Non-greedy match until the first row
+            <tr[^>]*>             # Match the first table row
+            .*?                   # Non-greedy match until the first td
+            <td[^>]*>.*?</td>     # Match the first cell (date) completely
+            .*?                   # Non-greedy match until the second td
+            <td[^>]*>             # Match the opening tag of the second cell (status)
+            ([^<]+)               # Capture the content of the cell (anything not a '<')
+            </td>                # Match the closing tag
+        """, re.VERBOSE | re.IGNORECASE | re.DOTALL)
+
+        match = pattern.search(html_content)
         if match:
             status = match.group(1).strip()
-            # Validate it looks like a status (not a date or number)
-            if not re.match(r'^\d{4}-\d{2}-\d{2}', status) and len(status) > 3:
-                logger.info(f"Scraped status '{status}' for tracking {tracking_number} (generic method)")
-                return status
-            
+            logger.info(f"Scraped status '{status}' for tracking {tracking_number}")
+            return status
+        else:
+            logger.warning(f"Could not find status for {tracking_number} using primary regex.")
+
     except requests.exceptions.RequestException as e:
         logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
     except Exception as e:
@@ -748,7 +743,7 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["tracking_number"] = df["json_data"].apply(get_first_tracking)
     df["requested_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_CREATED"))
     df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
-    df["received_date"] = df["json_data"].apply(lambda x: get_event_date(x, "SHIPMENT_RECEIVED"))
+    df["received_date"] = df["json_data"].apply(get_received_date_from_events_or_comments)
     
     def extract_resolution_types(json_data: dict) -> str:
         res_types = get_resolution_types(json_data)
