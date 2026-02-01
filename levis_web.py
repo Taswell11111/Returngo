@@ -640,6 +640,10 @@ def fetch_and_cache_data() -> pd.DataFrame:
         if not rma_id:
             return None
 
+        if not MY_API_KEY:
+            logger.warning(f"Skipping RMA {rma_id} due to missing API key.")
+            return None
+
         # Fetch full RMA details
         rma_detail = get_rma_by_id(MY_API_KEY, STORE_URL, rma_id)
         if not rma_detail:
