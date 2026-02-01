@@ -670,6 +670,35 @@ def render_enhanced_tile(col, name, cfg, count_val, is_selected):
             st.rerun()
 
 # ==========================================
+# 6. MUTATIONS (Actions)
+# ==========================================
+def push_tracking_update(rma_id, shipment_id, tracking_number, store_url):
+    headers = {**rg_headers(store_url), "Content-Type": "application/json"}
+    payload = {
+        "status": "LabelCreated", "carrierName": "CourierGuy",
+        "trackingNumber": tracking_number,
+        "trackingURL": f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}",
+    }
+    try:
+        res = rg_request("PUT", api_url(f"/shipment/{shipment_id}"), store_url, headers=headers, json_body=payload)
+        if res and res.status_code == 200:
+            fetch_rma_detail(rma_id, store_url, force=True)
+            return True, "Success"
+        return False, f"API Error {res.status_code if res else 'None'}"
+    except Exception as e: return False, str(e)
+
+def push_comment_update(rma_id, comment_text, store_url):
+    headers = {**rg_headers(store_url), "Content-Type": "application/json"}
+    payload = {"htmlText": comment_text}
+    try:
+        res = rg_request("POST", api_url(RMA_COMMENT_PATH.format(rma_id=rma_id)), store_url, headers=headers, json_body=payload)
+        if res and res.status_code in (200, 201):
+            fetch_rma_detail(rma_id, store_url, force=True)
+            return True, "Success"
+        return False, f"API Error {res.status_code if res else 'None'}"
+    except Exception as e: return False, str(e)
+
+# ==========================================
 # MAIN
 # ==========================================
 def main():
@@ -748,7 +777,8 @@ def main():
         track_nums = [s.get("trackingNumber") for s in shipments if s.get("trackingNumber")]
         track_str = ", ".join(track_nums) if track_nums else ""
         
-        local_courier = rma.get("_local_courier_status", "").lower()
+        # FIX: Handle NoneType for lower() call
+        local_courier = (rma.get("_local_courier_status") or "").lower()
         
         is_nt = (status == "Approved" and not track_str)
         is_cc = "cancelled" in local_courier
@@ -778,7 +808,10 @@ def main():
         if df.empty:
             counts[name] = 0
         else:
-            counts[name] = int(cfg["fn"](df).sum())
+            try:
+                counts[name] = int(cfg["fn"](df).sum())
+            except Exception:
+                counts[name] = 0
 
     # --- COMMAND CENTER ---
     st.markdown("### Command Center")
