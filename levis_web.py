@@ -517,7 +517,7 @@ def extract_status_from_comments(comments: list) -> Optional[str]:
 def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
     """
     Scrapes the Parcel Ninja website to get the latest tracking status.
-    Handles both HTML table and plain text responses.
+    Handles both plain text and HTML table responses.
     """
     if not tracking_number:
         return None
@@ -529,7 +529,18 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
         response.raise_for_status()
         content = response.text
 
-        # 1. Try to parse as HTML table first (more structured)
+        # Prioritize the plain text regex provided by the user, as it's more reliable.
+        text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2})\s+([A-Za-z ]+)"
+        matches = re.findall(text_pattern, content)
+        
+        if matches:
+            # The most recent status is the first one found.
+            # The status text is in the second captured group.
+            status = matches[0][1].strip()
+            logger.info(f"Scraped status '{status}' for tracking {tracking_number} using text regex")
+            return status
+
+        # Fallback to parsing as an HTML table if the text regex fails.
         html_pattern = re.compile(r"""
             <tbody[^>]*>.*?<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>([^<]+)</td>
         """, re.VERBOSE | re.IGNORECASE | re.DOTALL)
@@ -540,19 +551,7 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
             logger.info(f"Scraped status '{status}' for tracking {tracking_number} from HTML")
             return status
 
-        # 2. If HTML parse fails, try to parse as plain text
-        lines = content.strip().split('\n')
-        if len(lines) >= 3:
-            # The first status line is typically the 3rd line (index 2)
-            status_line = lines[2]
-            parts = status_line.split('\t')
-            if len(parts) == 2:
-                status = parts[1].strip()
-                if status:
-                    logger.info(f"Scraped status '{status}' for tracking {tracking_number} from plain text")
-                    return status
-
-        logger.warning(f"Could not extract status for {tracking_number}. Content might have an unknown format.")
+        logger.warning(f"Could not extract status for {tracking_number}. Content has an unknown format.")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
@@ -565,11 +564,18 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
 def get_shipment_status(rma_data: dict, tracking_number: str) -> Optional[str]:
     """
     Gets the shipment status using multiple methods in order of preference:
-    1. From shipment status in API data
-    2. From RMA comments
-    3. From web scraping Parcel Ninja
+    1. From web scraping Parcel Ninja (for the most up-to-date status)
+    2. From shipment status in API data (as a fallback)
+    3. From RMA comments (as a final fallback)
     """
-    # Method 1: Check shipment status from API
+    # Method 1 (NEW PRIORITY): Scrape Parcel Ninja website for the latest status.
+    if tracking_number:
+        scraped_status = scrape_parcel_ninja_status(tracking_number)
+        if scraped_status:
+            logger.debug(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number}")
+            return scraped_status
+
+    # Method 2 (Fallback): Check shipment status from API data.
     shipments = safe_get(rma_data, "shipments", [])
     if shipments:
         shipment_status = shipments[0].get("status")
@@ -588,17 +594,12 @@ def get_shipment_status(rma_data: dict, tracking_number: str) -> Optional[str]:
                 logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number}")
                 return mapped_status
     
-    # Method 2: Check comments for status updates
+    # Method 3 (Final Fallback): Check comments for status updates.
     comments = safe_get(rma_data, "comments", [])
     comment_status = extract_status_from_comments(comments)
     if comment_status:
         logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number}")
         return comment_status
-    
-    # Method 3: Scrape Parcel Ninja website
-    scraped_status = scrape_parcel_ninja_status(tracking_number)
-    if scraped_status:
-        return scraped_status
     
     return None
 
@@ -1965,65 +1966,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
         unsafe_allow_html=True,
     )
-
-
-def debug_specific_rma(rma_id):
-    """
-    A temporary function to fetch and process a single RMA for debugging purposes.
-    Prints the findings to the console.
-    """
-    print(f"\n--- DEBUGGING RMA: {rma_id} ---")
-    if not MY_API_KEY:
-        print("DEBUG: MY_API_KEY is not set. Aborting debug function.")
-        return
-
-    # 1. Get RMA Data
-    rma_data = get_rma_by_id(MY_API_KEY, STORE_URL, rma_id)
-    if not rma_data:
-        print(f"DEBUG: Failed to fetch data for RMA {rma_id}")
-        print("--- END DEBUG ---")
-        return
-    print("DEBUG: Successfully fetched RMA data.")
-
-    # 2. Find Tracking Number
-    tracking_number = safe_get(rma_data, "shipments.0.trackingNumber")
-    if tracking_number:
-        print(f"DEBUG: Found Tracking Number: {tracking_number}")
-
-        # 3. Scrape Status
-        print(f"DEBUG: Now scraping status for {tracking_number}...")
-        scraped_status = scrape_parcel_ninja_status(tracking_number)
-        print(f"DEBUG: Scraped Status: {scraped_status}")
-
-        # Also, let's fetch the URL content to see what the scraper sees
-        tracking_url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
-        try:
-            print(f"DEBUG: Fetching content of {tracking_url}")
-            response = requests.get(tracking_url, timeout=10)
-            response.raise_for_status()
-            print("--- Scraper Content Start ---")
-            print(response.text)
-            print("--- Scraper Content End ---")
-        except Exception as e:
-            print(f"DEBUG: Error fetching scraper content: {e}")
-
-    else:
-        print("DEBUG: No tracking number found.")
-
-    # 4. Determine Received Date
-    received_date = get_received_date_from_events_or_comments(rma_data)
-    print(f"DEBUG: Found Received Date: {received_date}")
-    
-    # For verification, print events and comments
-    print("\n--- RMA Events ---")
-    print(json.dumps(rma_data.get("events", []), indent=2))
-    print("\n--- RMA Comments ---")
-    print(json.dumps(rma_data.get("comments", []), indent=2))
-
-    print("--- END DEBUG ---\n")
-
-# Run the debug function for the specific RMA
-debug_specific_rma("9941407")
 
 
 if __name__ == "__main__":
