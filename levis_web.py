@@ -449,25 +449,161 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
 # ==========================================
 # 6. DATA FETCHING AND CACHING
 # ==========================================
+def extract_status_from_comments(comments: list) -> Optional[str]:
+    """
+    Extracts the most recent shipment status from RMA comments.
+    Looks for system comments indicating shipment status changes.
+    """
+    if not comments:
+        return None
+    
+    # Status keywords to look for (in order of priority)
+    status_keywords = [
+        ("RECEIVED", "Received"),
+        ("DELIVERED", "Delivered"),
+        ("IN TRANSIT", "In Transit"),
+        ("SHIPPED", "In Transit"),
+        ("CANCELLED", "Courier Cancelled"),
+        ("COLLECTION", "Submitted to Courier"),
+    ]
+    
+    # Sort comments by datetime (most recent first)
+    sorted_comments = sorted(
+        comments,
+        key=lambda c: safe_parse_date_iso(c.get("datetime")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )
+    
+    # Look for status in comments (most recent first)
+    for comment in sorted_comments:
+        html_text = comment.get("htmlText", "").upper()
+        
+        for keyword, status in status_keywords:
+            if keyword in html_text:
+                logger.debug(f"Found status '{status}' in comment: {html_text}")
+                return status
+    
+    return None
+
+
 def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
-    """Scrapes the Parcel Ninja website to get the latest tracking status."""
+    """
+    Scrapes the Parcel Ninja website to get the latest tracking status.
+    Extracts the first row from the tracking table which is the most recent entry.
+    """
     if not tracking_number:
         return None
     
     url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+    
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
+        html_content = response.text
         
-        # Find the first row of the tracking table and extract the status
-        match = re.search(r'<td>([A-Za-z\s]+)</td>', response.text)
+        # Method 1: Try to extract from table using BeautifulSoup-style parsing
+        # Look for the first <td> after a <tr> that contains status information
+        # The table structure typically has: Date | Status | Location
+        
+        # Pattern to match table rows with cells
+        # We want the FIRST data row (not header), which is the most recent
+        table_pattern = r'<table[^>]*>.*?<tbody[^>]*>(.*?)</tbody>'
+        table_match = re.search(table_pattern, html_content, re.DOTALL | re.IGNORECASE)
+        
+        if table_match:
+            tbody_content = table_match.group(1)
+            
+            # Find all rows in tbody
+            row_pattern = r'<tr[^>]*>(.*?)</tr>'
+            rows = re.findall(row_pattern, tbody_content, re.DOTALL | re.IGNORECASE)
+            
+            if rows:
+                # Get first row (most recent entry)
+                first_row = rows[0]
+                
+                # Extract all cells from the first row
+                cell_pattern = r'<td[^>]*>(.*?)</td>'
+                cells = re.findall(cell_pattern, first_row, re.DOTALL | re.IGNORECASE)
+                
+                if len(cells) >= 2:
+                    # Typically: cells[0] = date, cells[1] = status, cells[2] = location
+                    # We want the status (second cell)
+                    status_html = cells[1]
+                    
+                    # Clean HTML tags and get text
+                    status = re.sub(r'<[^>]+>', '', status_html).strip()
+                    
+                    if status:
+                        logger.info(f"Scraped status '{status}' for tracking {tracking_number}")
+                        return status
+        
+        # Method 2: Fallback - look for the first <td> that looks like a status
+        # Common status values: Submitted, In Transit, Delivered, Received, etc.
+        status_pattern = r'<td[^>]*>\s*((?:Submitted|In Transit|Delivered|Received|Collection|Cancelled|Picked Up|Out for Delivery)[^<]*)</td>'
+        status_match = re.search(status_pattern, html_content, re.IGNORECASE)
+        
+        if status_match:
+            status = status_match.group(1).strip()
+            logger.info(f"Scraped status '{status}' for tracking {tracking_number} (fallback method)")
+            return status
+        
+        # Method 3: Generic first <td> approach (original method)
+        match = re.search(r'<td[^>]*>([^<]+)</td>', html_content)
         if match:
-            return match.group(1).strip()
+            status = match.group(1).strip()
+            # Validate it looks like a status (not a date or number)
+            if not re.match(r'^\d{4}-\d{2}-\d{2}', status) and len(status) > 3:
+                logger.info(f"Scraped status '{status}' for tracking {tracking_number} (generic method)")
+                return status
             
     except requests.exceptions.RequestException as e:
         logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Unexpected error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
         
     return None
+
+
+def get_shipment_status(rma_data: dict, tracking_number: str) -> Optional[str]:
+    """
+    Gets the shipment status using multiple methods in order of preference:
+    1. From shipment status in API data
+    2. From RMA comments
+    3. From web scraping Parcel Ninja
+    """
+    # Method 1: Check shipment status from API
+    shipments = safe_get(rma_data, "shipments", [])
+    if shipments:
+        shipment_status = shipments[0].get("status")
+        if shipment_status:
+            # Map API shipment statuses to our display statuses
+            status_map = {
+                "LabelCreated": "Submitted to Courier",
+                "Shipped": "In Transit",
+                "InTransit": "In Transit",
+                "Delivered": "Delivered",
+                "Received": "Received",
+                "Cancelled": "Courier Cancelled",
+            }
+            mapped_status = status_map.get(shipment_status)
+            if mapped_status:
+                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number}")
+                return mapped_status
+    
+    # Method 2: Check comments for status updates
+    comments = safe_get(rma_data, "comments", [])
+    comment_status = extract_status_from_comments(comments)
+    if comment_status:
+        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number}")
+        return comment_status
+    
+    # Method 3: Scrape Parcel Ninja website
+    scraped_status = scrape_parcel_ninja_status(tracking_number)
+    if scraped_status:
+        return scraped_status
+    
+    return None
+
 
 @st.cache_data(ttl=43200)
 def fetch_and_cache_data() -> pd.DataFrame:
@@ -510,12 +646,14 @@ def fetch_and_cache_data() -> pd.DataFrame:
             # Fallback to summary data if detail fetch fails
             rma_detail = rma_summary
 
-        # Fetch and add courier status for 'Approved' RMAs
+        # Get tracking number
         tracking_number = safe_get(rma_detail, "shipments.0.trackingNumber")
         status = safe_get(rma_detail, "rmaSummary.status") or rma_detail.get("status", "")
         
+        # Get courier status for Approved RMAs with tracking
+        courier_status = None
         if status.lower() == "approved" and tracking_number:
-            courier_status = scrape_parcel_ninja_status(tracking_number)
+            courier_status = get_shipment_status(rma_detail, tracking_number)
             if courier_status:
                 rma_detail['courier_status'] = courier_status
         
@@ -525,8 +663,8 @@ def fetch_and_cache_data() -> pd.DataFrame:
             "store_url": safe_get(rma_detail, "rmaSummary.storeUrl") or rma_detail.get("storeUrl"),
             "status": status,
             "created_at": safe_parse_date_iso(rma_detail.get("createdAt")),
-            "json_data": rma_detail,  # The full object is the "json_data"
-            "courier_status": rma_detail.get('courier_status'), # From Parcel Ninja
+            "json_data": rma_detail,
+            "courier_status": courier_status,
         }
 
     # 2. Concurrently process all RMAs
