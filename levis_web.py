@@ -660,9 +660,9 @@ def fetch_and_cache_data() -> pd.DataFrame:
         tracking_number = safe_get(rma_detail, "shipments.0.trackingNumber")
         status = safe_get(rma_detail, "rmaSummary.status") or rma_detail.get("status", "")
         
-        # Get courier status for Approved RMAs with tracking
+        # Get courier status for Approved or Received RMAs with tracking
         courier_status = None
-        if status.lower() == "approved":
+        if status.lower() in ["approved", "received"]:
             courier_status = get_shipment_status(rma_detail)
         
         if courier_status:
