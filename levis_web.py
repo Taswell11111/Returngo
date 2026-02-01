@@ -215,6 +215,27 @@ def compute_days_since(from_date: Optional[datetime]) -> int:
     return delta.days
 
 
+def get_event_date(rma_data: dict, event_name: str) -> Optional[datetime]:
+    """Extracts the date for a specific event from the RMA events list."""
+    events = safe_get(rma_data, "rmaSummary.events", [])
+    for event in events:
+        if event.get("eventName") == event_name:
+            return safe_parse_date_iso(event.get("eventDate"))
+    return None
+
+
+def get_resolution_types(rma_data: dict) -> Set[str]:
+    """Gets a set of all unique resolution types from the RMA items."""
+    items = safe_get(rma_data, "items", [])
+    if not items:
+        return set()
+    return {item.get("resolutionType") for item in items if item.get("resolutionType")}
+
+def has_tracking_update_comment(rma_data: dict) -> bool:
+    """Checks if a comment indicating a tracking update exists."""
+    comments = safe_get(rma_data, "comments", [])
+    return any("updated shipment tracking number" in str(c.get("htmlText", "")).lower() for c in comments)
+
 def get_requests_session() -> requests.Session:
     """Creates a session with retry logic for HTTP requests."""
     session = requests.Session()
@@ -538,6 +559,21 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "returnLabel.trackingNumber", ""))
     df["resolution_type"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionType", ""))
     df["resolution_actioned"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionActioned", ""))
+    df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "rmaSummary.order_name", "-"))
+    df["requested_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_CREATED"))
+    df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
+    df["received_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_STATUS_UPDATED")) # Assuming status update to Received
+    
+    # Tracking number is in the first shipment
+    df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "shipments.0.trackingNumber", ""))
+
+    # Resolution type can be multiple, so we'll join them
+    df["resolution_type"] = df["json_data"].apply(lambda x: ", ".join(get_resolution_types(x)) or "-")
+
+    # Resolution actioned is based on successful transactions or exchange orders
+    df["resolution_actioned"] = df["json_data"].apply(
+        lambda x: "Yes" if safe_get(x, "transactions") or safe_get(x, "exchangeOrders") else "No"
+    )
 
     # Days since requested
     df["days_since_requested"] = df["requested_date"].apply(compute_days_since)
@@ -563,6 +599,9 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: bool(r.get("tracking_number")) and r.get("status", "").lower() in ["approved", "received"],
         axis=1
     )
+
+    # Check for tracking update comment
+    df["Is_tracking_updated"] = df["json_data"].apply(has_tracking_update_comment)
 
     # Flags
     df["is_cc"] = df["tracking_status"].str.lower().str.contains("cancelled", case=False, na=False)
