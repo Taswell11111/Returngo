@@ -295,88 +295,6 @@ def update_rate_limit_info(response_headers: Mapping[str, str]):
                     pass
         RATE_LIMIT_INFO["updated_at"] = datetime.now(timezone.utc)
 
-# ==========================================
-# 6. DATA FETCHING AND CACHING
-# ==========================================
-def extract_status_from_comments(comments: list) -> Optional[str]:
-    """
-    Extracts the most recent shipment status from RMA comments.
-    Looks for system comments indicating shipment status changes.
-    """
-    if not comments:
-        return None
-    
-    # Status keywords to look for (in order of priority)
-    status_keywords = [
-        ("RECEIVED", "Received"),
-        ("DELIVERED", "Delivered"),
-        ("IN TRANSIT", "In Transit"),
-        ("SHIPPED", "In Transit"),
-        ("CANCELLED", "Courier Cancelled"),
-        ("COLLECTION", "Submitted to Courier"),
-    ]
-    
-    # Sort comments by datetime (most recent first)
-    sorted_comments = sorted(
-        comments,
-        key=lambda c: safe_parse_date_iso(c.get("datetime")) or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True
-    )
-    
-    # Look for status in comments (most recent first)
-    for comment in sorted_comments:
-        html_text = comment.get("htmlText", "").upper()
-        
-        for keyword, status in status_keywords:
-            if keyword in html_text:
-                logger.debug(f"Found status '{status}' in comment: {html_text}")
-                return status
-    
-    return None
-
-
-def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
-    """
-    Scrapes the Parcel Ninja website to get the latest tracking status.
-    Handles both plain text and HTML table responses.
-    """
-    if not tracking_number:
-        logger.debug("scrape_parcel_ninja_status: No tracking number provided.")
-        return None
-    
-    url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
-    logger.info(f"DEBUG_SCRAPE: Scraping URL: {url}")
-    
-    try:
-        response = requests.get(url, timeout=30)
-        logger.info(f"DEBUG_SCRAPE: Received status code {response.status_code} for {tracking_number}")
-        response.raise_for_status()
-        content = response.text
-
-        # Prioritize the plain text regex provided by the user, as it's more reliable.
-        text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2})\s+([A-Za-z ]+)"
-        matches = re.findall(text_pattern, content)
-        logger.info(f"DEBUG_SCRAPE: Found {len(matches)} regex matches for {tracking_number}")
-        
-        if matches:
-            # The most recent status is the first one found.
-            # The status text is in the second captured group.
-            status = matches[0][1].strip()
-            logger.info(f"DEBUG_SCRAPE: Scraped status '{status}' for tracking {tracking_number} using text regex")
-            return status
-
-        logger.warning(f"DEBUG_SCRAPE: Could not extract status for {tracking_number} using primary regex. Content has an unknown format.")
-        # Add more detailed logging for debugging when the primary regex fails
-        if "OPT-343251690" in tracking_number:
-             logger.info(f"DEBUG_SCRAPE_CONTENT for {tracking_number}:\n{content[:1000]}") # Log first 1000 chars
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"DEBUG_SCRAPE: Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
-    except Exception as e:
-        logger.error(f"DEBUG_SCRAPE: Unexpected error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
-        
-    return None
-
 # 3. RATE LIMITER
 # ==========================================
 class RateLimiter:
@@ -681,61 +599,6 @@ def get_shipment_status(rma_data: dict, tracking_number: str) -> Optional[str]:
     return None
 
 
-@st.cache_data(ttl=43200)
-def fetch_and_cache_data() -> pd.DataFrame:
-    """
-    Fetches all active RMAs from the ReturnGO API, enriches them with details
-    and courier statuses, and caches the resulting DataFrame for 12 hours.
-    This is the primary data source for the application.
-    """
-    if not MY_API_KEY:
-        st.error("Application error: 'RETURNGO_API_KEY' is not configured in secrets.")
-        return None
-
-    # Method 1 (NEW PRIORITY): Scrape Parcel Ninja website for the latest status.
-    if tracking_number:
-        scraped_status = scrape_parcel_ninja_status(tracking_number)
-        if scraped_status:
-            # Map scraped status to standardized statuses
-            scraped_lower = scraped_status.lower()
-            if "delivered" in scraped_lower:
-                return "Delivered"
-            if "out for delivery" in scraped_lower:
-                return "In Transit"
-            if "submitted to courier" in scraped_lower:
-                return "Submitted to Courier"
-            if "collected by courier" in scraped_lower:
-                return "In Transit"
-            logger.debug(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number}")
-            return scraped_status
-
-    # Method 2 (Fallback): Check shipment status from API data.
-    shipments = safe_get(rma_data, "shipments", [])
-    if shipments:
-        shipment_status = shipments[0].get("status")
-        if shipment_status:
-            # Map API shipment statuses to our display statuses
-            status_map = {
-                "LabelCreated": "Submitted to Courier",
-                "Shipped": "In Transit",
-                "InTransit": "In Transit",
-                "Delivered": "Delivered",
-                "Received": "Received",
-                "Cancelled": "Courier Cancelled",
-            }
-            mapped_status = status_map.get(shipment_status)
-            if mapped_status:
-                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number}")
-                return mapped_status
-    
-    # Method 3 (Final Fallback): Check comments for status updates.
-    comments = safe_get(rma_data, "comments", [])
-    comment_status = extract_status_from_comments(comments)
-    if comment_status:
-        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number}")
-        return comment_status
-    
-    return None
 
 
 @st.cache_data(ttl=43200)
@@ -796,7 +659,6 @@ def fetch_and_cache_data() -> pd.DataFrame:
 
         courier_status = None
         if status.lower() == "approved" and tracking_number:
-        if tracking_number:
             courier_status = get_shipment_status(rma_detail, tracking_number)
             if courier_status:
                 rma_detail['courier_status'] = courier_status
@@ -2084,7 +1946,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     sel_event = st.dataframe(
         styled_table,
         use_container_width=False,
-        width=None,
         height=700,
         hide_index=True,
         column_config=column_config,
