@@ -459,30 +459,40 @@ def fetch_returngo_rmas(
     max_pages: int = 99999,
 ) -> List[dict]:
     """
-    Fetches RMA pages from ReturnGO API, aggregates all pages up to `max_pages`.
-    Respects the rate limiter and handles HTTP 429/5xx responses.
-    Returns a list of RMA dicts.
+    Fetches RMA pages from ReturnGO API using the correct endpoint structure.
     """
     all_rmas = []
     session = get_requests_session()
     page = 1
+    cursor = None
 
     while page <= max_pages:
         returngo_limiter.wait_if_needed()
-        params = {"store": store_url, "page": str(page)}
+        
+        # Build params according to API spec
+        params = {
+            "pagesize": "100"
+        }
+        
+        if cursor:
+            params["cursor"] = cursor
+        
         if status:
             params["status"] = status
+            
         if start_date:
-            params["start_date"] = start_date
+            params["rma_created_at"] = f"gte:{start_date}"
+            
         if end_date:
-            params["end_date"] = end_date
+            params["rma_updated_at"] = f"lte:{end_date}"
 
         try:
             start_time = time.time()
             resp = session.get(
-                api_url,
+                "https://api.returngo.ai/rmas",
                 headers={
                     "Authorization": f"Bearer {api_key}",
+                    "x-shop-name": store_url,
                     "Content-Type": "application/json",
                 },
                 params=params,
@@ -503,12 +513,19 @@ def fetch_returngo_rmas(
             resp.raise_for_status()
             data = resp.json()
             rmas = data.get("rmas", [])
+            
             if not rmas:
                 logger.info(f"No more RMAs on page {page}. Ending fetch.")
                 break
 
             all_rmas.extend(rmas)
             logger.info(f"Page {page}: fetched {len(rmas)} RMAs (total so far: {len(all_rmas)})")
+            
+            # Check for cursor to continue pagination
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+                
             page += 1
 
         except requests.exceptions.HTTPError as http_err:
@@ -526,16 +543,16 @@ def get_rma_by_id(api_key: str, store_url: str, rma_id: str) -> Optional[dict]:
     """Fetches a single RMA by ID from ReturnGO."""
     returngo_limiter.wait_if_needed()
     session = get_requests_session()
-    params = {"store": store_url, "rma_id": rma_id}
+    
     try:
         start_time = time.time()
         resp = session.get(
-            api_url,
+            f"https://api.returngo.ai/rma/{rma_id}",
             headers={
                 "Authorization": f"Bearer {api_key}",
+                "x-shop-name": store_url,
                 "Content-Type": "application/json",
             },
-            params=params,
             timeout=60,
         )
         api_time = time.time() - start_time
@@ -544,24 +561,24 @@ def get_rma_by_id(api_key: str, store_url: str, rma_id: str) -> Optional[dict]:
         update_rate_limit_info(resp.headers)
         resp.raise_for_status()
         data = resp.json()
-        rmas = data.get("rmas", [])
-        return rmas[0] if rmas else None
+        return data
     except Exception as e:
         logger.error(f"Error fetching RMA {rma_id}: {e}", exc_info=True)
         return None
 
 
-def post_rma_comment(api_key: str, rma_id: str, comment_text: str) -> bool:
+def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: str) -> bool:
     """Posts a comment to a specific RMA. Returns True if successful."""
     returngo_limiter.wait_if_needed()
     session = get_requests_session()
-    payload = {"rma_id": rma_id, "comment": comment_text}
+    payload = {"comment": comment_text}
     try:
         start_time = time.time()
         resp = session.post(
-            RMA_COMMENT_PATH,
+            f"https://api.returngo.ai/rma/{rma_id}/comment",
             headers={
                 "Authorization": f"Bearer {api_key}",
+                "x-shop-name": store_url,
                 "Content-Type": "application/json",
             },
             json=payload,
@@ -624,8 +641,6 @@ def compute_incremental_time_window() -> Tuple[Optional[str], Optional[str]]:
 def sync_all_active_rmas(api_key: str, store_url: str, incremental: bool = True):
     """
     Syncs active RMAs (Pending, Approved, Received) with the database.
-    If incremental=True, uses a time window overlap to capture recent updates.
-    Otherwise, fetches everything anew.
     """
     logger.info(f"Starting sync_all_active_rmas. incremental={incremental}")
     start_date, end_date = compute_incremental_time_window() if incremental else (None, None)
@@ -644,9 +659,9 @@ def sync_all_active_rmas(api_key: str, store_url: str, incremental: bool = True)
     logger.info(f"Total RMAs fetched across all active statuses: {len(all_rmas_batch)}")
 
     for rma_data in all_rmas_batch:
-        rma_id = rma_data.get("id")
+        rma_id = rma_data.get("rmaId")
         status_str = rma_data.get("status")
-        created_str = rma_data.get("created_at")
+        created_str = rma_data.get("createdAt")
         created_dt = safe_parse_date_iso(created_str)
         upsert_rma_to_db(
             rma_id=rma_id,
@@ -668,7 +683,7 @@ def refresh_single_rma(api_key: str, store_url: str, rma_id: str):
         logger.warning(f"No data returned for RMA {rma_id}.")
         return
     status_str = rma_data.get("status")
-    created_str = rma_data.get("created_at")
+    created_str = rma_data.get("createdAt")
     created_dt = safe_parse_date_iso(created_str)
     upsert_rma_to_db(
         rma_id=rma_id,
@@ -682,8 +697,7 @@ def refresh_single_rma(api_key: str, store_url: str, rma_id: str):
 
 def refresh_courier_statuses_for_approved(api_key: str, store_url: str):
     """
-    Refreshes courier tracking for Approved RMAs that have a tracking number
-    and haven't been checked in the last COURIER_REFRESH_HOURS.
+    Refreshes courier tracking for Approved RMAs.
     """
     logger.info("Starting refresh of courier statuses for Approved RMAs.")
     df = fetch_all_from_db()
@@ -757,9 +771,9 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df["json_data"] = df["json_data"].apply(parse_json)
 
-    # Extract fields
+    # Extract fields using correct API field names
     df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "orderName", "-"))
-    df["requested_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "created_at")))
+    df["requested_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "createdAt")))
     df["approved_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "approvedDate")))
     df["received_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "receivedDate")))
     df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "returnLabel.trackingNumber", ""))
@@ -910,7 +924,7 @@ def show_rma_actions_dialog(row_data: pd.Series):
         comment_text = st.text_area("Enter your comment:", key=f"comment_text_{rma_id}")
         if st.button("Submit Comment", key=f"submit_comment_{rma_id}"):
             if comment_text.strip():
-                success = post_rma_comment(MY_API_KEY, rma_id, comment_text)
+                success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
                 if success:
                     st.success("Comment posted!")
                     append_ops_log(f"Posted comment to RMA {rma_id}")
@@ -988,6 +1002,59 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[mask]
 
     return filtered
+
+
+def apply_additional_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply additional filters from the filter bar."""
+    if df.empty:
+        return df
+    
+    filtered = df.copy()
+    
+    # Status filter
+    status_multi = st.session_state.get("status_multi", [])
+    if status_multi:
+        filtered = filtered[filtered["status"].isin(status_multi)]
+    
+    # Resolution type filter
+    res_multi = st.session_state.get("res_multi", [])
+    if res_multi:
+        filtered = filtered[filtered["resolution_type"].isin(res_multi)]
+    
+    # Resolution actioned filter
+    actioned_multi = st.session_state.get("actioned_multi", [])
+    if actioned_multi:
+        if set(actioned_multi) == {"Yes"}:
+            filtered = filtered[filtered["resolution_actioned"].str.lower() == "yes"]
+        elif set(actioned_multi) == {"No"}:
+            filtered = filtered[filtered["resolution_actioned"].str.lower() != "yes"]
+    
+    # Tracking status filter
+    tracking_multi = st.session_state.get("tracking_multi", [])
+    if tracking_multi:
+        filtered = filtered[filtered["tracking_status"].isin(tracking_multi)]
+    
+    # Search query
+    search_query = st.session_state.get("search_query_input", "").strip()
+    if search_query:
+        search_lower = search_query.lower()
+        mask = (
+            filtered["rma_id"].astype(str).str.lower().str.contains(search_lower, na=False) |
+            filtered["order_name"].astype(str).str.lower().str.contains(search_lower, na=False) |
+            filtered["tracking_number"].astype(str).str.lower().str.contains(search_lower, na=False)
+        )
+        filtered = filtered[mask]
+    
+    return filtered
+
+
+def clear_all_filters():
+    """Clear all filter selections."""
+    st.session_state.status_multi = []
+    st.session_state.res_multi = []
+    st.session_state.actioned_multi = []
+    st.session_state.tracking_multi = []
+    st.session_state.search_query_input = ""
 
 # ==========================================
 # 12. STREAMLIT UI - CSS STYLING
@@ -1324,30 +1391,33 @@ def main():
 
     # REQUESTED TIMELINE GRAPH
     st.markdown("---")
-    st.subheader("Requested Timeline")
+    st.markdown("### 📅 Requested Timeline")
     
-    # Filter for Total Open RMAs
-    total_open_df = df_enriched[df_enriched["status"].str.lower().isin(["pending", "approved", "received"])].copy()
-    
-    if not total_open_df.empty and "requested_date" in total_open_df.columns:
-        # Extract date only (no time)
-        total_open_df["request_date_only"] = pd.to_datetime(total_open_df["requested_date"]).dt.date
+    # Filter for active statuses (Total Open RMAs)
+    if not df_enriched.empty and "requested_date" in df_enriched.columns and "status" in df_enriched.columns:
+        timeline_df = df_enriched[df_enriched["status"].isin(ACTIVE_STATUSES)].copy()
+        timeline_df["_req_date_parsed"] = pd.to_datetime(timeline_df["requested_date"], errors="coerce")
+        timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
         
-        # Group by date and count
-        timeline_data = total_open_df.groupby("request_date_only").size().reset_index(name="count")
-        timeline_data = timeline_data.sort_values("request_date_only")
-        
-        # Create the line chart
-        st.line_chart(timeline_data.set_index("request_date_only")["count"], use_container_width=True)
+        if not timeline_df.empty:
+            date_counts = (
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)
+                .size()
+                .reset_index(name="Count")
+            )
+            date_counts.columns = ["Date", "Count"]
+            st.line_chart(date_counts.set_index("Date"), height=300)
+        else:
+            st.info("No valid requested dates found for charting.")
     else:
         st.info("No data available for Requested Timeline")
 
     # RMA Command Center
     st.markdown("---")
-    st.subheader("RMA Command Center")
+    st.markdown("### 📊 RMA Command Center")
 
     # RMA Details section (formerly Performance Metrics)
-    st.markdown("### RMA Details")
+    st.markdown("#### RMA Details")
     
     # Create metric cards in grid layout
     metric_cols = st.columns(4)
@@ -1550,6 +1620,49 @@ def main():
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
+    # Search bar and View All button
+    st.markdown("---")
+    sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
+    with sc1:
+        st.text_input(
+            "Search",
+            placeholder="🔍 Search Order, RMA, or Tracking...",
+            label_visibility="collapsed",
+            key="search_query_input",
+        )
+    with sc3:
+        if st.button("📋 View All", use_container_width=True):
+            st.session_state.active_filter = "All"
+            clear_all_filters()
+            st.rerun()
+
+    # Additional filters expander
+    with st.expander("Additional filters", expanded=False):
+        c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 2], vertical_alignment="center")
+        
+        with c1:
+            st.multiselect("Status", options=ACTIVE_STATUSES, key="status_multi")
+        
+        with c2:
+            res_opts = []
+            if not df_enriched.empty and "resolution_type" in df_enriched.columns:
+                res_opts = sorted([
+                    x for x in df_enriched["resolution_type"].dropna().unique().tolist() 
+                    if x and x != "-"
+                ])
+            st.multiselect("Resolution type", options=res_opts, key="res_multi")
+        
+        with c3:
+            st.multiselect("Resolution actioned", options=["Yes", "No"], key="actioned_multi")
+        
+        with c4:
+            st.multiselect("Tracking Status", options=COURIER_STATUS_OPTIONS, key="tracking_multi")
+        
+        with c5:
+            if st.button("🧼 Clear filters", use_container_width=True):
+                clear_all_filters()
+                st.rerun()
+
     # Data table
     st.markdown("---")
     st.subheader("RMA Data Table")
@@ -1561,9 +1674,11 @@ def main():
             st.session_state.active_filter = "All"
             st.rerun()
 
+    # Apply both main filter and additional filters
     df_filtered = apply_filters(df_enriched)
+    df_filtered = apply_additional_filters(df_filtered)
     
-    # Display columns (removed DisplayTrack, is_cc, is_f)
+    # Display columns (removed DisplayTrack, is_cc, is_fg)
     display_cols = [
         "No",
         "RMA ID",
@@ -1586,7 +1701,7 @@ def main():
         display_df.insert(0, "No", range(1, len(display_df) + 1))
         
         # Rename columns for display
-        display_df.rename(columns={
+        display_df = display_df.rename(columns={
             "rma_id": "RMA ID",
             "order_name": "Order",
             "status": "Current Status",
@@ -1598,7 +1713,7 @@ def main():
             "days_since_requested": "Days since requested",
             "resolution_type": "resolutionType",
             "resolution_actioned": "Resolution actioned",
-        }, inplace=True)
+        })
         
         # Format dates
         for col in ["Requested date", "Approved date", "Received date"]:
@@ -1617,7 +1732,7 @@ def main():
         # Create tracking links
         display_df["Tracking Number"] = display_df.apply(
             lambda row: f"https://tracking.pngo.co.za/track?ref={row['Tracking Number']}" 
-            if row.get("Tracking Number") and row["Tracking Number"] != "" 
+            if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
             else "-",
             axis=1
         )
@@ -1763,7 +1878,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         """Applies highlighting to rows based on a set of problem conditions."""
         highlight = False
 
-        # Note: We removed DisplayTrack, is_cc, is_fg columns, so check failures instead
+        # Check failures column
         if row.get("failures"):
             highlight = True
 
