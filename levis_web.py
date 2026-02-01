@@ -509,16 +509,18 @@ def extract_status_from_comments(comments: list) -> Optional[str]:
     return None
 
 
-def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
+def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
     """
     Scrapes the Parcel Ninja website to get the latest tracking status.
     Handles both plain text and HTML table responses.
     """
-    if not tracking_number:
+    if not tracking_url:
         return None
     
-    url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
-    
+    # Use the provided tracking URL directly
+    url = tracking_url
+    tracking_number = url.split('/')[-1] # For logging purposes
+
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
@@ -556,22 +558,25 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
     return None
 
 
-def get_shipment_status(rma_data: dict, tracking_number: str) -> Optional[str]:
+def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
     Gets the shipment status using multiple methods in order of preference:
     1. From web scraping Parcel Ninja (for the most up-to-date status)
     2. From shipment status in API data (as a fallback)
     3. From RMA comments (as a final fallback)
     """
+    shipments = safe_get(rma_data, "shipments", [])
+    tracking_url = safe_get(shipments, "0.trackingURL") if shipments else None
+    tracking_number = safe_get(shipments, "0.trackingNumber") if shipments else None
+
     # Method 1 (NEW PRIORITY): Scrape Parcel Ninja website for the latest status.
-    if tracking_number:
-        scraped_status = scrape_parcel_ninja_status(tracking_number)
+    if tracking_url:
+        scraped_status = scrape_parcel_ninja_status(tracking_url)
         if scraped_status:
-            logger.debug(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number}")
+            logger.debug(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
             return scraped_status
 
     # Method 2 (Fallback): Check shipment status from API data.
-    shipments = safe_get(rma_data, "shipments", [])
     if shipments:
         shipment_status = shipments[0].get("status")
         if shipment_status:
@@ -586,14 +591,14 @@ def get_shipment_status(rma_data: dict, tracking_number: str) -> Optional[str]:
             }
             mapped_status = status_map.get(shipment_status)
             if mapped_status:
-                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number}")
+                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number or 'N/A'}")
                 return mapped_status
     
     # Method 3 (Final Fallback): Check comments for status updates.
     comments = safe_get(rma_data, "comments", [])
     comment_status = extract_status_from_comments(comments)
     if comment_status:
-        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number}")
+        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number or 'N/A'}")
         return comment_status
     
     return None
@@ -656,12 +661,12 @@ def fetch_and_cache_data() -> pd.DataFrame:
         status = safe_get(rma_detail, "rmaSummary.status") or rma_detail.get("status", "")
         
         # Get courier status for Approved RMAs with tracking
-
         courier_status = None
-        if status.lower() == "approved" and tracking_number:
-            courier_status = get_shipment_status(rma_detail, tracking_number)
-            if courier_status:
-                rma_detail['courier_status'] = courier_status
+        if status.lower() == "approved":
+            courier_status = get_shipment_status(rma_detail)
+        
+        if courier_status:
+            rma_detail['courier_status'] = courier_status
         
         rma_detail['courier_status'] = courier_status
         # Structure the data for the DataFrame
@@ -1768,8 +1773,8 @@ def main():
         )
         
         # Create tracking links
-        display_df["Tracking Number"] = display_df.apply(
-            lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
+        display_df["Tracking Number"] = display_df.apply( # type: ignore
+            lambda row: f"https://optimise.parcelninja.com/shipment/track?WaybillNo={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
             else "-",
             axis=1
@@ -1791,12 +1796,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)"),
-        "Tracking Number": st.column_config.LinkColumn(
-            "Tracking Number", 
-            display_text=".*",
-            help="Click to track on Parcel Ninja"
-        ),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"WaybillNo=(.*)", help="Click to track on Parcel Ninja"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1822,7 +1822,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r"ref=(.*)"},
         "Tracking Number": {"display_text": r"WaybillNo=(.*)"},
     }
 
@@ -1833,7 +1832,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
             if key in link_column_configs:
                 column_config[key] = st.column_config.LinkColumn(
                     key,
-                    key, # type: ignore
                     display_text=link_column_configs[key]["display_text"],
                     width=width,
                 )
@@ -1843,14 +1841,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
                     width=width,
                 )
     else:
-        # Create tracking links for the base config
-        table_df["Tracking Number"] = table_df["Tracking Number"].apply(
-            lambda tn: f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tn}"
-            if tn and tn != "-"
-            else "-"
-        )
-        base_column_config["Tracking Number"] = st.column_config.LinkColumn("Tracking Number", display_text=r"WaybillNo=(.*)")
-
         column_config = base_column_config
 
     total_rows = len(table_df)
@@ -1949,8 +1939,8 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         height=700,
         hide_index=True,
         column_config=column_config,
-        on_select="rerun",
-        selection_mode="single-row", # type: ignore
+        on_select="rerun", # type: ignore
+        selection_mode="single-row",
         key="rma_table",
     )
 
