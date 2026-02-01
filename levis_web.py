@@ -317,7 +317,7 @@ def fetch_returngo_rmas(
             resp = session.get(
                 "https://api.returngo.ai/rmas",
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "x-api-key": api_key,
                     "x-shop-name": store_url,
                     "Content-Type": "application/json",
                 },
@@ -375,7 +375,7 @@ def get_rma_by_id(api_key: str, store_url: str, rma_id: str) -> Optional[dict]:
         resp = session.get(
             f"https://api.returngo.ai/rma/{rma_id}",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "x-api-key": api_key,
                 "x-shop-name": store_url,
                 "Content-Type": "application/json",
             },
@@ -403,7 +403,7 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
         resp = session.post(
             f"https://api.returngo.ai/rma/{rma_id}/comment",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "x-api-key": api_key,
                 "x-shop-name": store_url,
                 "Content-Type": "application/json",
             },
