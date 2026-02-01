@@ -445,6 +445,26 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
 # ==========================================
 # 6. DATA FETCHING AND CACHING
 # ==========================================
+def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
+    """Scrapes the Parcel Ninja website to get the latest tracking status."""
+    if not tracking_number:
+        return None
+    
+    url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        
+        # Find the first row of the tracking table and extract the status
+        match = re.search(r'<td>([A-Za-z\s]+)</td>', response.text)
+        if match:
+            return match.group(1).strip()
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+        
+    return None
+
 @st.cache_data(ttl=43200)
 def fetch_and_cache_data() -> pd.DataFrame:
     """
@@ -484,11 +504,11 @@ def fetch_and_cache_data() -> pd.DataFrame:
         rma_detail = rma_summary
 
         # Fetch and add courier status for 'Approved' RMAs
-        tracking_number = safe_get(rma_detail, "returnLabel.trackingNumber")
-        if rma_detail.get("status", "").lower() == "approved" and tracking_number and PARCEL_NINJA_TOKEN:
-            pn_data = fetch_parcel_ninja_tracking(tracking_number, PARCEL_NINJA_TOKEN)
-            if pn_data:
-                rma_detail['courier_status'] = pn_data.get("status")
+        tracking_number = safe_get(rma_detail, "shipments.0.trackingNumber")
+        if rma_detail.get("status", "").lower() == "approved" and tracking_number:
+            courier_status = scrape_parcel_ninja_status(tracking_number)
+            if courier_status:
+                rma_detail['courier_status'] = courier_status
         
         # Structure the data for the DataFrame
         return {
@@ -518,43 +538,11 @@ def fetch_and_cache_data() -> pd.DataFrame:
     df = pd.DataFrame(processed_results)
     return df
 
-def fetch_parcel_ninja_tracking(tracking_number: str, token: str) -> Optional[dict]:
-    """Fetches tracking info from Parcel Ninja."""
-    if not token or not tracking_number:
-        return None
-    session = get_requests_session()
-    try:
-        url = f"https://api.shiplogic.com/v2/tracking/{tracking_number}"
-        resp = session.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Error fetching PN tracking for {tracking_number}: {e}", exc_info=True)
-        return None
+
 
 # ==========================================
 # 8. DATA FRAME ENRICHMENT
 # ==========================================
-def get_received_date_from_comment(rma_data: dict) -> Optional[datetime]:
-    """Extracts the received date from the comments."""
-    comments = safe_get(rma_data, "comments", [])
-    for comment in comments:
-        if "Shipment <strong>RECEIVED</strong>" in comment.get("htmlText", ""):
-            return safe_parse_date_iso(comment.get("datetime"))
-    return None
-
-def get_requested_date_from_comment(rma_data: dict) -> Optional[datetime]:
-    """Extracts the requested date from the comments."""
-    comments = safe_get(rma_data, "comments", [])
-    for comment in comments:
-        if "Request SUBMITTED" in comment.get("htmlText", ""):
-            return safe_parse_date_iso(comment.get("datetime"))
-    return None
-
 def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Enriches the raw DB dataframe with derived columns and classifications.
@@ -564,37 +552,23 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    # The 'json_data' column is now always a dict from the fetcher.
-    # No need to parse from string anymore.
+    def get_comment_date(comments: list, text_to_find: str) -> Optional[datetime]:
+        for comment in comments:
+            if text_to_find in comment.get("htmlText", ""):
+                return safe_parse_date_iso(comment.get("datetime"))
+        return None
 
-    # Extract fields using correct API field names
-    df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "orderName", "-"))
-    df["requested_date"] = df["json_data"].apply(lambda x: get_requested_date_from_comment(x))
-    df["approved_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "approvedDate")))
-    df["received_date"] = df["json_data"].apply(lambda x: get_received_date_from_comment(x))
-    df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "returnLabel.trackingNumber", ""))
-    df["resolution_type"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionType", ""))
-    df["resolution_actioned"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionActioned", ""))
     df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "rmaSummary.order_name", "-"))
-    df["requested_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_CREATED"))
-    df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
-    df["received_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_STATUS_UPDATED")) # Assuming status update to Received
-    
-    # Tracking number is in the first shipment
     df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "shipments.0.trackingNumber", ""))
-
-    # Resolution type can be multiple, so we'll join them
+    df["requested_date"] = df["json_data"].apply(lambda x: get_comment_date(safe_get(x, "comments", []), "Request SUBMITTED"))
+    df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
+    df["received_date"] = df["json_data"].apply(lambda x: get_comment_date(safe_get(x, "comments", []), "Shipment <strong>RECEIVED</strong>"))
     df["resolution_type"] = df["json_data"].apply(lambda x: ", ".join(get_resolution_types(x)) or "-")
-
-    # Resolution actioned is based on successful transactions or exchange orders
     df["resolution_actioned"] = df["json_data"].apply(
         lambda x: "Yes" if safe_get(x, "transactions") or safe_get(x, "exchangeOrders") else "No"
     )
-
-    # Days since requested
     df["days_since_requested"] = df["requested_date"].apply(compute_days_since)
 
-    # Tracking status classification
     def classify_tracking_status(row):
         courier_status = row.get("courier_status", "")
         status = row.get("status", "")
@@ -610,23 +584,19 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
 
-    # DisplayTrack for filtering
     df["DisplayTrack"] = df.apply(
         lambda r: bool(r.get("tracking_number")) and r.get("status", "").lower() in ["approved", "received"],
         axis=1
     )
 
-    # Check for tracking update comment
     df["Is_tracking_updated"] = df["json_data"].apply(has_tracking_update_comment)
 
-    # Flags
     df["is_cc"] = df["tracking_status"].str.lower().str.contains("cancelled", case=False, na=False)
     df["is_fg"] = df.apply(
         lambda r: (r.get("status", "").lower() in ["approved", "received"]) and not r.get("DisplayTrack", False),
         axis=1
     )
 
-    # Failure detection
     def detect_failures(row):
         failures = []
         status = row.get("status", "")
