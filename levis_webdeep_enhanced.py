@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text, Engine
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List, Literal
 from returngo_api import api_url, RMA_COMMENT_PATH
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 import pickle
 from pathlib import Path
@@ -42,27 +42,17 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 @dataclass
 class UserSettings:
     theme: str = "dark"  # dark, light, auto
-    favorites: List[str] = None
-    export_presets: Dict[str, Dict] = None
+    favorites: List[str] = field(default_factory=list)
+    export_presets: Dict[str, Dict] = field(default_factory=dict)
     performance_metrics: bool = True
     keyboard_shortcuts: bool = True
-    
-    def __post_init__(self):
-        if self.favorites is None:
-            self.favorites = []
-        if self.export_presets is None:
-            self.export_presets = {}
 
 @dataclass
 class PerformanceMetrics:
-    api_call_times: List[float] = None
+    api_call_times: List[float] = field(default_factory=list)
     cache_hit_rate: float = 0.0
     last_sync_duration: float = 0.0
     avg_response_time: float = 0.0
-    
-    def __post_init__(self):
-        if self.api_call_times is None:
-            self.api_call_times = []
 
 class Theme(Enum):
     DARK = "dark"
@@ -3547,7 +3537,7 @@ def main():
         key=table_key,
     )
 
-    sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and hasattr(sel_event.selection, "rows") else []) or []
+    sel_rows = sel_event.get("selection", {}).get("rows", []) if isinstance(sel_event, dict) else []
     if sel_rows:
         if st.session_state.pop("suppress_row_dialog", False):
             table_state = st.session_state.get(table_key, {})
