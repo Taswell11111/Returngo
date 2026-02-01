@@ -1939,64 +1939,45 @@ def render_enhanced_tile(col, name: str, refresh_scope: str, semantic_label: str
     urgency = urgency_levels.get(name, "neutral")
     
     with col:
-        # Main tile container
-        tile_html = f"""
-        <div class="enhanced-tile {urgency} {'selected' if is_selected else ''} {'favorite' if is_favorite else ''}">
-            <div class="tile-header">
-                <span class="tile-icon">{icon}</span>
-                <span class="tile-title">{semantic_label}</span>
-                <span class="tile-badge">{count_val}</span>
-            </div>
-            
-            <div class="tile-body">
-                <div class="tile-meta">
-                    <span class="time-ago">Updated {time_ago_str}</span>
-                    <div class="tile-actions">
-                        <button class="tile-btn secondary" onclick="handleTileAction('{name}', 'refresh')">⟳</button>
-                        <button class="tile-btn secondary" onclick="handleTileAction('{name}', 'favorite')">
-                            {'★' if is_favorite else '☆'}
-                        </button>
-                    </div>
-                </div>
-                
-                <div class="tile-actions">
-                    <button class="tile-btn {'active' if is_selected else ''}" 
-                            onclick="handleTileAction('{name}', 'view')">
-                        {'✓ VIEWING' if is_selected else 'VIEW DETAILS'}
-                    </button>
-                </div>
-            </div>
+        st.markdown(f"<div class='enhanced-tile {urgency} {'selected' if is_selected else ''} {'favorite' if is_favorite else ''}'>", unsafe_allow_html=True)
+        
+        # Header
+        st.markdown(f"""
+        <div class="tile-header">
+            <span class="tile-icon">{icon}</span>
+            <span class="tile-title">{semantic_label}</span>
+            <span class="tile-badge">{count_val}</span>
         </div>
-        """
-        
-        st.markdown(tile_html, unsafe_allow_html=True)
-        
-        # Add JavaScript for tile actions
-        components.html(
-            f"""
-            <script>
-            function handleTileAction(tileName, action) {{
-                if (action === 'view') {{
-                    window.parent.postMessage({{
-                        type: 'streamlit:setComponentValue',
-                        value: {{tileName: tileName, action: 'view'}}
-                    }}, '*');
-                }} else if (action === 'refresh') {{
-                    window.parent.postMessage({{
-                        type: 'streamlit:setComponentValue',
-                        value: {{tileName: tileName, action: 'refresh'}}
-                    }}, '*');
-                }} else if (action === 'favorite') {{
-                    window.parent.postMessage({{
-                        type: 'streamlit:setComponentValue',
-                        value: {{tileName: tileName, action: 'favorite'}}
-                    }}, '*');
-                }}
-            }}
-            </script>
-            """,
-            height=0
-        )
+        """, unsafe_allow_html=True)
+
+        # Body
+        st.markdown('<div class="tile-body">', unsafe_allow_html=True)
+
+        # Meta row with actions
+        meta_cols = st.columns([2, 1])
+        with meta_cols[0]:
+            st.markdown(f'<div class="tile-meta"><span class="time-ago">Updated {time_ago_str}</span></div>', unsafe_allow_html=True)
+        with meta_cols[1]:
+            action_cols = st.columns(2)
+            with action_cols[0]:
+                if st.button("⟳", key=f"refresh_{name}", help="Refresh this category"):
+                    force_refresh_rma_ids(ids_for_filter(name), refresh_scope)
+            with action_cols[1]:
+                if st.button('★' if is_favorite else '☆', key=f"fav_{name}", help="Toggle favorite"):
+                    if is_favorite:
+                        st.session_state.user_settings.favorites.remove(name)
+                    else:
+                        st.session_state.user_settings.favorites.append(name)
+                    save_user_settings(st.session_state.user_settings)
+                    st.rerun()
+
+        # View Details Button
+        button_label = "✓ VIEWING" if is_selected else "VIEW DETAILS"
+        if st.button(button_label, key=f"view_{name}", use_container_width=True):
+            toggle_filter(name)
+
+        st.markdown('</div>', unsafe_allow_html=True) # close tile-body
+        st.markdown('</div>', unsafe_allow_html=True) # close enhanced-tile
 
 
 def render_summary_bar():
