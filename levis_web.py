@@ -514,10 +514,10 @@ def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
         
         if matches:
             # The most recent status is the first one found.
-            # The status text is in the second captured group.
-            status = matches[0][1].strip()
-            logger.info(f"Scraped status '{status}' for tracking {tracking_number} using text regex")
-            return status
+            # Captures: "Fri, 05 Dec 18:11" + " " + "Courier Cancelled"
+            full_status = f"{matches[0][0]} {matches[0][1].strip()}"
+            logger.info(f"Scraped status '{full_status}' for tracking {tracking_number} using text regex")
+            return full_status
 
         # Fallback to parsing as an HTML table if the text regex fails.
         html_pattern = re.compile(r"""
@@ -1756,7 +1756,7 @@ def main():
         
         # Create tracking links
         display_df["Tracking Number"] = display_df.apply( # type: ignore
-            lambda row: f"https://optimise.parcelninja.com/shipment/track?WaybillNo={row['Tracking Number']}" 
+            lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
             else "-",
             axis=1
