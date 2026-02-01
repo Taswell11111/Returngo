@@ -63,9 +63,9 @@ def push_tracking_update(rma_id, shipment_id, new_tracking, store_url):
 
 # --- Main execution logic ---
 if __name__ == "__main__":
-    target_rma_id = "9875594"
-    new_tracking_number = "OPT-338683449"
-    store_url_to_use = "diesel-dev-south-africa.myshopify.com"
+    target_rma_id = "9146216"
+    new_tracking_number = "OPT-300999299"
+    store_url_to_use = "reebok-dev-south-africa.myshopify.com"
 
     print(f"Attempting to fetch details for RMA {target_rma_id} from store {store_url_to_use}")
 
