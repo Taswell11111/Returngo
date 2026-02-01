@@ -217,7 +217,11 @@ def compute_days_since(from_date: Optional[datetime]) -> int:
 
 def get_event_date(rma_data: dict, event_name: str) -> Optional[datetime]:
     """Extracts the date for a specific event from the RMA events list."""
-    events = safe_get(rma_data, "rmaSummary.events", [])
+    # Check both top-level events and rmaSummary.events
+    events = rma_data.get("events", [])
+    if not events:
+        events = safe_get(rma_data, "rmaSummary.events", [])
+    
     for event in events:
         if event.get("eventName") == event_name:
             return safe_parse_date_iso(event.get("eventDate"))
@@ -369,7 +373,7 @@ def fetch_returngo_rmas(
             logger.info(f"Page {page}: fetched {len(rmas)} RMAs (total so far: {len(all_rmas)})")
             
             # Check for cursor to continue pagination
-            cursor = data.get("cursor")
+            cursor = data.get("next_cursor")
             if not cursor:
                 break
                 
@@ -477,6 +481,7 @@ def fetch_and_cache_data() -> pd.DataFrame:
         return pd.DataFrame()
 
     logger.info("Cache miss. Fetching all active RMAs from ReturnGO API...")
+    sync_start = time.time()
     st.session_state.last_sync_time = datetime.now(timezone.utc)
 
     # 1. Fetch RMA lists for all active statuses
@@ -493,19 +498,23 @@ def fetch_and_cache_data() -> pd.DataFrame:
 
     def process_rma(rma_summary: dict) -> Optional[dict]:
         """
-        Processes a single RMA summary, enriches it with courier status if applicable.
-        Note: This version assumes the list endpoint provides sufficient detail.
-        A full detail fetch per RMA can be added here if necessary.
+        Processes a single RMA summary, fetches full details, and enriches with courier status.
         """
         rma_id = rma_summary.get("rmaId")
         if not rma_id:
             return None
 
-        rma_detail = rma_summary
+        # Fetch full RMA details
+        rma_detail = get_rma_by_id(MY_API_KEY, STORE_URL, rma_id)
+        if not rma_detail:
+            # Fallback to summary data if detail fetch fails
+            rma_detail = rma_summary
 
         # Fetch and add courier status for 'Approved' RMAs
         tracking_number = safe_get(rma_detail, "shipments.0.trackingNumber")
-        if rma_detail.get("status", "").lower() == "approved" and tracking_number:
+        status = safe_get(rma_detail, "rmaSummary.status") or rma_detail.get("status", "")
+        
+        if status.lower() == "approved" and tracking_number:
             courier_status = scrape_parcel_ninja_status(tracking_number)
             if courier_status:
                 rma_detail['courier_status'] = courier_status
@@ -513,8 +522,8 @@ def fetch_and_cache_data() -> pd.DataFrame:
         # Structure the data for the DataFrame
         return {
             "rma_id": rma_id,
-            "store_url": rma_detail.get("storeUrl"),
-            "status": rma_detail.get("status"),
+            "store_url": safe_get(rma_detail, "rmaSummary.storeUrl") or rma_detail.get("storeUrl"),
+            "status": status,
             "created_at": safe_parse_date_iso(rma_detail.get("createdAt")),
             "json_data": rma_detail,  # The full object is the "json_data"
             "courier_status": rma_detail.get('courier_status'), # From Parcel Ninja
@@ -536,6 +545,13 @@ def fetch_and_cache_data() -> pd.DataFrame:
 
     # 3. Convert to DataFrame and return
     df = pd.DataFrame(processed_results)
+    
+    # Update sync duration
+    sync_duration = time.time() - sync_start
+    metrics = load_performance_metrics()
+    metrics.last_sync_duration = sync_duration
+    save_performance_metrics(metrics)
+    
     return df
 
 
@@ -560,19 +576,44 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 return safe_parse_date_iso(comment.get("datetime"))
         return None
 
-    df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "rmaSummary.order_name", "-"))
+    # Extract order_name from multiple possible locations
+    def extract_order_name(json_data: dict) -> str:
+        # Try rmaSummary.order_name first
+        order_name = safe_get(json_data, "rmaSummary.order_name")
+        if order_name:
+            return order_name
+        # Try orderDetails.order_name
+        order_name = safe_get(json_data, "orderDetails.order_name")
+        if order_name:
+            return order_name
+        # Try top-level order_name (from list endpoint)
+        order_name = json_data.get("order_name")
+        if order_name:
+            return order_name
+        return "-"
     
-    def get_first_tracking(shipments: list) -> str:
-        if not shipments: return ""
+    df["order_name"] = df["json_data"].apply(extract_order_name)
+    
+    def get_first_tracking(json_data: dict) -> str:
+        shipments = safe_get(json_data, "shipments", [])
+        if not shipments:
+            return ""
         for s in shipments:
             if s and s.get("trackingNumber"):
                 return s.get("trackingNumber")
         return ""
-    df["tracking_number"] = df["json_data"].apply(lambda x: get_first_tracking(safe_get(x, "shipments", [])))
+    
+    df["tracking_number"] = df["json_data"].apply(get_first_tracking)
     df["requested_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_CREATED"))
     df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
     df["received_date"] = df["json_data"].apply(lambda x: get_event_date(x, "SHIPMENT_RECEIVED"))
-    df["resolution_type"] = df["json_data"].apply(lambda x: ", ".join(get_resolution_types(x)) or "-")
+    
+    def extract_resolution_types(json_data: dict) -> str:
+        res_types = get_resolution_types(json_data)
+        return ", ".join(res_types) if res_types else "-"
+    
+    df["resolution_type"] = df["json_data"].apply(extract_resolution_types)
+    
     df["resolution_actioned"] = df["json_data"].apply(
         lambda x: "Yes" if safe_get(x, "transactions") or safe_get(x, "exchangeOrders") else "No"
     )
@@ -860,25 +901,60 @@ def inject_custom_css():
     st.markdown(
         """
         <style>
-        /* Top header neon gradient */
+        /* Top header with blue-red gradient and sparkles */
         .main-header {
             background: linear-gradient(90deg, 
-                rgba(0, 255, 255, 0.3) 0%, 
-                rgba(0, 255, 0, 0.3) 33%, 
-                rgba(255, 0, 0, 0.3) 66%, 
-                rgba(0, 255, 255, 0.3) 100%);
+                rgba(0, 100, 255, 0.4) 0%, 
+                rgba(255, 0, 100, 0.4) 100%);
             padding: 20px;
             text-align: center;
             border-radius: 10px;
-            margin-bottom: 20px;
-            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            margin-bottom: 10px;
+            box-shadow: 0 0 30px rgba(0, 100, 255, 0.5), 0 0 30px rgba(255, 0, 100, 0.5);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .main-header::before {
+            content: '✨';
+            position: absolute;
+            font-size: 20px;
+            animation: sparkle 2s infinite;
+            left: 10%;
+            top: 20%;
+        }
+        
+        .main-header::after {
+            content: '✨';
+            position: absolute;
+            font-size: 20px;
+            animation: sparkle 2s infinite 1s;
+            right: 10%;
+            bottom: 20%;
+        }
+        
+        @keyframes sparkle {
+            0%, 100% { opacity: 0; }
+            50% { opacity: 1; }
         }
         
         .main-header h1 {
             color: #ffffff;
             font-weight: bold;
             margin: 0;
-            text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
+        }
+        
+        /* Connection status bar */
+        .connection-status {
+            background: rgba(20, 20, 20, 0.9);
+            border: 1px solid rgba(100, 100, 100, 0.3);
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+            color: #00ff00;
+            font-size: 14px;
         }
         
         /* Red neon power button */
@@ -979,8 +1055,8 @@ def inject_custom_css():
             box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
         }
         
-        /* Left panel navigation box */
-        .nav-panel {
+        /* API Details panel */
+        .api-panel {
             background: rgba(30, 30, 30, 0.9);
             border: 1px solid rgba(100, 100, 100, 0.5);
             border-radius: 10px;
@@ -988,13 +1064,29 @@ def inject_custom_css():
             margin-bottom: 15px;
         }
         
-        /* Sidebar arrow box */
-        .arrow-box {
-            background: rgba(40, 40, 40, 0.8);
-            border: 1px solid rgba(80, 80, 80, 0.6);
-            border-radius: 8px;
-            padding: 10px;
-            margin-bottom: 15px;
+        .api-panel h3 {
+            color: #00ccff;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .api-setting {
+            margin-bottom: 10px;
+            padding: 8px;
+            background: rgba(40, 40, 40, 0.6);
+            border-radius: 5px;
+        }
+        
+        .api-setting-label {
+            color: #aaaaaa;
+            font-size: 12px;
+            margin-bottom: 3px;
+        }
+        
+        .api-setting-value {
+            color: #00ff00;
+            font-weight: bold;
+            font-size: 14px;
         }
         
         /* Table actions */
@@ -1056,11 +1148,27 @@ def main():
     if "performance_metrics" not in st.session_state:
         st.session_state.performance_metrics = load_performance_metrics()
 
-    # Top header with neon gradient
+    # Top header with blue-red gradient and sparkles
     st.markdown(
         """
         <div class="main-header">
-            <h1>LEVI'S RETURNGO OPS DASHBOARD</h1>
+            <h1>✨ LEVI'S RETURNGO OPS DASHBOARD ✨</h1>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Connection status bar
+    last_sync_time = st.session_state.get("last_sync_time")
+    sync_time_display = (
+        last_sync_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+        if last_sync_time
+        else "N/A"
+    )
+    st.markdown(
+        f"""
+        <div class="connection-status">
+            🟢 Connected to store: <strong>{STORE_URL}</strong> | Last sync: <strong>{sync_time_display}</strong>
         </div>
         """,
         unsafe_allow_html=True
@@ -1068,11 +1176,39 @@ def main():
 
     # Sidebar
     with st.sidebar:
-        st.markdown("<div class='arrow-box'>", unsafe_allow_html=True)
-        st.markdown("### Navigation")
+        st.markdown("<div class='api-panel'>", unsafe_allow_html=True)
+        st.markdown("### 🔌 API Details")
+        
+        # API Settings
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Store URL</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{STORE_URL}</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         
-        st.markdown("<div class='nav-panel'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>API Key Status</div>", unsafe_allow_html=True)
+        api_status = "🟢 Active" if MY_API_KEY else "🔴 Missing"
+        st.markdown(f"<div class='api-setting-value'>{api_status}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Rate Limit (RPS)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{RG_RPS}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Cache TTL</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{CACHE_EXPIRY_HOURS}h</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Max Workers</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{MAX_WORKERS}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("---")
         
         # Power button (red neon)
         st.markdown(
@@ -1119,19 +1255,17 @@ def main():
         
         # Cache controls
         st.subheader("Cache Controls")
-        if st.button("🔄 Clear Cache & Refresh Data", use_container_width=True):
+        if st.button("🔄 Clear Cache & Refresh Data", width="stretch"):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
             st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        st.markdown("</div>", unsafe_allow_html=True)
-        
         st.markdown("---")
         
         # Activity log in terminal-style box
-        st.subheader("Activity Log")
+        st.subheader("📋 Activity Log")
         st.markdown("<div class='activity-log'>", unsafe_allow_html=True)
         if st.session_state.ops_log:
             log_text = "\n".join(st.session_state.ops_log[-20:])
@@ -1172,13 +1306,13 @@ def main():
     st.markdown("---")
     st.markdown("### 📊 RMA Command Center")
 
-    # RMA Details section (formerly Performance Metrics)
+    # RMA Details section
     st.markdown("#### RMA Details")
     
     # Create metric cards in grid layout
     metric_cols = st.columns(4)
     
-    # First row: Total Open, Pending, In Transit, Issues (with hover)
+    # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
         st.markdown(
             f"""
@@ -1190,7 +1324,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_total_open", use_container_width=True):
+        if st.button("View", key="btn_total_open", width="stretch"):
             st.session_state.active_filter = "All"
             st.rerun()
     
@@ -1205,7 +1339,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_pending", use_container_width=True):
+        if st.button("View", key="btn_pending", width="stretch"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
@@ -1220,7 +1354,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_in_transit", use_container_width=True):
+        if st.button("View", key="btn_in_transit", width="stretch"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
@@ -1236,7 +1370,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_issues", use_container_width=True):
+        if st.button("View", key="btn_issues", width="stretch"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1257,7 +1391,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_pending_req", use_container_width=True):
+        if st.button("Filter", key="btn_pending_req", width="stretch"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
@@ -1273,7 +1407,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_received", use_container_width=True):
+        if st.button("Filter", key="btn_received", width="stretch"):
             st.session_state.active_filter = "Received"
             st.rerun()
     
@@ -1289,7 +1423,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
+        if st.button("Filter", key="btn_courier_cancelled", width="stretch"):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
@@ -1305,7 +1439,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_submitted", use_container_width=True):
+        if st.button("Filter", key="btn_submitted", width="stretch"):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1324,7 +1458,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_delivered", use_container_width=True):
+        if st.button("Filter", key="btn_delivered", width="stretch"):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
@@ -1340,7 +1474,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
+        if st.button("Filter", key="btn_no_tracking", width="stretch"):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
@@ -1356,7 +1490,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
+        if st.button("Filter", key="btn_res_actioned", width="stretch"):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
@@ -1372,7 +1506,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
+        if st.button("Filter", key="btn_no_res_actioned", width="stretch"):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
@@ -1387,7 +1521,7 @@ def main():
             key="search_query_input",
         )
     with sc3:
-        if st.button("📋 View All", use_container_width=True):
+        if st.button("📋 View All", width="stretch"):
             st.session_state.active_filter = "All"
             clear_all_filters()
             st.rerun()
@@ -1415,7 +1549,7 @@ def main():
             st.multiselect("Tracking Status", options=COURIER_STATUS_OPTIONS, key="tracking_multi")
         
         with c5:
-            if st.button("🧼 Clear filters", use_container_width=True):
+            if st.button("🧼 Clear filters", width="stretch"):
                 clear_all_filters()
                 st.rerun()
 
@@ -1434,7 +1568,7 @@ def main():
     df_filtered = apply_filters(df_enriched)
     df_filtered = apply_additional_filters(df_filtered)
     
-    # Display columns (removed DisplayTrack, is_cc, is_fg)
+    # Display columns
     display_cols = [
         "No",
         "RMA ID",
@@ -1588,12 +1722,12 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     
     action_col1, action_col2 = st.columns([1, 1])
     with action_col1:
-        if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
+        if st.button("Data table log", key="btn_data_table_log", width="stretch"):
             st.session_state["suppress_row_dialog"] = True
             show_data_table_log()
     
     with action_col2:
-        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True):
+        if st.button("📋 Copy all", key="btn_copy_all", width="stretch"):
             st.session_state["copy_all_payload"] = tsv_text
             st.session_state["suppress_row_dialog"] = True
 
@@ -1649,7 +1783,8 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     table_key = "rma_table"
     sel_event = st.dataframe(
         styled_table,
-        use_container_width=True,
+        use_container_width=False,
+        width="stretch",
         height=700,
         hide_index=True,
         column_config=column_config,
