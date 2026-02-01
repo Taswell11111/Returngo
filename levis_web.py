@@ -553,16 +553,25 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     def get_comment_date(comments: list, text_to_find: str) -> Optional[datetime]:
+        if not comments:
+            return None
         for comment in comments:
             if text_to_find in comment.get("htmlText", ""):
                 return safe_parse_date_iso(comment.get("datetime"))
         return None
 
     df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "rmaSummary.order_name", "-"))
-    df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "shipments.0.trackingNumber", ""))
-    df["requested_date"] = df["json_data"].apply(lambda x: get_comment_date(safe_get(x, "comments", []), "Request SUBMITTED"))
+    
+    def get_first_tracking(shipments: list) -> str:
+        if not shipments: return ""
+        for s in shipments:
+            if s and s.get("trackingNumber"):
+                return s.get("trackingNumber")
+        return ""
+    df["tracking_number"] = df["json_data"].apply(lambda x: get_first_tracking(safe_get(x, "shipments", [])))
+    df["requested_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_CREATED"))
     df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
-    df["received_date"] = df["json_data"].apply(lambda x: get_comment_date(safe_get(x, "comments", []), "Shipment <strong>RECEIVED</strong>"))
+    df["received_date"] = df["json_data"].apply(lambda x: get_event_date(x, "SHIPMENT_RECEIVED"))
     df["resolution_type"] = df["json_data"].apply(lambda x: ", ".join(get_resolution_types(x)) or "-")
     df["resolution_actioned"] = df["json_data"].apply(
         lambda x: "Yes" if safe_get(x, "transactions") or safe_get(x, "exchangeOrders") else "No"
