@@ -1967,5 +1967,64 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     )
 
 
+def debug_specific_rma(rma_id):
+    """
+    A temporary function to fetch and process a single RMA for debugging purposes.
+    Prints the findings to the console.
+    """
+    print(f"\n--- DEBUGGING RMA: {rma_id} ---")
+    if not MY_API_KEY:
+        print("DEBUG: MY_API_KEY is not set. Aborting debug function.")
+        return
+
+    # 1. Get RMA Data
+    rma_data = get_rma_by_id(MY_API_KEY, STORE_URL, rma_id)
+    if not rma_data:
+        print(f"DEBUG: Failed to fetch data for RMA {rma_id}")
+        print("--- END DEBUG ---")
+        return
+    print("DEBUG: Successfully fetched RMA data.")
+
+    # 2. Find Tracking Number
+    tracking_number = safe_get(rma_data, "shipments.0.trackingNumber")
+    if tracking_number:
+        print(f"DEBUG: Found Tracking Number: {tracking_number}")
+
+        # 3. Scrape Status
+        print(f"DEBUG: Now scraping status for {tracking_number}...")
+        scraped_status = scrape_parcel_ninja_status(tracking_number)
+        print(f"DEBUG: Scraped Status: {scraped_status}")
+
+        # Also, let's fetch the URL content to see what the scraper sees
+        tracking_url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        try:
+            print(f"DEBUG: Fetching content of {tracking_url}")
+            response = requests.get(tracking_url, timeout=10)
+            response.raise_for_status()
+            print("--- Scraper Content Start ---")
+            print(response.text)
+            print("--- Scraper Content End ---")
+        except Exception as e:
+            print(f"DEBUG: Error fetching scraper content: {e}")
+
+    else:
+        print("DEBUG: No tracking number found.")
+
+    # 4. Determine Received Date
+    received_date = get_received_date_from_events_or_comments(rma_data)
+    print(f"DEBUG: Found Received Date: {received_date}")
+    
+    # For verification, print events and comments
+    print("\n--- RMA Events ---")
+    print(json.dumps(rma_data.get("events", []), indent=2))
+    print("\n--- RMA Comments ---")
+    print(json.dumps(rma_data.get("comments", []), indent=2))
+
+    print("--- END DEBUG ---\n")
+
+# Run the debug function for the specific RMA
+debug_specific_rma("9941407")
+
+
 if __name__ == "__main__":
     main()
