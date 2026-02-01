@@ -234,7 +234,7 @@ def get_resolution_types(rma_data: dict) -> Set[str]:
 def has_tracking_update_comment(rma_data: dict) -> bool:
     """Checks if a comment indicating a tracking update exists."""
     comments = safe_get(rma_data, "comments", [])
-    return any("updated shipment tracking number" in str(c.get("htmlText", "")).lower() for c in comments)
+    return any("was updated" in str(c.get("htmlText", "")).lower() for c in comments)
 
 def get_requests_session() -> requests.Session:
     """Creates a session with retry logic for HTTP requests."""
@@ -539,6 +539,22 @@ def fetch_parcel_ninja_tracking(tracking_number: str, token: str) -> Optional[di
 # ==========================================
 # 8. DATA FRAME ENRICHMENT
 # ==========================================
+def get_received_date_from_comment(rma_data: dict) -> Optional[datetime]:
+    """Extracts the received date from the comments."""
+    comments = safe_get(rma_data, "comments", [])
+    for comment in comments:
+        if "Shipment <strong>RECEIVED</strong>" in comment.get("htmlText", ""):
+            return safe_parse_date_iso(comment.get("datetime"))
+    return None
+
+def get_requested_date_from_comment(rma_data: dict) -> Optional[datetime]:
+    """Extracts the requested date from the comments."""
+    comments = safe_get(rma_data, "comments", [])
+    for comment in comments:
+        if "Request SUBMITTED" in comment.get("htmlText", ""):
+            return safe_parse_date_iso(comment.get("datetime"))
+    return None
+
 def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Enriches the raw DB dataframe with derived columns and classifications.
@@ -553,9 +569,9 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     # Extract fields using correct API field names
     df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "orderName", "-"))
-    df["requested_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "createdAt")))
+    df["requested_date"] = df["json_data"].apply(lambda x: get_requested_date_from_comment(x))
     df["approved_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "approvedDate")))
-    df["received_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "receivedDate")))
+    df["received_date"] = df["json_data"].apply(lambda x: get_received_date_from_comment(x))
     df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "returnLabel.trackingNumber", ""))
     df["resolution_type"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionType", ""))
     df["resolution_actioned"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionActioned", ""))
