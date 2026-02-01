@@ -1759,7 +1759,7 @@ def main():
         
         # Create tracking links
         display_df["Tracking Number"] = display_df.apply(
-            lambda row: f"https://optimise.parcelninja.com/shipment/track?WaybillNo={row['Tracking Number']}" 
+            lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
             else "-",
             axis=1
