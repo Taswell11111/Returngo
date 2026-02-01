@@ -38,25 +38,7 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # ==========================================
 # NEW: Data classes for enhanced features
 # ==========================================
-@dataclass
-class UserSettings:
-    theme: str = "dark"  # dark, light, auto
-    favorites: List[str] = field(default_factory=list)
-    export_presets: Dict[str, Dict] = field(default_factory=dict)
-    performance_metrics: bool = True
-    keyboard_shortcuts: bool = True
-
-@dataclass
-class PerformanceMetrics:
-    api_call_times: List[float] = field(default_factory=list)
-    cache_hit_rate: float = 0.0
-    last_sync_duration: float = 0.0
-    avg_response_time: float = 0.0
-
-class Theme(Enum):
-    DARK = "dark"
-    LIGHT = "light"
-    AUTO = "auto"
+from app_classes import UserSettings, PerformanceMetrics, Theme
 
 # ==========================================
 # 1a. CONFIGURATION
@@ -136,7 +118,7 @@ def save_user_settings(settings: UserSettings):
         with open(USER_SETTINGS_FILE, 'wb') as f:
             pickle.dump(settings, f)
     except Exception as e:
-        logger.error(f"Failed to save user settings: {e}")
+        logger.error(f"Failed to save performance metrics: {e}")
 
 def load_performance_metrics() -> PerformanceMetrics:
     """Load performance metrics from file."""
