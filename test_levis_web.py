@@ -236,7 +236,7 @@ def update_performance_metrics(api_time: float):
 # ==========================================
 # 2. SAFE UTILITIES
 # ==========================================
-def safe_parse_date_iso(s: str) -> Optional[datetime]:
+def safe_parse_date_iso(s: Optional[str]) -> Optional[datetime]:
     """Parses ISO8601 timestamp or returns None."""
     if not s or not isinstance(s, str):
         return None
@@ -366,7 +366,7 @@ def fetch_all_from_db() -> pd.DataFrame:
 def upsert_rma_to_db(
     rma_id: str,
     store_url: str,
-    status: str,
+    status: Optional[str],
     created_at: Optional[datetime],
     json_data: dict,
     courier_status: Optional[str] = None,
@@ -910,11 +910,14 @@ def show_rma_actions_dialog(row_data: pd.Series):
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🔄 Refresh this RMA", key=f"refresh_{rma_id}"):
-            refresh_single_rma(MY_API_KEY, STORE_URL, rma_id)
-            append_ops_log(f"Refreshed RMA {rma_id}")
-            st.success(f"RMA {rma_id} refreshed!")
-            time.sleep(1)
-            st.rerun()
+            if MY_API_KEY:
+                refresh_single_rma(MY_API_KEY, STORE_URL, rma_id)
+                append_ops_log(f"Refreshed RMA {rma_id}")
+                st.success(f"RMA {rma_id} refreshed!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("API Key not configured. Cannot refresh RMA.")
 
     with col2:
         if st.button("💬 Add Comment", key=f"comment_{rma_id}"):
@@ -924,15 +927,18 @@ def show_rma_actions_dialog(row_data: pd.Series):
         comment_text = st.text_area("Enter your comment:", key=f"comment_text_{rma_id}")
         if st.button("Submit Comment", key=f"submit_comment_{rma_id}"):
             if comment_text.strip():
-                success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
-                if success:
-                    st.success("Comment posted!")
-                    append_ops_log(f"Posted comment to RMA {rma_id}")
+                if MY_API_KEY:
+                    success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
+                    if success:
+                        st.success("Comment posted!")
+                        append_ops_log(f"Posted comment to RMA {rma_id}")
+                    else:
+                        st.error("Failed to post comment.")
+                    st.session_state.pop("show_comment_input", None)
+                    time.sleep(1)
+                    st.rerun()
                 else:
-                    st.error("Failed to post comment.")
-                st.session_state.pop("show_comment_input", None)
-                time.sleep(1)
-                st.rerun()
+                    st.error("API Key not configured. Cannot post comment.")
             else:
                 st.warning("Comment cannot be empty.")
 
@@ -1324,27 +1330,36 @@ def main():
         # Sync controls
         st.subheader("Sync Controls")
         if st.button("🔄 Sync All Active", use_container_width=True):
-            with st.spinner("Syncing all active RMAs..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=True)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed sync of all active RMAs")
-            st.success("Sync completed!")
-            st.rerun()
+            if MY_API_KEY:
+                with st.spinner("Syncing all active RMAs..."):
+                    sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=True)
+                    st.session_state.last_sync_time = datetime.now(timezone.utc)
+                    append_ops_log("Completed sync of all active RMAs")
+                st.success("Sync completed!")
+                st.rerun()
+            else:
+                st.error("API Key not configured. Cannot sync.")
 
         if st.button("🔄 Full Refresh (All)", use_container_width=True):
-            with st.spinner("Performing full refresh..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=False)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed full refresh of all RMAs")
-            st.success("Full refresh completed!")
-            st.rerun()
+            if MY_API_KEY:
+                with st.spinner("Performing full refresh..."):
+                    sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=False)
+                    st.session_state.last_sync_time = datetime.now(timezone.utc)
+                    append_ops_log("Completed full refresh of all RMAs")
+                st.success("Full refresh completed!")
+                st.rerun()
+            else:
+                st.error("API Key not configured. Cannot refresh.")
 
         if st.button("📦 Refresh Courier Status", use_container_width=True):
-            with st.spinner("Refreshing courier statuses..."):
-                refresh_courier_statuses_for_approved(MY_API_KEY, STORE_URL)
-                append_ops_log("Refreshed courier statuses for approved RMAs")
-            st.success("Courier statuses refreshed!")
-            st.rerun()
+            if MY_API_KEY:
+                with st.spinner("Refreshing courier statuses..."):
+                    refresh_courier_statuses_for_approved(MY_API_KEY, STORE_URL)
+                    append_ops_log("Refreshed courier statuses for approved RMAs")
+                st.success("Courier statuses refreshed!")
+                st.rerun()
+            else:
+                st.error("API Key not configured. Cannot refresh courier statuses.")
 
         st.markdown("---")
         
