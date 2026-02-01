@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text, Engine
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List, Literal
 from returngo_api import api_url, RMA_COMMENT_PATH
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 import pickle
 from pathlib import Path
@@ -42,27 +42,17 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 @dataclass
 class UserSettings:
     theme: str = "dark"  # dark, light, auto
-    favorites: List[str] = None
-    export_presets: Dict[str, Dict] = None
+    favorites: List[str] = field(default_factory=list)
+    export_presets: Dict[str, Dict] = field(default_factory=dict)
     performance_metrics: bool = True
     keyboard_shortcuts: bool = True
-    
-    def __post_init__(self):
-        if self.favorites is None:
-            self.favorites = []
-        if self.export_presets is None:
-            self.export_presets = {}
 
 @dataclass
 class PerformanceMetrics:
-    api_call_times: List[float] = None
+    api_call_times: List[float] = field(default_factory=list)
     cache_hit_rate: float = 0.0
     last_sync_duration: float = 0.0
     avg_response_time: float = 0.0
-    
-    def __post_init__(self):
-        if self.api_call_times is None:
-            self.api_call_times = []
 
 class Theme(Enum):
     DARK = "dark"
@@ -1364,6 +1354,11 @@ def format_tracking_status_with_icon(status: str) -> str:
 
 
 def toggle_filter(name: str):
+    """Toggle filter selection in session state."""
+    # Ensure active_filters exists
+    if "active_filters" not in st.session_state:
+        st.session_state.active_filters = set()
+    
     s: Set[str] = set(st.session_state.active_filters)
     if name in s:
         s.remove(name)
@@ -1376,6 +1371,11 @@ def toggle_filter(name: str):
 
 
 def clear_all_filters():
+    """Clear all active filters."""
+    # Ensure all session state variables exist
+    if "active_filters" not in st.session_state:
+        st.session_state.active_filters = set()
+    
     st.session_state.active_filters = set()
     st.session_state.search_query_input = ""
     st.session_state.status_multi = []
@@ -2124,7 +2124,12 @@ def handle_keyboard_shortcuts():
         return
     
     # Create a hidden text input for capturing keyboard events
-    key_pressed = st.text_input("", key="keyboard_input", label_visibility="collapsed")
+    # Fix: Add a non-empty label
+    key_pressed = st.text_input(
+        "Keyboard input",  # Non-empty label
+        key="keyboard_input", 
+        label_visibility="collapsed"
+    )
     
     if key_pressed:
         shortcut = KEYBOARD_SHORTCUTS.get(key_pressed.lower())
@@ -2561,13 +2566,50 @@ def main():
     if "performance_metrics" not in st.session_state:
         st.session_state.performance_metrics = load_performance_metrics()
     
+    # ==========================================
+    # INITIALIZE ALL SESSION STATE VARIABLES
+    # ==========================================
+    default_state = {
+        "active_filters": set(),
+        "search_query_input": "",
+        "status_multi": [],
+        "res_multi": [],
+        "actioned_multi": [],
+        "tracking_status_multi": [],
+        "req_dates_selected": [],
+        "failure_refund": False,
+        "failure_upload": False,
+        "failure_shipment": False,
+        "cache_version": 0,
+        "ops_log": [],
+        "schema_log": [],
+        "table_autosize": False,
+        "disconnected": False,
+        "show_favorites": False,
+        "show_toast": False,
+        "last_sync_pressed": None,
+        "last_sync_time": None,
+        "export_csv": False,
+        "copy_all_payload": None,
+        "suppress_row_dialog": False,
+        "api_context_input": "",
+        "api_endpoint_selector": list(API_OPERATIONS.keys())[0] if API_OPERATIONS else "",
+        "data_table_log": [],
+        "data_table_prev": {},
+    }
+    
+    # Initialize missing session state variables
+    for key, default_value in default_state.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
+    
     inject_enhanced_css()
     
     # Apply theme
     if st.session_state.user_settings.theme == "light":
         st.markdown('<style>.light-mode {}</style>', unsafe_allow_html=True)
     
-    # Keyboard shortcuts
+    # Keyboard shortcuts - FIXED with proper label
     handle_keyboard_shortcuts()
 
     # Theme toggle
@@ -2792,41 +2834,8 @@ def main():
         render_keyboard_shortcuts_helper()
 
     # ==========================================
-    # 8. STATE
+    # 8. STATE - This section is now inside main()
     # ==========================================
-    if "active_filters" not in st.session_state:
-        st.session_state.active_filters = set()
-        logger.info("Initialized active_filters session state")
-    if "search_query_input" not in st.session_state:
-        st.session_state.search_query_input = ""
-    if "status_multi" not in st.session_state:
-        st.session_state.status_multi = []
-    if "res_multi" not in st.session_state:
-        st.session_state.res_multi = []
-    if "actioned_multi" not in st.session_state:
-        st.session_state.actioned_multi = []
-    if "tracking_status_multi" not in st.session_state:
-        st.session_state.tracking_status_multi = []
-    if "req_dates_selected" not in st.session_state:
-        st.session_state.req_dates_selected = []
-    if "failure_refund" not in st.session_state:
-        st.session_state.failure_refund = False
-    if "failure_upload" not in st.session_state:
-        st.session_state.failure_upload = False
-    if "failure_shipment" not in st.session_state:
-        st.session_state.failure_shipment = False
-    if "cache_version" not in st.session_state:
-        st.session_state.cache_version = 0
-    if "ops_log" not in st.session_state:
-        st.session_state.ops_log = []
-    if "schema_log" not in st.session_state:
-        st.session_state.schema_log = []
-    if "table_autosize" not in st.session_state:
-        st.session_state.table_autosize = False
-    if "disconnected" not in st.session_state:
-        st.session_state.disconnected = False
-    if "show_favorites" not in st.session_state:
-        st.session_state.show_favorites = False
 
     filter_migration = {
         "Pending": "Pending Requests",
@@ -3528,7 +3537,7 @@ def main():
         key=table_key,
     )
 
-    sel_rows = (sel_event.selection.rows if sel_event and sel_event.selection and hasattr(sel_event.selection, "rows") else []) or []
+    sel_rows = sel_event.get("selection", {}).get("rows", []) if isinstance(sel_event, dict) else []
     if sel_rows:
         if st.session_state.pop("suppress_row_dialog", False):
             table_state = st.session_state.get(table_key, {})
