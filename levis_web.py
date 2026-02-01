@@ -12,7 +12,6 @@ import html
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from sqlalchemy import create_engine, text, Engine
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List, Literal
 from returngo_api import api_url, RMA_COMMENT_PATH
@@ -62,72 +61,10 @@ class Theme(Enum):
 # ==========================================
 # 1a. CONFIGURATION
 # ==========================================
-@st.cache_resource
-def init_database() -> Optional[Engine]:
-    """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
-    logger.info("Initializing database connection from Streamlit secrets...")
-    try:
-        creds = st.secrets["connections"]["postgresql"]
-        dialect = creds.get("dialect", "postgresql")
-        driver = creds.get("driver")
-        user = creds["username"]
-        password = creds["password"]
-        host = creds["host"]
-        port = creds["port"]
-        database = creds["database"]
 
-        db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
-        connect_args = {"timeout": 60}
-
-        if driver == "pg8000" and creds.get("sslmode") == "require":
-            connect_args["ssl_context"] = True
-        elif "sslmode" in creds:
-            db_url += f"?sslmode={creds['sslmode']}"
-
-        logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
-
-        engine = create_engine(
-            db_url,
-            pool_pre_ping=True,
-            connect_args=connect_args,
-        )
-
-        with engine.begin() as connection:
-            connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS rmas (
-                rma_id TEXT PRIMARY KEY,
-                store_url TEXT,
-                status TEXT,
-                created_at TIMESTAMP WITH TIME ZONE,
-                json_data JSONB,
-                last_fetched TIMESTAMP WITH TIME ZONE,
-                courier_status TEXT,
-                courier_last_checked TIMESTAMP WITH TIME ZONE,
-                received_first_seen TIMESTAMP WITH TIME ZONE
-            );
-            """))
-            connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS sync_logs (
-                scope TEXT PRIMARY KEY,
-                last_sync_iso TIMESTAMP WITH TIME ZONE
-            );
-            """))
-        logger.info("Database tables verified and connection is ready.")
-        return engine
-
-    except KeyError as e:
-        logger.critical(f"Database configuration error: Missing key {e} in [connections.postgresql] secrets.")
-        st.error(f"Application error: Database configuration is missing required key: {e}. Please check your secrets.toml file.")
-        st.stop()
-        return None
-    except Exception as e:
-        logger.critical(f"Fatal error during database initialization: {e}", exc_info=True)
-        st.error(f"Application error: Could not connect to the database. Details: {e}")
-        st.stop()
-        return None
         
 # Initialize the database connection engine at the module level
-engine = init_database()
+# engine = init_database() - REMOVED
 
 # Load API secrets
 try:
@@ -236,7 +173,7 @@ def update_performance_metrics(api_time: float):
 # ==========================================
 # 2. SAFE UTILITIES
 # ==========================================
-def safe_parse_date_iso(s: str) -> Optional[datetime]:
+def safe_parse_date_iso(s: Optional[str]) -> Optional[datetime]:
     """Parses ISO8601 timestamp or returns None."""
     if not s or not isinstance(s, str):
         return None
@@ -334,118 +271,7 @@ class RateLimiter:
 
 returngo_limiter = RateLimiter(RG_RPS)
 
-# ==========================================
-# 4. DATABASE OPERATIONS
-# ==========================================
-def fetch_all_from_db() -> pd.DataFrame:
-    """Fetches all RMA records from the database."""
-    try:
-        with engine.begin() as conn:
-            query = text("""
-                SELECT 
-                    rma_id,
-                    store_url,
-                    status,
-                    created_at,
-                    json_data,
-                    last_fetched,
-                    courier_status,
-                    courier_last_checked,
-                    received_first_seen
-                FROM rmas
-            """)
-            rows = conn.execute(query).mappings().all()
-        df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        logger.info(f"Fetched {len(df)} rows from DB.")
-        return df
-    except Exception as e:
-        logger.error(f"Error fetching from DB: {e}", exc_info=True)
-        return pd.DataFrame()
 
-
-def upsert_rma_to_db(
-    rma_id: str,
-    store_url: str,
-    status: str,
-    created_at: Optional[datetime],
-    json_data: dict,
-    courier_status: Optional[str] = None,
-    courier_last_checked: Optional[datetime] = None,
-    received_first_seen: Optional[datetime] = None,
-):
-    """Inserts or updates an RMA record in the database."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO rmas (
-                        rma_id, store_url, status, created_at, json_data,
-                        last_fetched, courier_status, courier_last_checked, received_first_seen
-                    )
-                    VALUES (
-                        :rma_id, :store_url, :status, :created_at, :json_data,
-                        :last_fetched, :courier_status, :courier_last_checked, :received_first_seen
-                    )
-                    ON CONFLICT (rma_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        json_data = EXCLUDED.json_data,
-                        last_fetched = EXCLUDED.last_fetched,
-                        courier_status = EXCLUDED.courier_status,
-                        courier_last_checked = EXCLUDED.courier_last_checked,
-                        received_first_seen = EXCLUDED.received_first_seen
-                """),
-                {
-                    "rma_id": rma_id,
-                    "store_url": store_url,
-                    "status": status,
-                    "created_at": created_at,
-                    "json_data": json.dumps(json_data),
-                    "last_fetched": datetime.now(timezone.utc),
-                    "courier_status": courier_status,
-                    "courier_last_checked": courier_last_checked,
-                    "received_first_seen": received_first_seen,
-                },
-            )
-        logger.debug(f"Upserted RMA {rma_id} to DB.")
-    except Exception as e:
-        logger.error(f"Error upserting RMA {rma_id}: {e}", exc_info=True)
-
-
-def read_sync_log(scope: str) -> Optional[datetime]:
-    """Reads the last sync timestamp for a given scope."""
-    try:
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT last_sync_iso FROM sync_logs WHERE scope = :scope"),
-                {"scope": scope},
-            ).mappings().first()
-        return row["last_sync_iso"] if row else None
-    except Exception as e:
-        logger.error(f"Error reading sync log for scope='{scope}': {e}", exc_info=True)
-        return None
-
-
-def write_sync_log(scope: str, timestamp: datetime):
-    """Writes a new sync timestamp for a given scope."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO sync_logs (scope, last_sync_iso)
-                    VALUES (:scope, :last_sync_iso)
-                    ON CONFLICT (scope) DO UPDATE SET
-                        last_sync_iso = EXCLUDED.last_sync_iso
-                """),
-                {"scope": scope, "last_sync_iso": timestamp},
-            )
-        logger.info(f"Sync log updated: scope='{scope}', timestamp={timestamp}")
-    except Exception as e:
-        logger.error(f"Error writing sync log for scope='{scope}': {e}", exc_info=True)
-
-
-def get_last_sync_time() -> Optional[datetime]:
-    """Returns the last all_active sync time from DB."""
-    return read_sync_log("all_active")
 
 # ==========================================
 # 5. RETURNGO API CALLS
@@ -596,8 +422,81 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
         return False
 
 # ==========================================
-# 6. PARCEL NINJA API
+# 6. DATA FETCHING AND CACHING
 # ==========================================
+@st.cache_data(ttl=43200)
+def fetch_and_cache_data() -> pd.DataFrame:
+    """
+    Fetches all active RMAs from the ReturnGO API, enriches them with details
+    and courier statuses, and caches the resulting DataFrame for 12 hours.
+    This is the primary data source for the application.
+    """
+    if not MY_API_KEY:
+        st.error("Application error: 'RETURNGO_API_KEY' is not configured in secrets.")
+        return pd.DataFrame()
+
+    logger.info("Cache miss. Fetching all active RMAs from ReturnGO API...")
+    st.session_state.last_sync_time = datetime.now(timezone.utc)
+
+    # 1. Fetch RMA lists for all active statuses
+    all_rmas_list = []
+    for status_val in ACTIVE_STATUSES:
+        logger.info(f"Fetching RMAs with status: {status_val}")
+        batch = fetch_returngo_rmas(
+            api_key=MY_API_KEY,
+            store_url=STORE_URL,
+            status=status_val,
+        )
+        all_rmas_list.extend(batch)
+    logger.info(f"Total RMAs fetched from lists: {len(all_rmas_list)}")
+
+    def process_rma(rma_summary: dict) -> Optional[dict]:
+        """
+        Processes a single RMA summary, enriches it with courier status if applicable.
+        Note: This version assumes the list endpoint provides sufficient detail.
+        A full detail fetch per RMA can be added here if necessary.
+        """
+        rma_id = rma_summary.get("rmaId")
+        if not rma_id:
+            return None
+
+        rma_detail = rma_summary
+
+        # Fetch and add courier status for 'Approved' RMAs
+        tracking_number = safe_get(rma_detail, "returnLabel.trackingNumber")
+        if rma_detail.get("status", "").lower() == "approved" and tracking_number and PARCEL_NINJA_TOKEN:
+            pn_data = fetch_parcel_ninja_tracking(tracking_number, PARCEL_NINJA_TOKEN)
+            if pn_data:
+                rma_detail['courier_status'] = pn_data.get("status")
+        
+        # Structure the data for the DataFrame
+        return {
+            "rma_id": rma_id,
+            "store_url": rma_detail.get("storeUrl"),
+            "status": rma_detail.get("status"),
+            "created_at": safe_parse_date_iso(rma_detail.get("createdAt")),
+            "json_data": rma_detail,  # The full object is the "json_data"
+            "courier_status": rma_detail.get('courier_status'), # From Parcel Ninja
+        }
+
+    # 2. Concurrently process all RMAs
+    processed_results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_rma = {executor.submit(process_rma, rma): rma for rma in all_rmas_list}
+        for future in concurrent.futures.as_completed(future_to_rma):
+            result = future.result()
+            if result:
+                processed_results.append(result)
+    
+    logger.info(f"Successfully processed details for {len(processed_results)} RMAs.")
+
+    if not processed_results:
+        return pd.DataFrame()
+
+    # 3. Convert to DataFrame and return
+    df = pd.DataFrame(processed_results)
+    return df
+
 def fetch_parcel_ninja_tracking(tracking_number: str, token: str) -> Optional[dict]:
     """Fetches tracking info from Parcel Ninja."""
     if not token or not tracking_number:
@@ -617,138 +516,6 @@ def fetch_parcel_ninja_tracking(tracking_number: str, token: str) -> Optional[di
         return None
 
 # ==========================================
-# 7. SYNC ORCHESTRATION
-# ==========================================
-def compute_incremental_time_window() -> Tuple[Optional[str], Optional[str]]:
-    """
-    Computes start_date & end_date for incremental syncs.
-    If no prior sync exists, returns (None, None) => full fetch.
-    """
-    last_sync = get_last_sync_time()
-    if not last_sync:
-        logger.info("No prior sync found. Will fetch all RMAs.")
-        return None, None
-
-    overlap_delta = timedelta(minutes=SYNC_OVERLAP_MINUTES)
-    start_dt = last_sync - overlap_delta
-    end_dt = datetime.now(timezone.utc) + timedelta(hours=1)
-    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    logger.info(f"Incremental sync window: {start_iso} to {end_iso}")
-    return start_iso, end_iso
-
-
-def sync_all_active_rmas(api_key: str, store_url: str, incremental: bool = True):
-    """
-    Syncs active RMAs (Pending, Approved, Received) with the database.
-    """
-    logger.info(f"Starting sync_all_active_rmas. incremental={incremental}")
-    start_date, end_date = compute_incremental_time_window() if incremental else (None, None)
-
-    all_rmas_batch = []
-    for status_val in ACTIVE_STATUSES:
-        batch = fetch_returngo_rmas(
-            api_key=api_key,
-            store_url=store_url,
-            status=status_val,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        all_rmas_batch.extend(batch)
-
-    logger.info(f"Total RMAs fetched across all active statuses: {len(all_rmas_batch)}")
-
-    for rma_data in all_rmas_batch:
-        rma_id = rma_data.get("rmaId")
-        status_str = rma_data.get("status")
-        created_str = rma_data.get("createdAt")
-        created_dt = safe_parse_date_iso(created_str)
-        upsert_rma_to_db(
-            rma_id=rma_id,
-            store_url=store_url,
-            status=status_str,
-            created_at=created_dt,
-            json_data=rma_data,
-        )
-
-    write_sync_log("all_active", datetime.now(timezone.utc))
-    logger.info("Sync of active RMAs completed.")
-
-
-def refresh_single_rma(api_key: str, store_url: str, rma_id: str):
-    """Refreshes a single RMA from the API and updates the DB."""
-    logger.info(f"Refreshing single RMA: {rma_id}")
-    rma_data = get_rma_by_id(api_key, store_url, rma_id)
-    if not rma_data:
-        logger.warning(f"No data returned for RMA {rma_id}.")
-        return
-    status_str = rma_data.get("status")
-    created_str = rma_data.get("createdAt")
-    created_dt = safe_parse_date_iso(created_str)
-    upsert_rma_to_db(
-        rma_id=rma_id,
-        store_url=store_url,
-        status=status_str,
-        created_at=created_dt,
-        json_data=rma_data,
-    )
-    logger.info(f"RMA {rma_id} refreshed successfully.")
-
-
-def refresh_courier_statuses_for_approved(api_key: str, store_url: str):
-    """
-    Refreshes courier tracking for Approved RMAs.
-    """
-    logger.info("Starting refresh of courier statuses for Approved RMAs.")
-    df = fetch_all_from_db()
-    if df.empty:
-        logger.info("No data in DB to refresh courier statuses.")
-        return
-
-    now_utc = datetime.now(timezone.utc)
-    cutoff_dt = now_utc - timedelta(hours=COURIER_REFRESH_HOURS)
-
-    approved_mask = df["status"].str.lower() == "approved"
-    approved_df = df[approved_mask].copy()
-
-    for idx, row in approved_df.iterrows():
-        rma_id = row["rma_id"]
-        json_data = row["json_data"]
-        if isinstance(json_data, str):
-            try:
-                json_data = json.loads(json_data)
-            except:
-                json_data = {}
-
-        tracking_number = safe_get(json_data, "returnLabel.trackingNumber")
-        if not tracking_number:
-            continue
-
-        courier_last_checked = row.get("courier_last_checked")
-        if courier_last_checked and courier_last_checked > cutoff_dt:
-            continue
-
-        if not PARCEL_NINJA_TOKEN:
-            logger.debug(f"No PARCEL_NINJA_TOKEN configured, skipping courier check for {rma_id}")
-            continue
-
-        pn_data = fetch_parcel_ninja_tracking(tracking_number, PARCEL_NINJA_TOKEN)
-        if pn_data:
-            new_courier_status = pn_data.get("status")
-            upsert_rma_to_db(
-                rma_id=rma_id,
-                store_url=store_url,
-                status=row["status"],
-                created_at=row["created_at"],
-                json_data=json_data,
-                courier_status=new_courier_status,
-                courier_last_checked=now_utc,
-            )
-            logger.info(f"Updated courier status for {rma_id}: {new_courier_status}")
-
-    logger.info("Courier statuses refresh completed.")
-
-# ==========================================
 # 8. DATA FRAME ENRICHMENT
 # ==========================================
 def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -760,16 +527,8 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    # Parse json_data if it's a string
-    def parse_json(val):
-        if isinstance(val, str):
-            try:
-                return json.loads(val)
-            except:
-                return {}
-        return val if isinstance(val, dict) else {}
-
-    df["json_data"] = df["json_data"].apply(parse_json)
+    # The 'json_data' column is now always a dict from the fetcher.
+    # No need to parse from string anymore.
 
     # Extract fields using correct API field names
     df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "orderName", "-"))
@@ -909,10 +668,10 @@ def show_rma_actions_dialog(row_data: pd.Series):
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Refresh this RMA", key=f"refresh_{rma_id}"):
-            refresh_single_rma(MY_API_KEY, STORE_URL, rma_id)
-            append_ops_log(f"Refreshed RMA {rma_id}")
-            st.success(f"RMA {rma_id} refreshed!")
+        if st.button("🔄 Refresh Data (Clear Cache)", key=f"refresh_{rma_id}"):
+            st.cache_data.clear()
+            append_ops_log(f"Cache cleared to refresh RMA {rma_id}. Rerunning.")
+            st.success(f"Cache cleared. Data will be refreshed.")
             time.sleep(1)
             st.rerun()
 
@@ -924,6 +683,9 @@ def show_rma_actions_dialog(row_data: pd.Series):
         comment_text = st.text_area("Enter your comment:", key=f"comment_text_{rma_id}")
         if st.button("Submit Comment", key=f"submit_comment_{rma_id}"):
             if comment_text.strip():
+                if not MY_API_KEY:
+                    st.error("Cannot post comment: 'RETURNGO_API_KEY' is not configured.")
+                    return
                 success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
                 if success:
                     st.success("Comment posted!")
@@ -1252,7 +1014,7 @@ def main():
     if "active_filter" not in st.session_state:
         st.session_state.active_filter = "All"
     if "last_sync_time" not in st.session_state:
-        st.session_state.last_sync_time = get_last_sync_time()
+        st.session_state.last_sync_time = None
     if "ops_log" not in st.session_state:
         st.session_state.ops_log = []
     if "user_settings" not in st.session_state:
@@ -1321,55 +1083,15 @@ def main():
         
         st.markdown("---")
         
-        # Sync controls
-        st.subheader("Sync Controls")
-        if st.button("🔄 Sync All Active", use_container_width=True):
-            with st.spinner("Syncing all active RMAs..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=True)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed sync of all active RMAs")
-            st.success("Sync completed!")
+        # Cache controls
+        st.subheader("Cache Controls")
+        if st.button("🔄 Clear Cache & Refresh Data", use_container_width=True):
+            with st.spinner("Clearing cache and refreshing data..."):
+                st.cache_data.clear()
+                append_ops_log("Cache cleared. Fetching fresh data.")
+            st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("🔄 Full Refresh (All)", use_container_width=True):
-            with st.spinner("Performing full refresh..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=False)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed full refresh of all RMAs")
-            st.success("Full refresh completed!")
-            st.rerun()
-
-        if st.button("📦 Refresh Courier Status", use_container_width=True):
-            with st.spinner("Refreshing courier statuses..."):
-                refresh_courier_statuses_for_approved(MY_API_KEY, STORE_URL)
-                append_ops_log("Refreshed courier statuses for approved RMAs")
-            st.success("Courier statuses refreshed!")
-            st.rerun()
-
-        st.markdown("---")
-        
-        # Database info
-        st.subheader("Database Info")
-        try:
-            with engine.begin() as conn:
-                result = conn.execute(text("SELECT COUNT(*) as cnt FROM rmas")).mappings().first()
-                total_rmas = result["cnt"] if result else 0
-            st.metric("Total RMAs in DB", total_rmas)
-        except Exception as e:
-            st.error(f"DB Error: {e}")
-        
-        # Verify schema button
-        if st.button("Verify Schema", use_container_width=True):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("SELECT 1 FROM rmas LIMIT 1"))
-                    conn.execute(text("SELECT 1 FROM sync_logs LIMIT 1"))
-                st.success("✅ Schema verified!")
-                append_ops_log("Database schema verified successfully")
-            except Exception as e:
-                st.error(f"Schema verification failed: {e}")
-                append_ops_log(f"Schema verification failed: {e}")
-        
         st.markdown("</div>", unsafe_allow_html=True)
         
         st.markdown("---")
@@ -1385,7 +1107,7 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Main content area
-    df_raw = fetch_all_from_db()
+    df_raw = fetch_and_cache_data()
     df_enriched = enrich_rma_dataframe(df_raw)
     counts = compute_counts(df_enriched)
 
@@ -1401,7 +1123,7 @@ def main():
         
         if not timeline_df.empty:
             date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)  # type: ignore
                 .size()
                 .reset_index(name="Count")
             )
