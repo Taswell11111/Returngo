@@ -205,9 +205,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # User provided data
-    rma_to_update = "9875594"
-    store_to_update = "diesel-dev-south-africa.myshopify.com"
-    new_tracking_number = "OPT-338683449"
+    rma_to_update = "9113828"
+    store_to_update = "superdry-dev-south-africa.myshopify.com"
+    new_tracking_number = "OPT-782082327"
     
     logger.info(f"Attempting to update RMA: {rma_to_update}")
     logger.info(f"Store: {store_to_update}")
