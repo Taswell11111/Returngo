@@ -301,118 +301,7 @@ class RateLimiter:
 
 returngo_limiter = RateLimiter(RG_RPS)
 
-# ==========================================
-# 4. DATABASE OPERATIONS
-# ==========================================
-def fetch_all_from_db() -> pd.DataFrame:
-    """Fetches all RMA records from the database."""
-    try:
-        with engine.begin() as conn:
-            query = text("""
-                SELECT 
-                    rma_id,
-                    store_url,
-                    status,
-                    created_at,
-                    json_data,
-                    last_fetched,
-                    courier_status,
-                    courier_last_checked,
-                    received_first_seen
-                FROM rmas
-            """)
-            rows = conn.execute(query).mappings().all()
-        df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        logger.info(f"Fetched {len(df)} rows from DB.")
-        return df
-    except Exception as e:
-        logger.error(f"Error fetching from DB: {e}", exc_info=True)
-        return pd.DataFrame()
 
-
-def upsert_rma_to_db(
-    rma_id: str,
-    store_url: str,
-    status: str,
-    created_at: Optional[datetime],
-    json_data: dict,
-    courier_status: Optional[str] = None,
-    courier_last_checked: Optional[datetime] = None,
-    received_first_seen: Optional[datetime] = None,
-):
-    """Inserts or updates an RMA record in the database."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO rmas (
-                        rma_id, store_url, status, created_at, json_data,
-                        last_fetched, courier_status, courier_last_checked, received_first_seen
-                    )
-                    VALUES (
-                        :rma_id, :store_url, :status, :created_at, :json_data,
-                        :last_fetched, :courier_status, :courier_last_checked, :received_first_seen
-                    )
-                    ON CONFLICT (rma_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        json_data = EXCLUDED.json_data,
-                        last_fetched = EXCLUDED.last_fetched,
-                        courier_status = EXCLUDED.courier_status,
-                        courier_last_checked = EXCLUDED.courier_last_checked,
-                        received_first_seen = EXCLUDED.received_first_seen
-                """),
-                {
-                    "rma_id": rma_id,
-                    "store_url": store_url,
-                    "status": status,
-                    "created_at": created_at,
-                    "json_data": json.dumps(json_data),
-                    "last_fetched": datetime.now(timezone.utc),
-                    "courier_status": courier_status,
-                    "courier_last_checked": courier_last_checked,
-                    "received_first_seen": received_first_seen,
-                },
-            )
-        logger.debug(f"Upserted RMA {rma_id} to DB.")
-    except Exception as e:
-        logger.error(f"Error upserting RMA {rma_id}: {e}", exc_info=True)
-
-
-def read_sync_log(scope: str) -> Optional[datetime]:
-    """Reads the last sync timestamp for a given scope."""
-    try:
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT last_sync_iso FROM sync_logs WHERE scope = :scope"),
-                {"scope": scope},
-            ).mappings().first()
-        return row["last_sync_iso"] if row else None
-    except Exception as e:
-        logger.error(f"Error reading sync log for scope='{scope}': {e}", exc_info=True)
-        return None
-
-
-def write_sync_log(scope: str, timestamp: datetime):
-    """Writes a new sync timestamp for a given scope."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO sync_logs (scope, last_sync_iso)
-                    VALUES (:scope, :last_sync_iso)
-                    ON CONFLICT (scope) DO UPDATE SET
-                        last_sync_iso = EXCLUDED.last_sync_iso
-                """),
-                {"scope": scope, "last_sync_iso": timestamp},
-            )
-        logger.info(f"Sync log updated: scope='{scope}', timestamp={timestamp}")
-    except Exception as e:
-        logger.error(f"Error writing sync log for scope='{scope}': {e}", exc_info=True)
-
-
-def get_last_sync_time() -> Optional[datetime]:
-    """Returns the last all_active sync time from DB."""
-    return read_sync_log("all_active")
 
 # ==========================================
 # 5. RETURNGO API CALLS
@@ -1001,10 +890,10 @@ def show_rma_actions_dialog(row_data: pd.Series):
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Refresh this RMA", key=f"refresh_{rma_id}"):
-            refresh_single_rma(MY_API_KEY, STORE_URL, rma_id)
-            append_ops_log(f"Refreshed RMA {rma_id}")
-            st.success(f"RMA {rma_id} refreshed!")
+        if st.button("🔄 Refresh Data (Clear Cache)", key=f"refresh_{rma_id}"):
+            st.cache_data.clear()
+            append_ops_log(f"Cache cleared to refresh RMA {rma_id}. Rerunning.")
+            st.success(f"Cache cleared. Data will be refreshed.")
             time.sleep(1)
             st.rerun()
 
@@ -1016,6 +905,9 @@ def show_rma_actions_dialog(row_data: pd.Series):
         comment_text = st.text_area("Enter your comment:", key=f"comment_text_{rma_id}")
         if st.button("Submit Comment", key=f"submit_comment_{rma_id}"):
             if comment_text.strip():
+                if not MY_API_KEY:
+                    st.error("Cannot post comment: 'RETURNGO_API_KEY' is not configured.")
+                    return
                 success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
                 if success:
                     st.success("Comment posted!")
@@ -1503,57 +1395,15 @@ def main():
         
         st.markdown("---")
         
-        # Sync controls
-        st.subheader("Sync Controls")
-        if st.button("🔄 Sync All Active", use_container_width=True):
-            with st.spinner("Syncing all active RMAs..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=True)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed sync of all active RMAs")
-            st.success("Sync completed!")
+        # Cache controls
+        st.subheader("Cache Controls")
+        if st.button("🔄 Clear Cache & Refresh Data", width="stretch"):
+            with st.spinner("Clearing cache and refreshing data..."):
+                st.cache_data.clear()
+                append_ops_log("Cache cleared. Fetching fresh data.")
+            st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("🔄 Full Refresh (All)", use_container_width=True):
-            with st.spinner("Performing full refresh..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=False)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed full refresh of all RMAs")
-            st.success("Full refresh completed!")
-            st.rerun()
-
-        if st.button("📦 Refresh Courier Status", use_container_width=True):
-            with st.spinner("Refreshing courier statuses..."):
-                refresh_courier_statuses_for_approved(MY_API_KEY, STORE_URL)
-                append_ops_log("Refreshed courier statuses for approved RMAs")
-            st.success("Courier statuses refreshed!")
-            st.rerun()
-
-        st.markdown("---")
-        
-        # Database info
-        st.subheader("Database Info")
-        try:
-            with engine.begin() as conn:
-                result = conn.execute(text("SELECT COUNT(*) as cnt FROM rmas")).mappings().first()
-                total_rmas = result["cnt"] if result else 0
-            st.metric("Total RMAs in DB", total_rmas)
-        except Exception as e:
-            st.error(f"DB Error: {e}")
-        
-        # Verify schema button
-        if st.button("Verify Schema", use_container_width=True):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("SELECT 1 FROM rmas LIMIT 1"))
-                    conn.execute(text("SELECT 1 FROM sync_logs LIMIT 1"))
-                st.success("✅ Schema verified!")
-                append_ops_log("Database schema verified successfully")
-            except Exception as e:
-                st.error(f"Schema verification failed: {e}")
-                append_ops_log(f"Schema verification failed: {e}")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-        
         st.markdown("---")
         
         # Activity log in terminal-style box
