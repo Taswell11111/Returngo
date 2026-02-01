@@ -517,7 +517,7 @@ def extract_status_from_comments(comments: list) -> Optional[str]:
 def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
     """
     Scrapes the Parcel Ninja website to get the latest tracking status.
-    Extracts the first row from the tracking table which is the most recent entry.
+    Handles both HTML table and plain text responses.
     """
     if not tracking_number:
         return None
@@ -527,29 +527,32 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-        html_content = response.text
+        content = response.text
 
-        # Use a single, more robust regex to find the latest status.
-        # This looks for the content of the second <td> in the first <tr> of the <tbody>.
-        pattern = re.compile(r"""
-            <tbody[^>]*>         # Match the opening tbody tag
-            .*?                   # Non-greedy match until the first row
-            <tr[^>]*>             # Match the first table row
-            .*?                   # Non-greedy match until the first td
-            <td[^>]*>.*?</td>     # Match the first cell (date) completely
-            .*?                   # Non-greedy match until the second td
-            <td[^>]*>             # Match the opening tag of the second cell (status)
-            ([^<]+)               # Capture the content of the cell (anything not a '<')
-            </td>                # Match the closing tag
+        # 1. Try to parse as HTML table first (more structured)
+        html_pattern = re.compile(r"""
+            <tbody[^>]*>.*?<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>([^<]+)</td>
         """, re.VERBOSE | re.IGNORECASE | re.DOTALL)
-
-        match = pattern.search(html_content)
+        
+        match = html_pattern.search(content)
         if match:
             status = match.group(1).strip()
-            logger.info(f"Scraped status '{status}' for tracking {tracking_number}")
+            logger.info(f"Scraped status '{status}' for tracking {tracking_number} from HTML")
             return status
-        else:
-            logger.warning(f"Could not find status for {tracking_number} using primary regex.")
+
+        # 2. If HTML parse fails, try to parse as plain text
+        lines = content.strip().split('\n')
+        if len(lines) >= 3:
+            # The first status line is typically the 3rd line (index 2)
+            status_line = lines[2]
+            parts = status_line.split('\t')
+            if len(parts) == 2:
+                status = parts[1].strip()
+                if status:
+                    logger.info(f"Scraped status '{status}' for tracking {tracking_number} from plain text")
+                    return status
+
+        logger.warning(f"Could not extract status for {tracking_number}. Content might have an unknown format.")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
