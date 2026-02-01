@@ -62,10 +62,6 @@ class Theme(Enum):
 # 1a. CONFIGURATION
 # ==========================================
 
-        
-# Initialize the database connection engine at the module level
-# engine = init_database() - REMOVED
-
 # Load API secrets
 try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
@@ -345,32 +341,39 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
     Handles both plain text and HTML table responses.
     """
     if not tracking_number:
+        logger.debug("scrape_parcel_ninja_status: No tracking number provided.")
         return None
     
     url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+    logger.info(f"DEBUG_SCRAPE: Scraping URL: {url}")
     
     try:
         response = requests.get(url, timeout=30)
+        logger.info(f"DEBUG_SCRAPE: Received status code {response.status_code} for {tracking_number}")
         response.raise_for_status()
         content = response.text
 
         # Prioritize the plain text regex provided by the user, as it's more reliable.
         text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2})\s+([A-Za-z ]+)"
         matches = re.findall(text_pattern, content)
+        logger.info(f"DEBUG_SCRAPE: Found {len(matches)} regex matches for {tracking_number}")
         
         if matches:
             # The most recent status is the first one found.
             # The status text is in the second captured group.
             status = matches[0][1].strip()
-            logger.info(f"Scraped status '{status}' for tracking {tracking_number} using text regex")
+            logger.info(f"DEBUG_SCRAPE: Scraped status '{status}' for tracking {tracking_number} using text regex")
             return status
 
-        logger.warning(f"Could not extract status for {tracking_number}. Content has an unknown format.")
+        logger.warning(f"DEBUG_SCRAPE: Could not extract status for {tracking_number} using primary regex. Content has an unknown format.")
+        # Add more detailed logging for debugging when the primary regex fails
+        if "OPT-343251690" in tracking_number:
+             logger.info(f"DEBUG_SCRAPE_CONTENT for {tracking_number}:\n{content[:1000]}") # Log first 1000 chars
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+        logger.error(f"DEBUG_SCRAPE: Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Unexpected error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+        logger.error(f"DEBUG_SCRAPE: Unexpected error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
         
     return None
 
@@ -746,13 +749,17 @@ def fetch_and_cache_data() -> pd.DataFrame:
         st.error("Application error: 'RETURNGO_API_KEY' is not configured in secrets.")
         return pd.DataFrame()
 
+    progress_bar = st.progress(0, text="Starting data sync...")
+
     logger.info("Cache miss. Fetching all active RMAs from ReturnGO API...")
     sync_start = time.time()
     st.session_state.last_sync_time = datetime.now(timezone.utc)
 
     # 1. Fetch RMA lists for all active statuses
     all_rmas_list = []
-    for status_val in ACTIVE_STATUSES:
+    for i, status_val in enumerate(ACTIVE_STATUSES):
+        progress_text = f"Fetching RMAs with status: {status_val}..."
+        progress_bar.progress((i + 1) / (len(ACTIVE_STATUSES) + 1), text=progress_text)
         logger.info(f"Fetching RMAs with status: {status_val}")
         batch = fetch_returngo_rmas(
             api_key=MY_API_KEY,
@@ -760,8 +767,9 @@ def fetch_and_cache_data() -> pd.DataFrame:
             status=status_val,
         )
         all_rmas_list.extend(batch)
-    logger.info(f"Total RMAs fetched from lists: {len(all_rmas_list)}")
 
+    logger.info(f"Total RMAs fetched from lists: {len(all_rmas_list)}")
+    
     def process_rma(rma_summary: dict) -> Optional[dict]:
         """
         Processes a single RMA summary, fetches full details, and enriches with courier status.
@@ -806,14 +814,20 @@ def fetch_and_cache_data() -> pd.DataFrame:
 
     # 2. Concurrently process all RMAs
     processed_results = []
+    total_rmas = len(all_rmas_list)
+    progress_bar.progress(0.5, text=f"Processing {total_rmas} RMA details...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_rma = {executor.submit(process_rma, rma): rma for rma in all_rmas_list}
-        for future in concurrent.futures.as_completed(future_to_rma):
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_rma)):
             result = future.result()
             if result:
                 processed_results.append(result)
+            if total_rmas > 0:
+                progress_bar.progress(0.5 + (i + 1) / total_rmas * 0.5, text=f"Processing details... ({i+1}/{total_rmas})")
     
     logger.info(f"Successfully processed details for {len(processed_results)} RMAs.")
+
+    progress_bar.progress(1.0, text="Sync complete!")
 
     if not processed_results:
         return pd.DataFrame()
@@ -826,6 +840,7 @@ def fetch_and_cache_data() -> pd.DataFrame:
     metrics = load_performance_metrics()
     metrics.last_sync_duration = sync_duration
     save_performance_metrics(metrics)
+    time.sleep(1) # Keep the progress bar visible for a moment
     
     return df
 
@@ -899,8 +914,9 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         status = row.get("status", "")
         tracking_number = row.get("tracking_number", "")
 
-        if not tracking_number:
+        if not tracking_number: 
             return "No tracking number"
+
         if courier_status:
             return courier_status
         if status.lower() == "approved":
@@ -1176,36 +1192,32 @@ def inject_custom_css():
     st.markdown(
         """
         <style>
-        /* Top header with blue-red gradient and sparkles */
+        /* Top header with Night-Blue/Sapphire-Red gradient and more sparkles */
         .main-header {
             background: linear-gradient(90deg, 
-                rgba(0, 100, 255, 0.4) 0%, 
-                rgba(255, 0, 100, 0.4) 100%);
+                #0A1931 0%, /* Night Blue */
+                #C70039 100%); /* Sapphire Red */
             padding: 20px;
             text-align: center;
             border-radius: 10px;
             margin-bottom: 10px;
-            box-shadow: 0 0 30px rgba(0, 100, 255, 0.5), 0 0 30px rgba(255, 0, 100, 0.5);
+            box-shadow: 0 0 20px rgba(10, 25, 49, 0.7), 0 0 20px rgba(199, 0, 57, 0.7);
             position: relative;
             overflow: hidden;
         }
         
         .main-header::before {
             content: '✨';
-            position: absolute;
-            font-size: 20px;
-            animation: sparkle 2s infinite;
-            left: 10%;
-            top: 20%;
+            position: absolute; font-size: 12px;
+            animation: sparkle 2.5s infinite linear;
+            left: 15%; top: 30%;
         }
         
         .main-header::after {
             content: '✨';
-            position: absolute;
-            font-size: 20px;
-            animation: sparkle 2s infinite 1s;
-            right: 10%;
-            bottom: 20%;
+            position: absolute; font-size: 14px;
+            animation: sparkle 2s infinite linear 0.5s;
+            right: 20%; bottom: 25%;
         }
         
         @keyframes sparkle {
@@ -1215,8 +1227,7 @@ def inject_custom_css():
         
         .main-header h1 {
             color: #ffffff;
-            font-weight: bold;
-            margin: 0;
+            font-weight: bold; margin: 0;
             text-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
         }
         
@@ -1427,7 +1438,7 @@ def main():
     st.markdown(
         """
         <div class="main-header">
-            <h1>✨ LEVI'S RETURNGO OPS DASHBOARD ✨</h1>
+            <h1>LEVI'S RETURNGO OPS DASHBOARD</h1>
         </div>
         """,
         unsafe_allow_html=True
@@ -1891,7 +1902,7 @@ def main():
         
         # Create RMA ID links
         display_df["RMA ID"] = display_df["RMA ID"].apply(
-            lambda x: f"https://app.returngo.ai/admin/rma?rmaid={x}" if x else "-"
+            lambda x: f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={x}" if x else "-"
         )
         
         # Create tracking links
@@ -1914,7 +1925,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "No": st.column_config.TextColumn("No"),
         "RMA ID": st.column_config.LinkColumn(
             "RMA ID",
-            display_text=r"rmaid=([^&]+)",
+            display_text=r"rmaid=([^&]*)",
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
@@ -1948,7 +1959,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         return "large"
 
     link_column_configs = {
-        "RMA ID": {"display_text": r"rmaid=([^&]+)"},
+        "RMA ID": {"display_text": r"rmaid=([^&]*)"},
         "Tracking Number": {"display_text": r"ref=(.*)"},
         "Tracking Number": {"display_text": r"WaybillNo=(.*)"},
     }
@@ -2070,29 +2081,21 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     # Apply styling
     styled_table = table_df.style.apply(highlight_problematic_rows, axis=1)
 
-    table_key = "rma_table"
     sel_event = st.dataframe(
         styled_table,
         use_container_width=False,
-        width="stretch",
+        width=None,
         height=700,
         hide_index=True,
         column_config=column_config,
         on_select="rerun",
-        selection_mode="single-row",
-        key=table_key,
+        selection_mode="single-row", # type: ignore
         key="rma_table",
     )
 
     sel_rows = sel_event.get("selection", {}).get("rows", []) if isinstance(sel_event, dict) else []
     if sel_rows:
-        if st.session_state.pop("suppress_row_dialog", False):
-            table_state = st.session_state.get(table_key, {})
-            if isinstance(table_state, dict):
-                table_state["selection"] = {"rows": []}
-                st.session_state[table_key] = table_state
-            st.session_state.rma_table["selection"]["rows"] = []
-        else:
+        if not st.session_state.pop("suppress_row_dialog", False):
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
 
