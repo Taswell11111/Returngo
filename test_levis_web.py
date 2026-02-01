@@ -12,7 +12,6 @@ import html
 from datetime import datetime, timedelta, timezone, date
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from sqlalchemy import create_engine, text, Engine
 import concurrent.futures
 from typing import Optional, Tuple, Dict, Callable, Set, Union, Any, Mapping, List, Literal
 from returngo_api import api_url, RMA_COMMENT_PATH
@@ -39,95 +38,11 @@ script_run_context_logger.addFilter(NoScriptRunContextWarningFilter())
 # ==========================================
 # NEW: Data classes for enhanced features
 # ==========================================
-@dataclass
-class UserSettings:
-    theme: str = "dark"  # dark, light, auto
-    favorites: List[str] = field(default_factory=list)
-    export_presets: Dict[str, Dict] = field(default_factory=dict)
-    performance_metrics: bool = True
-    keyboard_shortcuts: bool = True
-
-@dataclass
-class PerformanceMetrics:
-    api_call_times: List[float] = field(default_factory=list)
-    cache_hit_rate: float = 0.0
-    last_sync_duration: float = 0.0
-    avg_response_time: float = 0.0
-
-class Theme(Enum):
-    DARK = "dark"
-    LIGHT = "light"
-    AUTO = "auto"
+from app_classes import UserSettings, PerformanceMetrics, Theme
 
 # ==========================================
 # 1a. CONFIGURATION
 # ==========================================
-@st.cache_resource
-def init_database() -> Optional[Engine]:
-    """Initializes a robust, pooled database connection using settings from Streamlit secrets."""
-    logger.info("Initializing database connection from Streamlit secrets...")
-    try:
-        creds = st.secrets["connections"]["postgresql"]
-        dialect = creds.get("dialect", "postgresql")
-        driver = creds.get("driver")
-        user = creds["username"]
-        password = creds["password"]
-        host = creds["host"]
-        port = creds["port"]
-        database = creds["database"]
-
-        db_url = f"{dialect}{f'+{driver}' if driver else ''}://{user}:{password}@{host}:{port}/{database}"
-        connect_args = {"timeout": 60}
-
-        if driver == "pg8000" and creds.get("sslmode") == "require":
-            connect_args["ssl_context"] = True
-        elif "sslmode" in creds:
-            db_url += f"?sslmode={creds['sslmode']}"
-
-        logger.info(f"Connecting to database: {dialect} on {host}:{port}/{database}")
-
-        engine = create_engine(
-            db_url,
-            pool_pre_ping=True,
-            connect_args=connect_args,
-        )
-
-        with engine.begin() as connection:
-            connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS rmas (
-                rma_id TEXT PRIMARY KEY,
-                store_url TEXT,
-                status TEXT,
-                created_at TIMESTAMP WITH TIME ZONE,
-                json_data JSONB,
-                last_fetched TIMESTAMP WITH TIME ZONE,
-                courier_status TEXT,
-                courier_last_checked TIMESTAMP WITH TIME ZONE,
-                received_first_seen TIMESTAMP WITH TIME ZONE
-            );
-            """))
-            connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS sync_logs (
-                scope TEXT PRIMARY KEY,
-                last_sync_iso TIMESTAMP WITH TIME ZONE
-            );
-            """))
-        logger.info("Database tables verified and connection is ready.")
-        return engine
-
-    except KeyError as e:
-        logger.critical(f"Database configuration error: Missing key {e} in [connections.postgresql] secrets.")
-        st.error(f"Application error: Database configuration is missing required key: {e}. Please check your secrets.toml file.")
-        st.stop()
-        return None
-    except Exception as e:
-        logger.critical(f"Fatal error during database initialization: {e}", exc_info=True)
-        st.error(f"Application error: Could not connect to the database. Details: {e}")
-        st.stop()
-        return None
-        
-# Initialize the database connection engine at the module level
-engine = init_database()
 
 # Load API secrets
 try:
@@ -203,7 +118,7 @@ def save_user_settings(settings: UserSettings):
         with open(USER_SETTINGS_FILE, 'wb') as f:
             pickle.dump(settings, f)
     except Exception as e:
-        logger.error(f"Failed to save user settings: {e}")
+        logger.error(f"Failed to save performance metrics: {e}")
 
 def load_performance_metrics() -> PerformanceMetrics:
     """Load performance metrics from file."""
@@ -236,7 +151,7 @@ def update_performance_metrics(api_time: float):
 # ==========================================
 # 2. SAFE UTILITIES
 # ==========================================
-def safe_parse_date_iso(s: str) -> Optional[datetime]:
+def safe_parse_date_iso(s: Optional[str]) -> Optional[datetime]:
     """Parses ISO8601 timestamp or returns None."""
     if not s or not isinstance(s, str):
         return None
@@ -278,6 +193,59 @@ def compute_days_since(from_date: Optional[datetime]) -> int:
     return delta.days
 
 
+def get_event_date(rma_data: dict, event_name: str) -> Optional[datetime]:
+    """Extracts the date for a specific event from the RMA events list."""
+    # Check both top-level events and rmaSummary.events
+    events = rma_data.get("events", [])
+    if not events:
+        events = safe_get(rma_data, "rmaSummary.events", [])
+    
+    for event in events:
+        if event.get("eventName") == event_name:
+            return safe_parse_date_iso(event.get("eventDate"))
+    return None
+
+
+def get_received_date_from_events_or_comments(rma_data: dict) -> Optional[datetime]:
+    """
+    Gets the shipment received date, prioritizing the 'SHIPMENT_RECEIVED' event,
+    but falling back to the earliest system comment containing 'RECEIVED'.
+    """
+    # 1. Prioritize the official event
+    event_date = get_event_date(rma_data, "SHIPMENT_RECEIVED")
+    if event_date:
+        return event_date
+
+    # 2. Fallback to searching comments
+    comments = safe_get(rma_data, "comments", [])
+    if not comments:
+        return None
+
+    received_comment_dates = []
+    for comment in comments:
+        html_text = comment.get("htmlText", "")
+        # The user's snippet is: "Shipment &lt;strong&gt;RECEIVED&lt;/strong&gt;"
+        if "RECEIVED" in html_text.upper():
+            comment_date = safe_parse_date_iso(comment.get("datetime"))
+            if comment_date:
+                received_comment_dates.append(comment_date)
+    
+    # Return the earliest date found in comments if any
+    return min(received_comment_dates) if received_comment_dates else None
+
+
+def get_resolution_types(rma_data: dict) -> Set[str]:
+    """Gets a set of all unique resolution types from the RMA items."""
+    items = safe_get(rma_data, "items", [])
+    if not items:
+        return set()
+    return {item.get("resolutionType") for item in items if item.get("resolutionType")}
+
+def has_tracking_update_comment(rma_data: dict) -> bool:
+    """Checks if a comment indicating a tracking update exists."""
+    comments = safe_get(rma_data, "comments", [])
+    return any("was updated" in str(c.get("htmlText", "")).lower() for c in comments)
+
 def get_requests_session() -> requests.Session:
     """Creates a session with retry logic for HTTP requests."""
     session = requests.Session()
@@ -309,7 +277,6 @@ def update_rate_limit_info(response_headers: Mapping[str, str]):
                     pass
         RATE_LIMIT_INFO["updated_at"] = datetime.now(timezone.utc)
 
-# ==========================================
 # 3. RATE LIMITER
 # ==========================================
 class RateLimiter:
@@ -334,118 +301,7 @@ class RateLimiter:
 
 returngo_limiter = RateLimiter(RG_RPS)
 
-# ==========================================
-# 4. DATABASE OPERATIONS
-# ==========================================
-def fetch_all_from_db() -> pd.DataFrame:
-    """Fetches all RMA records from the database."""
-    try:
-        with engine.begin() as conn:
-            query = text("""
-                SELECT 
-                    rma_id,
-                    store_url,
-                    status,
-                    created_at,
-                    json_data,
-                    last_fetched,
-                    courier_status,
-                    courier_last_checked,
-                    received_first_seen
-                FROM rmas
-            """)
-            rows = conn.execute(query).mappings().all()
-        df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        logger.info(f"Fetched {len(df)} rows from DB.")
-        return df
-    except Exception as e:
-        logger.error(f"Error fetching from DB: {e}", exc_info=True)
-        return pd.DataFrame()
 
-
-def upsert_rma_to_db(
-    rma_id: str,
-    store_url: str,
-    status: str,
-    created_at: Optional[datetime],
-    json_data: dict,
-    courier_status: Optional[str] = None,
-    courier_last_checked: Optional[datetime] = None,
-    received_first_seen: Optional[datetime] = None,
-):
-    """Inserts or updates an RMA record in the database."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO rmas (
-                        rma_id, store_url, status, created_at, json_data,
-                        last_fetched, courier_status, courier_last_checked, received_first_seen
-                    )
-                    VALUES (
-                        :rma_id, :store_url, :status, :created_at, :json_data,
-                        :last_fetched, :courier_status, :courier_last_checked, :received_first_seen
-                    )
-                    ON CONFLICT (rma_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        json_data = EXCLUDED.json_data,
-                        last_fetched = EXCLUDED.last_fetched,
-                        courier_status = EXCLUDED.courier_status,
-                        courier_last_checked = EXCLUDED.courier_last_checked,
-                        received_first_seen = EXCLUDED.received_first_seen
-                """),
-                {
-                    "rma_id": rma_id,
-                    "store_url": store_url,
-                    "status": status,
-                    "created_at": created_at,
-                    "json_data": json.dumps(json_data),
-                    "last_fetched": datetime.now(timezone.utc),
-                    "courier_status": courier_status,
-                    "courier_last_checked": courier_last_checked,
-                    "received_first_seen": received_first_seen,
-                },
-            )
-        logger.debug(f"Upserted RMA {rma_id} to DB.")
-    except Exception as e:
-        logger.error(f"Error upserting RMA {rma_id}: {e}", exc_info=True)
-
-
-def read_sync_log(scope: str) -> Optional[datetime]:
-    """Reads the last sync timestamp for a given scope."""
-    try:
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT last_sync_iso FROM sync_logs WHERE scope = :scope"),
-                {"scope": scope},
-            ).mappings().first()
-        return row["last_sync_iso"] if row else None
-    except Exception as e:
-        logger.error(f"Error reading sync log for scope='{scope}': {e}", exc_info=True)
-        return None
-
-
-def write_sync_log(scope: str, timestamp: datetime):
-    """Writes a new sync timestamp for a given scope."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO sync_logs (scope, last_sync_iso)
-                    VALUES (:scope, :last_sync_iso)
-                    ON CONFLICT (scope) DO UPDATE SET
-                        last_sync_iso = EXCLUDED.last_sync_iso
-                """),
-                {"scope": scope, "last_sync_iso": timestamp},
-            )
-        logger.info(f"Sync log updated: scope='{scope}', timestamp={timestamp}")
-    except Exception as e:
-        logger.error(f"Error writing sync log for scope='{scope}': {e}", exc_info=True)
-
-
-def get_last_sync_time() -> Optional[datetime]:
-    """Returns the last all_active sync time from DB."""
-    return read_sync_log("all_active")
 
 # ==========================================
 # 5. RETURNGO API CALLS
@@ -491,7 +347,7 @@ def fetch_returngo_rmas(
             resp = session.get(
                 "https://api.returngo.ai/rmas",
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "x-api-key": api_key,
                     "x-shop-name": store_url,
                     "Content-Type": "application/json",
                 },
@@ -522,7 +378,7 @@ def fetch_returngo_rmas(
             logger.info(f"Page {page}: fetched {len(rmas)} RMAs (total so far: {len(all_rmas)})")
             
             # Check for cursor to continue pagination
-            cursor = data.get("cursor")
+            cursor = data.get("next_cursor")
             if not cursor:
                 break
                 
@@ -549,7 +405,7 @@ def get_rma_by_id(api_key: str, store_url: str, rma_id: str) -> Optional[dict]:
         resp = session.get(
             f"https://api.returngo.ai/rma/{rma_id}",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "x-api-key": api_key,
                 "x-shop-name": store_url,
                 "Content-Type": "application/json",
             },
@@ -577,7 +433,7 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
         resp = session.post(
             f"https://api.returngo.ai/rma/{rma_id}/comment",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "x-api-key": api_key,
                 "x-shop-name": store_url,
                 "Content-Type": "application/json",
             },
@@ -596,157 +452,251 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
         return False
 
 # ==========================================
-# 6. PARCEL NINJA API
+# 6. DATA FETCHING AND CACHING
 # ==========================================
-def fetch_parcel_ninja_tracking(tracking_number: str, token: str) -> Optional[dict]:
-    """Fetches tracking info from Parcel Ninja."""
-    if not token or not tracking_number:
+def extract_status_from_comments(comments: list) -> Optional[str]:
+    """
+    Extracts the most recent shipment status from RMA comments.
+    Looks for system comments indicating shipment status changes.
+    """
+    if not comments:
         return None
-    session = get_requests_session()
-    try:
-        url = f"https://api.shiplogic.com/v2/tracking/{tracking_number}"
-        resp = session.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Error fetching PN tracking for {tracking_number}: {e}", exc_info=True)
-        return None
-
-# ==========================================
-# 7. SYNC ORCHESTRATION
-# ==========================================
-def compute_incremental_time_window() -> Tuple[Optional[str], Optional[str]]:
-    """
-    Computes start_date & end_date for incremental syncs.
-    If no prior sync exists, returns (None, None) => full fetch.
-    """
-    last_sync = get_last_sync_time()
-    if not last_sync:
-        logger.info("No prior sync found. Will fetch all RMAs.")
-        return None, None
-
-    overlap_delta = timedelta(minutes=SYNC_OVERLAP_MINUTES)
-    start_dt = last_sync - overlap_delta
-    end_dt = datetime.now(timezone.utc) + timedelta(hours=1)
-    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    logger.info(f"Incremental sync window: {start_iso} to {end_iso}")
-    return start_iso, end_iso
-
-
-def sync_all_active_rmas(api_key: str, store_url: str, incremental: bool = True):
-    """
-    Syncs active RMAs (Pending, Approved, Received) with the database.
-    """
-    logger.info(f"Starting sync_all_active_rmas. incremental={incremental}")
-    start_date, end_date = compute_incremental_time_window() if incremental else (None, None)
-
-    all_rmas_batch = []
-    for status_val in ACTIVE_STATUSES:
-        batch = fetch_returngo_rmas(
-            api_key=api_key,
-            store_url=store_url,
-            status=status_val,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        all_rmas_batch.extend(batch)
-
-    logger.info(f"Total RMAs fetched across all active statuses: {len(all_rmas_batch)}")
-
-    for rma_data in all_rmas_batch:
-        rma_id = rma_data.get("rmaId")
-        status_str = rma_data.get("status")
-        created_str = rma_data.get("createdAt")
-        created_dt = safe_parse_date_iso(created_str)
-        upsert_rma_to_db(
-            rma_id=rma_id,
-            store_url=store_url,
-            status=status_str,
-            created_at=created_dt,
-            json_data=rma_data,
-        )
-
-    write_sync_log("all_active", datetime.now(timezone.utc))
-    logger.info("Sync of active RMAs completed.")
-
-
-def refresh_single_rma(api_key: str, store_url: str, rma_id: str):
-    """Refreshes a single RMA from the API and updates the DB."""
-    logger.info(f"Refreshing single RMA: {rma_id}")
-    rma_data = get_rma_by_id(api_key, store_url, rma_id)
-    if not rma_data:
-        logger.warning(f"No data returned for RMA {rma_id}.")
-        return
-    status_str = rma_data.get("status")
-    created_str = rma_data.get("createdAt")
-    created_dt = safe_parse_date_iso(created_str)
-    upsert_rma_to_db(
-        rma_id=rma_id,
-        store_url=store_url,
-        status=status_str,
-        created_at=created_dt,
-        json_data=rma_data,
+    
+    # Status keywords to look for (in order of priority)
+    status_keywords = [
+        ("RECEIVED", "Received"),
+        ("DELIVERED", "Delivered"),
+        ("IN TRANSIT", "In Transit"),
+        ("SHIPPED", "In Transit"),
+        ("CANCELLED", "Courier Cancelled"),
+        ("COLLECTION", "Submitted to Courier"),
+    ]
+    
+    # Sort comments by datetime (most recent first)
+    sorted_comments = sorted(
+        comments,
+        key=lambda c: safe_parse_date_iso(c.get("datetime")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
     )
-    logger.info(f"RMA {rma_id} refreshed successfully.")
+    
+    # Look for status in comments (most recent first)
+    for comment in sorted_comments:
+        html_text = comment.get("htmlText", "").upper()
+        
+        for keyword, status in status_keywords:
+            if keyword in html_text:
+                logger.debug(f"Found status '{status}' in comment: {html_text}")
+                return status
+    
+    return None
 
 
-def refresh_courier_statuses_for_approved(api_key: str, store_url: str):
+def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
     """
-    Refreshes courier tracking for Approved RMAs.
+    Scrapes the Parcel Ninja website to get the latest tracking status.
+    Handles both plain text and HTML table responses.
     """
-    logger.info("Starting refresh of courier statuses for Approved RMAs.")
-    df = fetch_all_from_db()
-    if df.empty:
-        logger.info("No data in DB to refresh courier statuses.")
-        return
+    if not tracking_url:
+        return None
+    
+    # Use the provided tracking URL directly
+    url = tracking_url
+    tracking_number = url.split('/')[-1]  # For logging purposes
 
-    now_utc = datetime.now(timezone.utc)
-    cutoff_dt = now_utc - timedelta(hours=COURIER_REFRESH_HOURS)
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        content = response.text
 
-    approved_mask = df["status"].str.lower() == "approved"
-    approved_df = df[approved_mask].copy()
+        # Updated regex to capture both date and status
+        text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2})\s+([A-Za-z ]+)"
+        matches = re.findall(text_pattern, content)
+        
+        if matches:
+            # Return the full status with date: "Fri, 05 Dec 18:11 Courier Cancelled"
+            full_status = f"{matches[0][0]} {matches[0][1].strip()}"
+            logger.info(f"Scraped status '{full_status}' for tracking {tracking_number} using text regex")
+            return full_status
 
-    for idx, row in approved_df.iterrows():
-        rma_id = row["rma_id"]
-        json_data = row["json_data"]
-        if isinstance(json_data, str):
-            try:
-                json_data = json.loads(json_data)
-            except:
-                json_data = {}
+        # Fallback to parsing as an HTML table if the text regex fails.
+        html_pattern = re.compile(r"""
+            <tbody[^>]*>.*?<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>([^<]+)</td>
+        """, re.VERBOSE | re.IGNORECASE | re.DOTALL)
+        
+        match = html_pattern.search(content)
+        if match:
+            status = match.group(1).strip()
+            logger.info(f"Scraped status '{status}' for tracking {tracking_number} from HTML")
+            return status
 
-        tracking_number = safe_get(json_data, "returnLabel.trackingNumber")
-        if not tracking_number:
-            continue
+        logger.warning(f"Could not extract status for {tracking_number}. Content has an unknown format.")
 
-        courier_last_checked = row.get("courier_last_checked")
-        if courier_last_checked and courier_last_checked > cutoff_dt:
-            continue
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Unexpected error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+        
+    return None
 
-        if not PARCEL_NINJA_TOKEN:
-            logger.debug(f"No PARCEL_NINJA_TOKEN configured, skipping courier check for {rma_id}")
-            continue
 
-        pn_data = fetch_parcel_ninja_tracking(tracking_number, PARCEL_NINJA_TOKEN)
-        if pn_data:
-            new_courier_status = pn_data.get("status")
-            upsert_rma_to_db(
-                rma_id=rma_id,
-                store_url=store_url,
-                status=row["status"],
-                created_at=row["created_at"],
-                json_data=json_data,
-                courier_status=new_courier_status,
-                courier_last_checked=now_utc,
-            )
-            logger.info(f"Updated courier status for {rma_id}: {new_courier_status}")
+def get_shipment_status(rma_data: dict) -> Optional[str]:
+    """
+    Gets the shipment status using multiple methods in order of preference:
+    1. From web scraping Parcel Ninja (for the most up-to-date status)
+    2. From shipment status in API data (as a fallback)
+    3. From RMA comments (as a final fallback)
+    """
+    shipments = safe_get(rma_data, "shipments", [])
+    tracking_url = safe_get(shipments, "0.trackingURL") if shipments else None
+    tracking_number = safe_get(shipments, "0.trackingNumber") if shipments else None
+    
+    logger.debug(f"Tracking URL for {tracking_number}: {tracking_url}")
 
-    logger.info("Courier statuses refresh completed.")
+    # Method 1 (NEW PRIORITY): Scrape Parcel Ninja website for the latest status.
+    if tracking_url:
+        scraped_status = scrape_parcel_ninja_status(tracking_url)
+        if scraped_status:
+            logger.info(f"Successfully scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
+            return scraped_status
+        else:
+            logger.warning(f"Failed to scrape status from URL: {tracking_url}")
+
+    # Method 2 (Fallback): Check shipment status from API data.
+    if shipments:
+        shipment_status = shipments[0].get("status")
+        if shipment_status:
+            # Map API shipment statuses to our display statuses
+            status_map = {
+                "LabelCreated": "Submitted to Courier",
+                "Shipped": "In Transit",
+                "InTransit": "In Transit",
+                "Delivered": "Delivered",
+                "Received": "Received",
+                "Cancelled": "Courier Cancelled",
+            }
+            mapped_status = status_map.get(shipment_status)
+            if mapped_status:
+                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number or 'N/A'}")
+                return mapped_status
+    
+    # Method 3 (Final Fallback): Check comments for status updates.
+    comments = safe_get(rma_data, "comments", [])
+    comment_status = extract_status_from_comments(comments)
+    if comment_status:
+        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number or 'N/A'}")
+        return comment_status
+    
+    return None
+
+
+
+
+@st.cache_data(ttl=43200)
+def fetch_and_cache_data() -> pd.DataFrame:
+    """
+    Fetches all active RMAs from the ReturnGO API, enriches them with details
+    and courier statuses, and caches the resulting DataFrame for 12 hours.
+    This is the primary data source for the application.
+    """
+    if not MY_API_KEY:
+        st.error("Application error: 'RETURNGO_API_KEY' is not configured in secrets.")
+        return pd.DataFrame()
+
+    progress_bar = st.progress(0, text="Starting data sync...")
+
+    logger.info("Cache miss. Fetching all active RMAs from ReturnGo API...")
+    sync_start = time.time()
+    st.session_state.last_sync_time = datetime.now(timezone.utc)
+
+    # 1. Fetch RMA lists for all active statuses
+    all_rmas_list = []
+    for i, status_val in enumerate(ACTIVE_STATUSES):
+        progress_text = f"Fetching RMAs with status: {status_val}..."
+        progress_bar.progress((i + 1) / (len(ACTIVE_STATUSES) + 1), text=progress_text)
+        logger.info(f"Fetching RMAs with status: {status_val}")
+        batch = fetch_returngo_rmas(
+            api_key=MY_API_KEY,
+            store_url=STORE_URL,
+            status=status_val,
+        )
+        all_rmas_list.extend(batch)
+
+    logger.info(f"Total RMAs fetched from lists: {len(all_rmas_list)}")
+    
+    def process_rma(rma_summary: dict) -> Optional[dict]:
+        """
+        Processes a single RMA summary, fetches full details, and enriches with courier status.
+        """
+        rma_id = rma_summary.get("rmaId")
+        if not rma_id:
+            return None
+
+        if not MY_API_KEY:
+            logger.warning(f"Skipping RMA {rma_id} due to missing API key.")
+            return None
+
+        # Fetch full RMA details
+        rma_detail = get_rma_by_id(MY_API_KEY, STORE_URL, rma_id)
+        if not rma_detail:
+            # Fallback to summary data if detail fetch fails
+            rma_detail = rma_summary
+
+        # Get tracking number
+        tracking_number = safe_get(rma_detail, "shipments.0.trackingNumber")
+        status = safe_get(rma_detail, "rmaSummary.status") or rma_detail.get("status", "")
+        
+        # Get courier status for Approved or Received RMAs with tracking
+        courier_status = None
+        if status.lower() in ["approved", "received"]:
+            courier_status = get_shipment_status(rma_detail)
+        
+        if courier_status:
+            rma_detail['courier_status'] = courier_status
+        
+        rma_detail['courier_status'] = courier_status
+        # Structure the data for the DataFrame
+        return {
+            "rma_id": rma_id,
+            "store_url": safe_get(rma_detail, "rmaSummary.storeUrl") or rma_detail.get("storeUrl"),
+            "status": status,
+            "created_at": safe_parse_date_iso(rma_detail.get("createdAt")),
+            "json_data": rma_detail,
+            "courier_status": courier_status,
+        }
+
+    # 2. Concurrently process all RMAs
+    processed_results = []
+    total_rmas = len(all_rmas_list)
+    progress_bar.progress(0.5, text=f"Processing {total_rmas} RMA details...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_rma = {executor.submit(process_rma, rma): rma for rma in all_rmas_list}
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_rma)):
+            result = future.result()
+            if result:
+                processed_results.append(result)
+            if total_rmas > 0:
+                progress_bar.progress(0.5 + (i + 1) / total_rmas * 0.5, text=f"Processing details... ({i+1}/{total_rmas})")
+    
+    logger.info(f"Successfully processed details for {len(processed_results)} RMAs.")
+
+    progress_bar.progress(1.0, text="Sync complete!")
+
+    if not processed_results:
+        return pd.DataFrame()
+
+    # 3. Convert to DataFrame and return
+    df = pd.DataFrame(processed_results)
+    
+    # Update sync duration
+    sync_duration = time.time() - sync_start
+    metrics = load_performance_metrics()
+    metrics.last_sync_duration = sync_duration
+    save_performance_metrics(metrics)
+    time.sleep(1) # Keep the progress bar visible for a moment
+    
+    return df
+
+
 
 # ==========================================
 # 8. DATA FRAME ENRICHMENT
@@ -760,59 +710,90 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    # Parse json_data if it's a string
-    def parse_json(val):
-        if isinstance(val, str):
-            try:
-                return json.loads(val)
-            except:
-                return {}
-        return val if isinstance(val, dict) else {}
+    def get_comment_date(comments: list, text_to_find: str) -> Optional[datetime]:
+        if not comments:
+            return None
+        for comment in comments:
+            if text_to_find in comment.get("htmlText", ""):
+                return safe_parse_date_iso(comment.get("datetime"))
+        return None
 
-    df["json_data"] = df["json_data"].apply(parse_json)
-
-    # Extract fields using correct API field names
-    df["order_name"] = df["json_data"].apply(lambda x: safe_get(x, "orderName", "-"))
-    df["requested_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "createdAt")))
-    df["approved_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "approvedDate")))
-    df["received_date"] = df["json_data"].apply(lambda x: safe_parse_date_iso(safe_get(x, "receivedDate")))
-    df["tracking_number"] = df["json_data"].apply(lambda x: safe_get(x, "returnLabel.trackingNumber", ""))
-    df["resolution_type"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionType", ""))
-    df["resolution_actioned"] = df["json_data"].apply(lambda x: safe_get(x, "resolutionActioned", ""))
-
-    # Days since requested
+    # Extract order_name from multiple possible locations
+    def extract_order_name(json_data: dict) -> str:
+        # Try rmaSummary.order_name first
+        order_name = safe_get(json_data, "rmaSummary.order_name")
+        if order_name:
+            return order_name
+        # Try orderDetails.order_name
+        order_name = safe_get(json_data, "orderDetails.order_name")
+        if order_name:
+            return order_name
+        # Try top-level order_name (from list endpoint)
+        order_name = json_data.get("order_name")
+        if order_name:
+            return order_name
+        return "-"
+    
+    df["order_name"] = df["json_data"].apply(extract_order_name)
+    
+    def get_first_tracking(json_data: dict) -> str:
+        shipments = safe_get(json_data, "shipments", [])
+        if not shipments:
+            return ""
+        for s in shipments:
+            if s and s.get("trackingNumber"):
+                return s.get("trackingNumber")
+        return ""
+    
+    df["tracking_number"] = df["json_data"].apply(get_first_tracking)
+    df["requested_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_CREATED"))
+    df["approved_date"] = df["json_data"].apply(lambda x: get_event_date(x, "RMA_APPROVED"))
+    df["received_date"] = df["json_data"].apply(get_received_date_from_events_or_comments)
+    
+    def extract_resolution_types(json_data: dict) -> str:
+        res_types = get_resolution_types(json_data)
+        return ", ".join(res_types) if res_types else "-"
+    
+    df["resolution_type"] = df["json_data"].apply(extract_resolution_types)
+    
+    df["resolution_actioned"] = df["json_data"].apply(
+        lambda x: "Yes" if safe_get(x, "transactions") or safe_get(x, "exchangeOrders") else "No"
+    )
     df["days_since_requested"] = df["requested_date"].apply(compute_days_since)
 
-    # Tracking status classification
     def classify_tracking_status(row):
         courier_status = row.get("courier_status", "")
         status = row.get("status", "")
         tracking_number = row.get("tracking_number", "")
 
-        if not tracking_number:
+        if not tracking_number: 
             return "No tracking number"
+
+        # If we have scraped courier status, it always takes precedence
         if courier_status:
             return courier_status
+        
+        # Only fall back to "Submitted to Courier" if we don't have any courier status
         if status.lower() == "approved":
             return "Submitted to Courier"
+        
         return "-"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
 
-    # DisplayTrack for filtering
     df["DisplayTrack"] = df.apply(
         lambda r: bool(r.get("tracking_number")) and r.get("status", "").lower() in ["approved", "received"],
         axis=1
     )
 
-    # Flags
+    df["Is_tracking_updated"] = df["json_data"].apply(has_tracking_update_comment)
+
     df["is_cc"] = df["tracking_status"].str.lower().str.contains("cancelled", case=False, na=False)
     df["is_fg"] = df.apply(
         lambda r: (r.get("status", "").lower() in ["approved", "received"]) and not r.get("DisplayTrack", False),
         axis=1
     )
 
-    # Failure detection
     def detect_failures(row):
         failures = []
         status = row.get("status", "")
@@ -909,10 +890,10 @@ def show_rma_actions_dialog(row_data: pd.Series):
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Refresh this RMA", key=f"refresh_{rma_id}"):
-            refresh_single_rma(MY_API_KEY, STORE_URL, rma_id)
-            append_ops_log(f"Refreshed RMA {rma_id}")
-            st.success(f"RMA {rma_id} refreshed!")
+        if st.button("🔄 Refresh Data (Clear Cache)", key=f"refresh_{rma_id}"):
+            st.cache_data.clear()
+            append_ops_log(f"Cache cleared to refresh RMA {rma_id}. Rerunning.")
+            st.success(f"Cache cleared. Data will be refreshed.")
             time.sleep(1)
             st.rerun()
 
@@ -924,6 +905,9 @@ def show_rma_actions_dialog(row_data: pd.Series):
         comment_text = st.text_area("Enter your comment:", key=f"comment_text_{rma_id}")
         if st.button("Submit Comment", key=f"submit_comment_{rma_id}"):
             if comment_text.strip():
+                if not MY_API_KEY:
+                    st.error("Cannot post comment: 'RETURNGO_API_KEY' is not configured.")
+                    return
                 success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
                 if success:
                     st.success("Comment posted!")
@@ -1064,25 +1048,55 @@ def inject_custom_css():
     st.markdown(
         """
         <style>
-        /* Top header neon gradient */
+        /* Top header with Night-Blue/Sapphire-Red gradient and more sparkles */
         .main-header {
             background: linear-gradient(90deg, 
-                rgba(0, 255, 255, 0.3) 0%, 
-                rgba(0, 255, 0, 0.3) 33%, 
-                rgba(255, 0, 0, 0.3) 66%, 
-                rgba(0, 255, 255, 0.3) 100%);
+                #0A1931 0%, /* Night Blue */
+                #C70039 100%); /* Sapphire Red */
             padding: 20px;
             text-align: center;
             border-radius: 10px;
-            margin-bottom: 20px;
-            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            margin-bottom: 10px;
+            box-shadow: 0 0 20px rgba(10, 25, 49, 0.7), 0 0 20px rgba(199, 0, 57, 0.7);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .main-header::before {
+            content: '✨';
+            position: absolute; font-size: 12px;
+            animation: sparkle 2.5s infinite linear;
+            left: 15%; top: 30%;
+        }
+        
+        .main-header::after {
+            content: '✨';
+            position: absolute; font-size: 14px;
+            animation: sparkle 2s infinite linear 0.5s;
+            right: 20%; bottom: 25%;
+        }
+        
+        @keyframes sparkle {
+            0%, 100% { opacity: 0; }
+            50% { opacity: 1; }
         }
         
         .main-header h1 {
             color: #ffffff;
-            font-weight: bold;
-            margin: 0;
-            text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+            font-weight: bold; margin: 0;
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
+        }
+        
+        /* Connection status bar */
+        .connection-status {
+            background: rgba(20, 20, 20, 0.9);
+            border: 1px solid rgba(100, 100, 100, 0.3);
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+            color: #00ff00;
+            font-size: 14px;
         }
         
         /* Red neon power button */
@@ -1183,8 +1197,8 @@ def inject_custom_css():
             box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
         }
         
-        /* Left panel navigation box */
-        .nav-panel {
+        /* API Details panel */
+        .api-panel {
             background: rgba(30, 30, 30, 0.9);
             border: 1px solid rgba(100, 100, 100, 0.5);
             border-radius: 10px;
@@ -1192,13 +1206,29 @@ def inject_custom_css():
             margin-bottom: 15px;
         }
         
-        /* Sidebar arrow box */
-        .arrow-box {
-            background: rgba(40, 40, 40, 0.8);
-            border: 1px solid rgba(80, 80, 80, 0.6);
-            border-radius: 8px;
-            padding: 10px;
-            margin-bottom: 15px;
+        .api-panel h3 {
+            color: #00ccff;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .api-setting {
+            margin-bottom: 10px;
+            padding: 8px;
+            background: rgba(40, 40, 40, 0.6);
+            border-radius: 5px;
+        }
+        
+        .api-setting-label {
+            color: #aaaaaa;
+            font-size: 12px;
+            margin-bottom: 3px;
+        }
+        
+        .api-setting-value {
+            color: #00ff00;
+            font-weight: bold;
+            font-size: 14px;
         }
         
         /* Table actions */
@@ -1252,7 +1282,7 @@ def main():
     if "active_filter" not in st.session_state:
         st.session_state.active_filter = "All"
     if "last_sync_time" not in st.session_state:
-        st.session_state.last_sync_time = get_last_sync_time()
+        st.session_state.last_sync_time = None
     if "ops_log" not in st.session_state:
         st.session_state.ops_log = []
     if "user_settings" not in st.session_state:
@@ -1260,7 +1290,7 @@ def main():
     if "performance_metrics" not in st.session_state:
         st.session_state.performance_metrics = load_performance_metrics()
 
-    # Top header with neon gradient
+    # Top header with blue-red gradient and sparkles
     st.markdown(
         """
         <div class="main-header">
@@ -1269,14 +1299,58 @@ def main():
         """,
         unsafe_allow_html=True
     )
+    
+    # Connection status bar
+    last_sync_time = st.session_state.get("last_sync_time")
+    sync_time_display = (
+        last_sync_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+        if last_sync_time
+        else "N/A"
+    )
+    st.markdown(
+        f"""
+        <div class="connection-status">
+            🟢 Connected to store: <strong>{STORE_URL}</strong> | Last sync: <strong>{sync_time_display}</strong>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     # Sidebar
     with st.sidebar:
-        st.markdown("<div class='arrow-box'>", unsafe_allow_html=True)
-        st.markdown("### Navigation")
+        st.markdown("<div class='api-panel'>", unsafe_allow_html=True)
+        st.markdown("### 🔌 API Details")
+        
+        # API Settings
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Store URL</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{STORE_URL}</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         
-        st.markdown("<div class='nav-panel'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>API Key Status</div>", unsafe_allow_html=True)
+        api_status = "🟢 Active" if MY_API_KEY else "🔴 Missing"
+        st.markdown(f"<div class='api-setting-value'>{api_status}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Rate Limit (RPS)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{RG_RPS}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Cache TTL</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{CACHE_EXPIRY_HOURS}h</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div class='api-setting'>", unsafe_allow_html=True)
+        st.markdown("<div class='api-setting-label'>Max Workers</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='api-setting-value'>{MAX_WORKERS}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("---")
         
         # Power button (red neon)
         st.markdown(
@@ -1321,61 +1395,19 @@ def main():
         
         st.markdown("---")
         
-        # Sync controls
-        st.subheader("Sync Controls")
-        if st.button("🔄 Sync All Active", use_container_width=True):
-            with st.spinner("Syncing all active RMAs..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=True)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed sync of all active RMAs")
-            st.success("Sync completed!")
+        # Cache controls
+        st.subheader("Cache Controls")
+        if st.button("🔄 Clear Cache & Refresh Data", width="stretch"):
+            with st.spinner("Clearing cache and refreshing data..."):
+                st.cache_data.clear()
+                append_ops_log("Cache cleared. Fetching fresh data.")
+            st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("🔄 Full Refresh (All)", use_container_width=True):
-            with st.spinner("Performing full refresh..."):
-                sync_all_active_rmas(MY_API_KEY, STORE_URL, incremental=False)
-                st.session_state.last_sync_time = datetime.now(timezone.utc)
-                append_ops_log("Completed full refresh of all RMAs")
-            st.success("Full refresh completed!")
-            st.rerun()
-
-        if st.button("📦 Refresh Courier Status", use_container_width=True):
-            with st.spinner("Refreshing courier statuses..."):
-                refresh_courier_statuses_for_approved(MY_API_KEY, STORE_URL)
-                append_ops_log("Refreshed courier statuses for approved RMAs")
-            st.success("Courier statuses refreshed!")
-            st.rerun()
-
-        st.markdown("---")
-        
-        # Database info
-        st.subheader("Database Info")
-        try:
-            with engine.begin() as conn:
-                result = conn.execute(text("SELECT COUNT(*) as cnt FROM rmas")).mappings().first()
-                total_rmas = result["cnt"] if result else 0
-            st.metric("Total RMAs in DB", total_rmas)
-        except Exception as e:
-            st.error(f"DB Error: {e}")
-        
-        # Verify schema button
-        if st.button("Verify Schema", use_container_width=True):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("SELECT 1 FROM rmas LIMIT 1"))
-                    conn.execute(text("SELECT 1 FROM sync_logs LIMIT 1"))
-                st.success("✅ Schema verified!")
-                append_ops_log("Database schema verified successfully")
-            except Exception as e:
-                st.error(f"Schema verification failed: {e}")
-                append_ops_log(f"Schema verification failed: {e}")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-        
         st.markdown("---")
         
         # Activity log in terminal-style box
-        st.subheader("Activity Log")
+        st.subheader("📋 Activity Log")
         st.markdown("<div class='activity-log'>", unsafe_allow_html=True)
         if st.session_state.ops_log:
             log_text = "\n".join(st.session_state.ops_log[-20:])
@@ -1385,7 +1417,7 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     # Main content area
-    df_raw = fetch_all_from_db()
+    df_raw = fetch_and_cache_data()
     df_enriched = enrich_rma_dataframe(df_raw)
     counts = compute_counts(df_enriched)
 
@@ -1401,7 +1433,7 @@ def main():
         
         if not timeline_df.empty:
             date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)  # type: ignore
                 .size()
                 .reset_index(name="Count")
             )
@@ -1416,13 +1448,13 @@ def main():
     st.markdown("---")
     st.markdown("### 📊 RMA Command Center")
 
-    # RMA Details section (formerly Performance Metrics)
+    # RMA Details section
     st.markdown("#### RMA Details")
     
     # Create metric cards in grid layout
     metric_cols = st.columns(4)
     
-    # First row: Total Open, Pending, In Transit, Issues (with hover)
+    # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
         st.markdown(
             f"""
@@ -1434,7 +1466,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_total_open", use_container_width=True):
+        if st.button("View", key="btn_total_open", width="stretch"):
             st.session_state.active_filter = "All"
             st.rerun()
     
@@ -1449,7 +1481,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_pending", use_container_width=True):
+        if st.button("View", key="btn_pending", width="stretch"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
@@ -1464,7 +1496,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_in_transit", use_container_width=True):
+        if st.button("View", key="btn_in_transit", width="stretch"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
@@ -1480,7 +1512,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_issues", use_container_width=True):
+        if st.button("View", key="btn_issues", width="stretch"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1501,7 +1533,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_pending_req", use_container_width=True):
+        if st.button("Filter", key="btn_pending_req", width="stretch"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
@@ -1517,7 +1549,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_received", use_container_width=True):
+        if st.button("Filter", key="btn_received", width="stretch"):
             st.session_state.active_filter = "Received"
             st.rerun()
     
@@ -1533,7 +1565,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
+        if st.button("Filter", key="btn_courier_cancelled", width="stretch"):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
@@ -1549,7 +1581,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_submitted", use_container_width=True):
+        if st.button("Filter", key="btn_submitted", width="stretch"):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1568,7 +1600,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_delivered", use_container_width=True):
+        if st.button("Filter", key="btn_delivered", width="stretch"):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
@@ -1584,7 +1616,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
+        if st.button("Filter", key="btn_no_tracking", width="stretch"):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
@@ -1600,7 +1632,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
+        if st.button("Filter", key="btn_res_actioned", width="stretch"):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
@@ -1616,7 +1648,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
+        if st.button("Filter", key="btn_no_res_actioned", width="stretch"):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
@@ -1631,7 +1663,7 @@ def main():
             key="search_query_input",
         )
     with sc3:
-        if st.button("📋 View All", use_container_width=True):
+        if st.button("📋 View All", width="stretch"):
             st.session_state.active_filter = "All"
             clear_all_filters()
             st.rerun()
@@ -1659,7 +1691,7 @@ def main():
             st.multiselect("Tracking Status", options=COURIER_STATUS_OPTIONS, key="tracking_multi")
         
         with c5:
-            if st.button("🧼 Clear filters", use_container_width=True):
+            if st.button("🧼 Clear filters", width="stretch"):
                 clear_all_filters()
                 st.rerun()
 
@@ -1678,7 +1710,7 @@ def main():
     df_filtered = apply_filters(df_enriched)
     df_filtered = apply_additional_filters(df_filtered)
     
-    # Display columns (removed DisplayTrack, is_cc, is_fg)
+    # Display columns
     display_cols = [
         "No",
         "RMA ID",
@@ -1726,12 +1758,12 @@ def main():
         
         # Create RMA ID links
         display_df["RMA ID"] = display_df["RMA ID"].apply(
-            lambda x: f"https://app.returngo.ai/admin/rma?rmaid={x}" if x else "-"
+            lambda x: f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={x}" if x else "-"
         )
         
-        # Create tracking links
+        # Create tracking links - UPDATED to thecourierguy.co.za
         display_df["Tracking Number"] = display_df.apply(
-            lambda row: f"https://tracking.pngo.co.za/track?ref={row['Tracking Number']}" 
+            lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
             else "-",
             axis=1
@@ -1749,11 +1781,14 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "No": st.column_config.TextColumn("No"),
         "RMA ID": st.column_config.LinkColumn(
             "RMA ID",
-            display_text=r"rmaid=([^&]+)",
+            display_text=r"rmaid=([^&]*)",
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)"),
+        "Tracking Number": st.column_config.LinkColumn(
+            "Tracking Number", 
+            help="Click to track on The Courier Guy portal"
+        ),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1778,7 +1813,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         return "large"
 
     link_column_configs = {
-        "RMA ID": {"display_text": r"rmaid=([^&]+)"},
+        "RMA ID": {"display_text": r"rmaid=([^&]*)"},
         "Tracking Number": {"display_text": r"ref=(.*)"},
     }
 
@@ -1832,12 +1867,12 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     
     action_col1, action_col2 = st.columns([1, 1])
     with action_col1:
-        if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
+        if st.button("Data table log", key="btn_data_table_log", width="stretch"):
             st.session_state["suppress_row_dialog"] = True
             show_data_table_log()
     
     with action_col2:
-        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True):
+        if st.button("📋 Copy all", key="btn_copy_all", width="stretch"):
             st.session_state["copy_all_payload"] = tsv_text
             st.session_state["suppress_row_dialog"] = True
 
@@ -1890,26 +1925,20 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     # Apply styling
     styled_table = table_df.style.apply(highlight_problematic_rows, axis=1)
 
-    table_key = "rma_table"
     sel_event = st.dataframe(
         styled_table,
-        use_container_width=True,
+        use_container_width=False,
         height=700,
         hide_index=True,
         column_config=column_config,
-        on_select="rerun",
+        on_select="rerun", # type: ignore
         selection_mode="single-row",
-        key=table_key,
+        key="rma_table",
     )
 
     sel_rows = sel_event.get("selection", {}).get("rows", []) if isinstance(sel_event, dict) else []
     if sel_rows:
-        if st.session_state.pop("suppress_row_dialog", False):
-            table_state = st.session_state.get(table_key, {})
-            if isinstance(table_state, dict):
-                table_state["selection"] = {"rows": []}
-                st.session_state[table_key] = table_state
-        else:
+        if not st.session_state.pop("suppress_row_dialog", False):
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
 
