@@ -47,12 +47,10 @@ from app_classes import UserSettings, PerformanceMetrics, Theme
 # Load API secrets
 try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-    PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
 except KeyError:
     st.error("Application error: Missing 'RETURNGO_API_KEY' in Streamlit secrets.")
     st.stop()
     MY_API_KEY = None
-    PARCEL_NINJA_TOKEN = None
 STORE_URL = "levis-sa.myshopify.com"
 
 # Efficiency controls
@@ -75,7 +73,6 @@ COURIER_STATUS_OPTIONS = [
 RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO: Dict[str, Union[int, str, datetime, None]] = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 RATE_LIMIT_LOCK = threading.Lock()
-PARCEL_NINJA_TOKEN: Optional[str] = None
 df_view = pd.DataFrame()
 counts: Dict[str, int] = {}
 
@@ -494,40 +491,29 @@ def extract_status_from_comments(comments: list) -> Optional[str]:
 def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
     """
     Scrapes the Parcel Ninja website to get the latest tracking status.
-    Handles both plain text and HTML table responses.
+    Returns the exact status line with the pipe: "Thu, 22 Jan 12:35 | Delivered"
     """
     if not tracking_url:
         return None
     
     # Use the provided tracking URL directly
     url = tracking_url
-    tracking_number = url.split('/')[-1]  # For logging purposes
+    tracking_number = url.split('=')[-1] if '=' in url else url.split('/')[-1]
 
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         content = response.text
 
-        # Updated regex to capture both date and status
-        text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2})\s+([A-Za-z ]+)"
+        # Regex to capture the entire tracking line including the pipe
+        text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)"
         matches = re.findall(text_pattern, content)
         
         if matches:
-            # Return the full status with date: "Fri, 05 Dec 18:11 Courier Cancelled"
-            full_status = f"{matches[0][0]} {matches[0][1].strip()}"
-            logger.info(f"Scraped status '{full_status}' for tracking {tracking_number} using text regex")
+            # Return the exact status line: "Thu, 22 Jan 12:35 | Delivered"
+            full_status = matches[0].strip()
+            logger.info(f"Scraped status '{full_status}' for tracking {tracking_number}")
             return full_status
-
-        # Fallback to parsing as an HTML table if the text regex fails.
-        html_pattern = re.compile(r"""
-            <tbody[^>]*>.*?<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>([^<]+)</td>
-        """, re.VERBOSE | re.IGNORECASE | re.DOTALL)
-        
-        match = html_pattern.search(content)
-        if match:
-            status = match.group(1).strip()
-            logger.info(f"Scraped status '{status}' for tracking {tracking_number} from HTML")
-            return status
 
         logger.warning(f"Could not extract status for {tracking_number}. Content has an unknown format.")
 
@@ -541,51 +527,23 @@ def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
 
 def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
-    Gets the shipment status using multiple methods in order of preference:
-    1. From web scraping Parcel Ninja (for the most up-to-date status)
-    2. From shipment status in API data (as a fallback)
-    3. From RMA comments (as a final fallback)
+    Gets the shipment status using ONLY web scraping Parcel Ninja.
+    Returns None if scraping fails or no tracking URL is found.
     """
     shipments = safe_get(rma_data, "shipments", [])
     tracking_url = safe_get(shipments, "0.trackingURL") if shipments else None
     tracking_number = safe_get(shipments, "0.trackingNumber") if shipments else None
-    
-    logger.debug(f"Tracking URL for {tracking_number}: {tracking_url}")
 
-    # Method 1 (NEW PRIORITY): Scrape Parcel Ninja website for the latest status.
+    # ONLY METHOD: Scrape Parcel Ninja website for the latest status.
     if tracking_url:
         scraped_status = scrape_parcel_ninja_status(tracking_url)
         if scraped_status:
-            logger.info(f"Successfully scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
+            logger.debug(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
             return scraped_status
         else:
-            logger.warning(f"Failed to scrape status from URL: {tracking_url}")
-
-    # Method 2 (Fallback): Check shipment status from API data.
-    if shipments:
-        shipment_status = shipments[0].get("status")
-        if shipment_status:
-            # Map API shipment statuses to our display statuses
-            status_map = {
-                "LabelCreated": "Submitted to Courier",
-                "Shipped": "In Transit",
-                "InTransit": "In Transit",
-                "Delivered": "Delivered",
-                "Received": "Received",
-                "Cancelled": "Courier Cancelled",
-            }
-            mapped_status = status_map.get(shipment_status)
-            if mapped_status:
-                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number or 'N/A'}")
-                return mapped_status
+            logger.warning(f"Failed to scrape status for tracking {tracking_number or 'N/A'}")
     
-    # Method 3 (Final Fallback): Check comments for status updates.
-    comments = safe_get(rma_data, "comments", [])
-    comment_status = extract_status_from_comments(comments)
-    if comment_status:
-        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number or 'N/A'}")
-        return comment_status
-    
+    # NO API FALLBACK - return None if scraping fails
     return None
 
 
@@ -1761,7 +1719,7 @@ def main():
             lambda x: f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={x}" if x else "-"
         )
         
-        # Create tracking links - UPDATED to thecourierguy.co.za
+        # Create tracking links
         display_df["Tracking Number"] = display_df.apply(
             lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
@@ -1785,10 +1743,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn(
-            "Tracking Number", 
-            help="Click to track on The Courier Guy portal"
-        ),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
