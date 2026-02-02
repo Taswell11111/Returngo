@@ -451,42 +451,6 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
 # ==========================================
 # 6. DATA FETCHING AND CACHING
 # ==========================================
-def extract_status_from_comments(comments: list) -> Optional[str]:
-    """
-    Extracts the most recent shipment status from RMA comments.
-    Looks for system comments indicating shipment status changes.
-    """
-    if not comments:
-        return None
-    
-    # Status keywords to look for (in order of priority)
-    status_keywords = [
-        ("RECEIVED", "Received"),
-        ("DELIVERED", "Delivered"),
-        ("IN TRANSIT", "In Transit"),
-        ("SHIPPED", "In Transit"),
-        ("CANCELLED", "Courier Cancelled"),
-        ("COLLECTION", "Submitted to Courier"),
-    ]
-    
-    # Sort comments by datetime (most recent first)
-    sorted_comments = sorted(
-        comments,
-        key=lambda c: safe_parse_date_iso(c.get("datetime")) or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True
-    )
-    
-    # Look for status in comments (most recent first)
-    for comment in sorted_comments:
-        html_text = comment.get("htmlText", "").upper()
-        
-        for keyword, status in status_keywords:
-            if keyword in html_text:
-                logger.debug(f"Found status '{status}' in comment: {html_text}")
-                return status
-    
-    return None
-
 
 def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
     """
@@ -535,20 +499,154 @@ def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
     return None
 
 
+def _extract_json_object(html: str, start_pos: int) -> Optional[str]:
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start_pos, len(html)):
+        char = html[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start_pos : i + 1]
+
+        if depth < 0:
+            return None
+
+    return None
+
+
+def _extract_json_array(html: str, start_pos: int) -> Optional[str]:
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start_pos, len(html)):
+        char = html[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return html[start_pos : i + 1]
+
+        if depth < 0:
+            return None
+
+    return None
+
+
+def check_courier_status_web_scraping(tracking_number: str) -> str:
+    if not tracking_number:
+        logger.debug("check_courier_status_web_scraping: No tracking number provided")
+        return "No tracking number"
+
+    try:
+        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+        logger.debug("Fetching courier status for %s from %s", tracking_number, url)
+        session = get_requests_session() # Using existing session factory
+        res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+
+        if res.status_code == 404:
+            logger.warning("Tracking not found for %s (404)", tracking_number)
+            return "Tracking not found (404)"
+        if res.status_code in (401, 403):
+            return "Tracking blocked/unauthorised (401/403)"
+        if res.status_code == 429:
+            return "Tracking rate limited (429)"
+        if 500 <= res.status_code <= 599:
+            return "Tracking service error (5xx)"
+        if res.status_code != 200:
+            return f"Tracking error ({res.status_code})"
+
+        html_content = res.text
+
+        def format_event(event: dict) -> str:
+            status = (event.get("status") or event.get("description") or "Unknown")
+            date_str = (event.get("date") or event.get("eventDate") or "")
+            try:
+                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                formatted_date = dt.strftime("%Y-%m-%d %H:%M")
+                return f"{status}\t{formatted_date}"
+            except (ValueError, TypeError):
+                return status
+
+        # 1. Attempt to find embedded JSON
+        var_pattern = re.compile(r"window\.__INITIAL_STATE__\s*=\s*(\{)", re.IGNORECASE)
+        match = var_pattern.search(html_content)
+        if match:
+            json_start = match.start(1)
+            json_str = _extract_json_object(html_content, json_start)
+            if json_str:
+                try:
+                    data = json.loads(json_str)
+                    events = safe_get(data, "shipment.events", [])
+                    if events and isinstance(events, list):
+                        return format_event(events[-1])
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass # Fallback to HTML parsing
+
+        # 2. Fallback to simple HTML parsing
+        clean_html = re.sub(r"<(script|style).*?</\1>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
+        rows = re.findall(r"<tr[^>]*>.*?</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
+        if rows:
+            # Find the first row that looks like it has event data
+            for row_html in rows:
+                cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
+                cleaned_cells = [re.sub(r"<[^>]+>", " ", c).strip() for c in cells]
+                # A plausible row has at least 2 cells and the first one contains a digit (date/time)
+                if len(cleaned_cells) >= 2 and re.search(r"\d", cleaned_cells[0]):
+                    return "\t".join(cleaned_cells[:2])
+
+        return "No tracking events found"
+
+    except requests.exceptions.RequestException as exc:
+        logger.error("Request failed for %s: %s", tracking_number, exc)
+        return "Tracking request failed"
+    except Exception as exc:
+        logger.exception("Unexpected tracking error for %s", tracking_number)
+        return "Tracking check failed (ERR_UNKNOWN)"
+
+
 def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
-    Gets the shipment status using ONLY web scraping Parcel Ninja.
-    Returns None if scraping fails or no tracking URL is found.
+    Gets the shipment status by scraping the courier website.
     """
     shipments = safe_get(rma_data, "shipments", [])
-    tracking_url = safe_get(shipments, "0.trackingURL") if shipments else None
     tracking_number = safe_get(shipments, "0.trackingNumber") if shipments else None
 
-    logger.debug(f"get_shipment_status: tracking_url={tracking_url}, tracking_number={tracking_number}")
+    logger.debug(f"get_shipment_status: tracking_number={tracking_number}")
 
     # ONLY METHOD: Scrape Parcel Ninja website for the latest status.
-    if tracking_url:
-        scraped_status = scrape_parcel_ninja_status(tracking_url)
+    if tracking_number:
+        scraped_status = check_courier_status_web_scraping(tracking_number)
         logger.debug(f"get_shipment_status: scraped_status={scraped_status}")
         if scraped_status:
             logger.info(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
@@ -556,13 +654,9 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
         else:
             logger.warning(f"Failed to scrape status for tracking {tracking_number or 'N/A'}")
             # FALLBACK: Return basic tracking info if scraping fails
-            if tracking_number:
-                return f"Tracking: {tracking_number} (Status unknown from web scrape)"
+            return f"Tracking: {tracking_number} (Status unknown)"
     
-    # NO API FALLBACK - return None if scraping fails
-    logger.debug(f"No tracking URL found for RMA")
-    return None
-
+    return "No tracking number"
 
 
 
