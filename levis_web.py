@@ -858,17 +858,39 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             logger.debug(f"No tracking number, returning 'No tracking number'")
             return "No tracking number"
 
-        # If we have scraped courier status, it always takes precedence
-        if courier_status:
-            logger.debug(f"Using courier_status: {courier_status}")
+        # Define substrings of statuses that are not "real" tracking updates
+        non_update_substrings = [
+            "not found",
+            "blocked",
+            "unauthorised",
+            "rate limited",
+            "service error",
+            "tracking error",
+            "no tracking events",
+            "request failed",
+            "check failed",
+            "status unknown", # From the fallback in get_shipment_status
+        ]
+
+        is_real_update = courier_status and not any(sub in courier_status.lower() for sub in non_update_substrings)
+
+        # If we have a scraped courier status, and it's a real update, use it.
+        if is_real_update:
+            logger.debug(f"Using informative courier_status: {courier_status}")
             return courier_status
         
-        # Only fall back to "Submitted to Courier" if we don't have any courier status
+        # If the status is "approved" and we have a tracking number, but no informative courier status yet,
+        # it's most likely just been submitted.
         if status.lower() == "approved":
-            logger.debug(f"No courier_status, status is approved, returning 'Submitted to Courier'")
+            logger.debug(f"No informative courier_status, but status is approved. Returning 'Submitted to Courier'")
             return "Submitted to Courier"
         
-        logger.debug(f"No courier_status and status not approved, returning '-'")
+        # For other RMA statuses (like 'Received'), if we have a non-update status, it might be relevant to show it.
+        if courier_status:
+            logger.debug(f"Returning the original non-informative courier_status: {courier_status}")
+            return courier_status
+        
+        logger.debug(f"Final fallback, returning '-'")
         return "-"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
