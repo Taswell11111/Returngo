@@ -23,7 +23,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,  # Changed to DEBUG for more visibility
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
@@ -47,12 +47,10 @@ from app_classes import UserSettings, PerformanceMetrics, Theme
 # Load API secrets
 try:
     MY_API_KEY = st.secrets["RETURNGO_API_KEY"]
-    PARCEL_NINJA_TOKEN = st.secrets.get("PARCEL_NINJA_TOKEN")
 except KeyError:
     st.error("Application error: Missing 'RETURNGO_API_KEY' in Streamlit secrets.")
     st.stop()
     MY_API_KEY = None
-    PARCEL_NINJA_TOKEN = None
 STORE_URL = "levis-sa.myshopify.com"
 
 # Efficiency controls
@@ -75,7 +73,6 @@ COURIER_STATUS_OPTIONS = [
 RATE_LIMIT_HIT = threading.Event()
 RATE_LIMIT_INFO: Dict[str, Union[int, str, datetime, None]] = {"remaining": None, "limit": None, "reset": None, "updated_at": None}
 RATE_LIMIT_LOCK = threading.Lock()
-PARCEL_NINJA_TOKEN: Optional[str] = None
 df_view = pd.DataFrame()
 counts: Dict[str, int] = {}
 
@@ -494,43 +491,41 @@ def extract_status_from_comments(comments: list) -> Optional[str]:
 def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
     """
     Scrapes the Parcel Ninja website to get the latest tracking status.
-    Handles both plain text and HTML table responses.
+    Returns the exact status line with the pipe: "Thu, 22 Jan 12:35 | Delivered"
     """
     if not tracking_url:
         return None
     
     # Use the provided tracking URL directly
     url = tracking_url
-    tracking_number = url.split('/')[-1] # For logging purposes
+    tracking_number = url.split('=')[-1] if '=' in url else url.split('/')[-1]
 
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         content = response.text
 
-        # Prioritize the plain text regex provided by the user, as it's more reliable.
-        text_pattern = r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2})\s+([A-Za-z ]+)"
-        matches = re.findall(text_pattern, content)
+        # Try multiple regex patterns to match status
+        patterns = [
+            r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)",  # Original: "Thu, 22 Jan 12:35 | Delivered"
+            r"(\d{2} [A-Za-z]{3} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)",  # Without day: "22 Jan 12:35 | Delivered"
+            r"([A-Za-z]+, \d{2} [A-Za-z]+ \d{4} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)",  # With year
+            r"(Latest Status:\s*[A-Za-z ]+)",  # Simple "Latest Status: Delivered"
+            r"([A-Za-z ]+)\s*\|\s*\d{2} [A-Za-z]{3} \d{2}:\d{2}",  # Status first
+            r"<strong>([A-Za-z ]+)</strong>",  # Look for strong tags
+            r"Status:\s*([A-Za-z ]+)",  # Simple status prefix
+        ]
         
-        if matches:
-            # The most recent status is the first one found.
-            # Captures: "Fri, 05 Dec 18:11" + " " + "Courier Cancelled"
-            full_status = f"{matches[0][0]} {matches[0][1].strip()}"
-            logger.info(f"Scraped status '{full_status}' for tracking {tracking_number} using text regex")
-            return full_status
+        for i, pattern in enumerate(patterns):
+            matches = re.findall(pattern, content)
+            if matches:
+                # Return the exact status line
+                full_status = matches[0].strip()
+                logger.info(f"Pattern {i} matched: Scraped status '{full_status}' for tracking {tracking_number}")
+                return full_status
 
-        # Fallback to parsing as an HTML table if the text regex fails.
-        html_pattern = re.compile(r"""
-            <tbody[^>]*>.*?<tr[^>]*>.*?<td[^>]*>.*?</td>.*?<td[^>]*>([^<]+)</td>
-        """, re.VERBOSE | re.IGNORECASE | re.DOTALL)
-        
-        match = html_pattern.search(content)
-        if match:
-            status = match.group(1).strip()
-            logger.info(f"Scraped status '{status}' for tracking {tracking_number} from HTML")
-            return status
-
-        logger.warning(f"Could not extract status for {tracking_number}. Content has an unknown format.")
+        # If no pattern matched, try to find any status-like text
+        logger.warning(f"Could not extract status for {tracking_number} with regex patterns. Raw content snippet: {content[:500]}...")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
@@ -542,47 +537,30 @@ def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
 
 def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
-    Gets the shipment status using multiple methods in order of preference:
-    1. From web scraping Parcel Ninja (for the most up-to-date status)
-    2. From shipment status in API data (as a fallback)
-    3. From RMA comments (as a final fallback)
+    Gets the shipment status using ONLY web scraping Parcel Ninja.
+    Returns None if scraping fails or no tracking URL is found.
     """
     shipments = safe_get(rma_data, "shipments", [])
     tracking_url = safe_get(shipments, "0.trackingURL") if shipments else None
     tracking_number = safe_get(shipments, "0.trackingNumber") if shipments else None
 
-    # Method 1 (NEW PRIORITY): Scrape Parcel Ninja website for the latest status.
+    logger.debug(f"get_shipment_status: tracking_url={tracking_url}, tracking_number={tracking_number}")
+
+    # ONLY METHOD: Scrape Parcel Ninja website for the latest status.
     if tracking_url:
         scraped_status = scrape_parcel_ninja_status(tracking_url)
+        logger.debug(f"get_shipment_status: scraped_status={scraped_status}")
         if scraped_status:
-            logger.debug(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
+            logger.info(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
             return scraped_status
-
-    # Method 2 (Fallback): Check shipment status from API data.
-    if shipments:
-        shipment_status = shipments[0].get("status")
-        if shipment_status:
-            # Map API shipment statuses to our display statuses
-            status_map = {
-                "LabelCreated": "Submitted to Courier",
-                "Shipped": "In Transit",
-                "InTransit": "In Transit",
-                "Delivered": "Delivered",
-                "Received": "Received",
-                "Cancelled": "Courier Cancelled",
-            }
-            mapped_status = status_map.get(shipment_status)
-            if mapped_status:
-                logger.debug(f"Using shipment status '{mapped_status}' from API for tracking {tracking_number or 'N/A'}")
-                return mapped_status
+        else:
+            logger.warning(f"Failed to scrape status for tracking {tracking_number or 'N/A'}")
+            # FALLBACK: Return basic tracking info if scraping fails
+            if tracking_number:
+                return f"Tracking: {tracking_number} (Status unknown from web scrape)"
     
-    # Method 3 (Final Fallback): Check comments for status updates.
-    comments = safe_get(rma_data, "comments", [])
-    comment_status = extract_status_from_comments(comments)
-    if comment_status:
-        logger.debug(f"Using status '{comment_status}' from comments for tracking {tracking_number or 'N/A'}")
-        return comment_status
-    
+    # NO API FALLBACK - return None if scraping fails
+    logger.debug(f"No tracking URL found for RMA")
     return None
 
 
@@ -601,7 +579,7 @@ def fetch_and_cache_data() -> pd.DataFrame:
 
     progress_bar = st.progress(0, text="Starting data sync...")
 
-    logger.info("Cache miss. Fetching all active RMAs from ReturnGO API...")
+    logger.info("Cache miss. Fetching all active RMAs from ReturnGo API...")
     sync_start = time.time()
     st.session_state.last_sync_time = datetime.now(timezone.utc)
 
@@ -650,7 +628,6 @@ def fetch_and_cache_data() -> pd.DataFrame:
         if courier_status:
             rma_detail['courier_status'] = courier_status
         
-        rma_detail['courier_status'] = courier_status
         # Structure the data for the DataFrame
         return {
             "rma_id": rma_id,
@@ -684,6 +661,13 @@ def fetch_and_cache_data() -> pd.DataFrame:
     # 3. Convert to DataFrame and return
     df = pd.DataFrame(processed_results)
     
+    # DEBUG: Check what's in the DataFrame
+    logger.debug(f"DataFrame columns: {df.columns.tolist()}")
+    if "courier_status" in df.columns:
+        logger.debug(f"courier_status column stats - Total: {len(df)}, Non-null: {df['courier_status'].notna().sum()}, Non-empty: {(df['courier_status'] != '').sum()}")
+        sample_values = df['courier_status'].head(5).tolist()
+        logger.debug(f"Sample courier_status values: {sample_values}")
+    
     # Update sync duration
     sync_duration = time.time() - sync_start
     metrics = load_performance_metrics()
@@ -706,6 +690,17 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
+    
+    # DEBUG: Show info about courier_status column
+    if "courier_status" in df.columns:
+        non_null_count = df['courier_status'].notna().sum()
+        non_empty_count = (df['courier_status'] != '').sum()
+        st.info(f"DEBUG: DataFrame has {len(df)} rows. courier_status column: {non_null_count} non-null, {non_empty_count} non-empty")
+        if non_null_count > 0:
+            sample_values = df['courier_status'].head(3).tolist()
+            st.info(f"DEBUG: Sample courier_status values: {sample_values}")
+    else:
+        st.error("DEBUG: courier_status column is missing from DataFrame!")
 
     def get_comment_date(comments: list, text_to_find: str) -> Optional[datetime]:
         if not comments:
@@ -762,14 +757,24 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         courier_status = row.get("courier_status", "")
         status = row.get("status", "")
         tracking_number = row.get("tracking_number", "")
+        
+        logger.debug(f"classify_tracking_status: courier_status='{courier_status}', status='{status}', tracking_number='{tracking_number}'")
 
         if not tracking_number: 
+            logger.debug(f"No tracking number, returning 'No tracking number'")
             return "No tracking number"
 
+        # If we have scraped courier status, it always takes precedence
         if courier_status:
+            logger.debug(f"Using courier_status: {courier_status}")
             return courier_status
+        
+        # Only fall back to "Submitted to Courier" if we don't have any courier status
         if status.lower() == "approved":
+            logger.debug(f"No courier_status, status is approved, returning 'Submitted to Courier'")
             return "Submitted to Courier"
+        
+        logger.debug(f"No courier_status and status not approved, returning '-'")
         return "-"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
@@ -803,6 +808,10 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return ", ".join(failures) if failures else ""
 
     df["failures"] = df.apply(detect_failures, axis=1)
+    
+    # DEBUG: Show final tracking_status values
+    st.info(f"DEBUG: Final tracking_status values sample: {df['tracking_status'].head(5).tolist()}")
+    st.info(f"DEBUG: tracking_status value counts: {df['tracking_status'].value_counts().to_dict()}")
 
     return df
 
@@ -1755,7 +1764,7 @@ def main():
         )
         
         # Create tracking links
-        display_df["Tracking Number"] = display_df.apply( # type: ignore
+        display_df["Tracking Number"] = display_df.apply(
             lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
             else "-",
@@ -1778,7 +1787,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"WaybillNo=(.*)", help="Click to track on Parcel Ninja"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1804,7 +1813,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r"WaybillNo=(.*)"},
+        "Tracking Number": {"display_text": r"ref=(.*)"},
     }
 
     if st.session_state.get("table_autosize"):
