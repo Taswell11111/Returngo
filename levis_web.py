@@ -452,7 +452,7 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
 # 6. DATA FETCHING AND CACHING
 # ==========================================
 
-def scrape_parcel_ninja_status(tracking_url: str) -> Optional[str]:
+def scrape_parcel_ninja_status( tracking_url: str) -> Optional[str]:
     """
     Scrapes the Parcel Ninja website to get the latest tracking status.
     Returns the exact status line with the pipe: "Thu, 22 Jan 12:35 | Delivered"
