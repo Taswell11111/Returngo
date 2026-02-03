@@ -578,19 +578,29 @@ def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
         response.raise_for_status()
         content = response.text
 
-        # The Courier Guy portal uses a specific structure. The latest status is often the last item in a list.
-        # Look for a pattern that matches their status descriptions.
-        # Example from public sources: <div class="podb-status-description">Delivered</div>
-        pattern = re.compile(r'class="podb-status-description"[^>]*>\s*([^<]+)\s*<', re.IGNORECASE)
-        statuses = pattern.findall(content)
+        # --- NEW: Try multiple regex patterns from specific to generic ---
+        patterns = [
+            # 1. Original specific pattern for "podb-status-description"
+            re.compile(r'class="podb-status-description"[^>]*>\s*([^<]+)\s*<', re.IGNORECASE),
+            # 2. Look for the title of a "timeline" item, as that often contains the status
+            re.compile(r'class="timeline-item-title"[^>]*>\s*([^<]+)\s*<', re.IGNORECASE),
+            # 3. A more generic pattern for any element with "status" in its class, with a strong tag
+            re.compile(r'class="[^"]*status[^"]*"[^>]*>\s*<strong>([^<]+)</strong>', re.IGNORECASE),
+            # 4. A pattern looking for a label like "Status:" followed by the value in a strong tag
+            re.compile(r'Status:?\s*<strong[^>]*>\s*([^<]+)\s*</strong>', re.IGNORECASE),
+        ]
 
-        if statuses:
-            latest_status = statuses[-1].strip()
-            logger.info(f"Found status on The Courier Guy: '{latest_status}'")
-            return latest_status
-        else:
-            logger.warning(f"Could not find status pattern on The Courier Guy page for {tracking_url}")
-            return "Status not found on page"
+        for i, pattern in enumerate(patterns):
+            statuses = pattern.findall(content)
+            if statuses:
+                # The latest status is usually the last one found on the page
+                latest_status = statuses[-1].strip()
+                if latest_status:  # Ensure it's not an empty string
+                    logger.info(f"Pattern {i+1} found status on The Courier Guy: '{latest_status}'")
+                    return latest_status
+        
+        logger.warning(f"Could not find status pattern on The Courier Guy page for {tracking_url}")
+        return "Status not found on page"
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
