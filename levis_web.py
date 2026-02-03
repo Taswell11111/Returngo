@@ -563,7 +563,7 @@ def _extract_json_array(html: str, start_pos: int) -> Optional[str]:
     return None
 
 
-def scrape_the_courier_guy_status(tracking_url: str) -> Optional[str]:
+def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
     """
     Scrapes The Courier Guy website to get the latest tracking status.
     """
@@ -680,7 +680,7 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
 
 def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
-    Gets the shipment status by scraping the appropriate courier website based on tracking URL.
+    Gets the shipment status by scraping the appropriate courier website based on tracking URL or number format.
     """
     shipments = safe_get(rma_data, "shipments", [])
     if not shipments:
@@ -701,17 +701,30 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
         logger.debug("get_shipment_status: No tracking number found in shipments.")
         return "No tracking number"
 
-    # 1. Use tracking URL if available to decide on the scraper
-    if tracking_url:
-        if "thecourierguy.co.za" in tracking_url:
-            logger.info(f"Detected The Courier Guy URL. Using TCG scraper for: {tracking_url}")
-            return scrape_the_courier_guy_status(tracking_url)
-        if "parcelninja.com" in tracking_url:
-             logger.info(f"Detected Parcel Ninja URL. Using PN scraper for: {tracking_number}")
-             return check_courier_status_web_scraping(tracking_number)
+    # --- NEW LOGIC: Detect courier and scrape ---
 
-    # 2. If no URL or no match, fall back to the default (Parcel Ninja) scraper with the tracking number
-    logger.info(f"No specific courier URL detected. Using default (Parcel Ninja) scraper for tracking number: {tracking_number}")
+    # 1. Check for The Courier Guy by URL or tracking number format
+    is_courier_guy = False
+    if tracking_url and "thecourierguy.co.za" in tracking_url:
+        is_courier_guy = True
+    elif tracking_number.startswith("OPT-"):
+        is_courier_guy = True
+        # If URL is missing, construct it.
+        if not tracking_url:
+            tracking_url = f"https://portal.thecourierguy.co.za/track?ref={tracking_number}"
+            logger.info(f"Constructed The Courier Guy URL: {tracking_url}")
+    
+    if is_courier_guy:
+        logger.info(f"Using The Courier Guy scraper for: {tracking_url}")
+        return scrape_the_courier_guy_status(tracking_url)
+
+    # 2. Check for Parcel Ninja via URL (if needed for other cases)
+    if tracking_url and "parcelninja.com" in tracking_url:
+         logger.info(f"Detected Parcel Ninja URL. Using PN scraper for: {tracking_number}")
+         return check_courier_status_web_scraping(tracking_number)
+
+    # 3. If no specific courier detected, use the default (Parcel Ninja) scraper as a fallback
+    logger.info(f"No specific courier detected. Using default (Parcel Ninja) scraper for tracking number: {tracking_number}")
     scraped_status = check_courier_status_web_scraping(tracking_number)
     
     logger.debug(f"get_shipment_status: default scraper returned scraped_status='{scraped_status}'")
