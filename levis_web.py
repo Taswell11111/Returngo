@@ -563,6 +563,49 @@ def _extract_json_array(html: str, start_pos: int) -> Optional[str]:
     return None
 
 
+def scrape_the_courier_guy_status(tracking_url: str) -> Optional[str]:
+    """
+    Scrapes The Courier Guy website to get the latest tracking status.
+    """
+    if not tracking_url:
+        logger.warning("scrape_the_courier_guy_status: No tracking URL provided.")
+        return None
+
+    try:
+        logger.info(f"Scraping The Courier Guy status from: {tracking_url}")
+        session = get_requests_session()
+        response = session.get(tracking_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        response.raise_for_status()
+        content = response.text
+
+        # The Courier Guy portal uses a specific structure. The latest status is often the last item in a list.
+        # Look for a pattern that matches their status descriptions.
+        # Example from public sources: <div class="podb-status-description">Delivered</div>
+        pattern = re.compile(r'class="podb-status-description"[^>]*>\s*([^<]+)\s*<', re.IGNORECASE)
+        statuses = pattern.findall(content)
+
+        if statuses:
+            latest_status = statuses[-1].strip()
+            logger.info(f"Found status on The Courier Guy: '{latest_status}'")
+            return latest_status
+        else:
+            logger.warning(f"Could not find status pattern on The Courier Guy page for {tracking_url}")
+            return "Status not found on page"
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            logger.warning(f"Tracking not found on The Courier Guy (404) for {tracking_url}")
+            return "Tracking not found (404)"
+        logger.error(f"HTTP error scraping The Courier Guy for {tracking_url}: {e}", exc_info=True)
+        return f"Scraping HTTP error ({e.response.status_code})"
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request failed for The Courier Guy tracking {tracking_url}: {e}", exc_info=True)
+        return "Scraping request failed"
+    except Exception:
+        logger.exception(f"Unexpected error scraping The Courier Guy for {tracking_url}")
+        return "Scraping check failed (UNKNOWN)"
+
+
 def check_courier_status_web_scraping(tracking_number: str) -> str:
     if not tracking_number:
         logger.debug("check_courier_status_web_scraping: No tracking number provided")
@@ -637,26 +680,47 @@ def check_courier_status_web_scraping(tracking_number: str) -> str:
 
 def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
-    Gets the shipment status by scraping the courier website.
+    Gets the shipment status by scraping the appropriate courier website based on tracking URL.
     """
     shipments = safe_get(rma_data, "shipments", [])
-    tracking_number = safe_get(shipments, "0.trackingNumber") if shipments else None
+    if not shipments:
+        logger.debug("get_shipment_status: No shipments array in RMA data.")
+        return "No tracking number"
 
-    logger.debug(f"get_shipment_status: tracking_number={tracking_number}")
-
-    # ONLY METHOD: Scrape Parcel Ninja website for the latest status.
-    if tracking_number:
-        scraped_status = check_courier_status_web_scraping(tracking_number)
-        logger.debug(f"get_shipment_status: scraped_status={scraped_status}")
-        if scraped_status:
-            logger.info(f"Using scraped status '{scraped_status}' from Parcel Ninja for tracking {tracking_number or 'N/A'}")
-            return scraped_status
-        else:
-            logger.warning(f"Failed to scrape status for tracking {tracking_number or 'N/A'}")
-            # FALLBACK: Return basic tracking info if scraping fails
-            return f"Tracking: {tracking_number} (Status unknown)"
+    tracking_number = None
+    tracking_url = None
+    for shipment in shipments:
+        if shipment and shipment.get("trackingNumber"):
+            tracking_number = shipment.get("trackingNumber")
+            tracking_url = shipment.get("trackingUrl")  # This might be None
+            break
     
-    return "No tracking number"
+    logger.debug(f"get_shipment_status: tracking_number={tracking_number}, tracking_url={tracking_url}")
+
+    if not tracking_number:
+        logger.debug("get_shipment_status: No tracking number found in shipments.")
+        return "No tracking number"
+
+    # 1. Use tracking URL if available to decide on the scraper
+    if tracking_url:
+        if "thecourierguy.co.za" in tracking_url:
+            logger.info(f"Detected The Courier Guy URL. Using TCG scraper for: {tracking_url}")
+            return scrape_the_courier_guy_status(tracking_url)
+        if "parcelninja.com" in tracking_url:
+             logger.info(f"Detected Parcel Ninja URL. Using PN scraper for: {tracking_number}")
+             return check_courier_status_web_scraping(tracking_number)
+
+    # 2. If no URL or no match, fall back to the default (Parcel Ninja) scraper with the tracking number
+    logger.info(f"No specific courier URL detected. Using default (Parcel Ninja) scraper for tracking number: {tracking_number}")
+    scraped_status = check_courier_status_web_scraping(tracking_number)
+    
+    logger.debug(f"get_shipment_status: default scraper returned scraped_status='{scraped_status}'")
+    if scraped_status:
+        logger.info(f"Default scraper returned '{scraped_status}' for tracking {tracking_number}")
+        return scraped_status
+    else:
+        logger.warning(f"Default scraper failed for tracking {tracking_number}")
+        return f"Tracking: {tracking_number} (Status unknown)"
 
 
 
@@ -1908,7 +1972,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
         "Received date": st.column_config.TextColumn("Received date"),
-        "Days since requested": st.column_config.TextColumn("Days since requested"),
+        "Days since requested": st.column_config.NumberColumn("Days since requested"),
         "resolutionType": st.column_config.TextColumn("resolutionType"),
         "Resolution actioned": st.column_config.TextColumn("Resolution actioned"),
         "Is_tracking_updated": st.column_config.TextColumn("Is_tracking_updated"),
@@ -1940,6 +2004,11 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
                 column_config[key] = st.column_config.LinkColumn(
                     key,
                     display_text=link_column_configs[key]["display_text"],
+                    width=width,
+                )
+            elif key == "Days since requested":
+                column_config[key] = st.column_config.NumberColumn(
+                    key,
                     width=width,
                 )
             else:
