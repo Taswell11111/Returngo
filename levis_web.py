@@ -19,11 +19,12 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 import pickle
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(
-        level=logging.DEBUG,  # Changed to DEBUG for more visibility
+        level=logging.DEBUG,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
@@ -115,7 +116,7 @@ def save_user_settings(settings: UserSettings):
         with open(USER_SETTINGS_FILE, 'wb') as f:
             pickle.dump(settings, f)
     except Exception as e:
-        logger.error(f"Failed to save performance metrics: {e}")
+        logger.error(f"Failed to save user settings: {e}")
 
 def load_performance_metrics() -> PerformanceMetrics:
     """Load performance metrics from file."""
@@ -452,120 +453,95 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
 # 6. DATA FETCHING AND CACHING
 # ==========================================
 
-def scrape_parcel_ninja_status( tracking_url: str) -> Optional[str]:
+def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
     """
-    Scrapes the Parcel Ninja website to get the latest tracking status.
-    Returns the exact status line with the pipe: "Thu, 22 Jan 12:35 | Delivered"
+    Scrapes the Parcel Ninja/Optimise website to get the latest tracking status.
+    Returns the exact status line with the pipe format: "Day, DD Mon HH:MM | Status"
+    
+    Args:
+        tracking_number: The tracking/waybill number (e.g., OPT-645925251)
+    
+    Returns:
+        Latest tracking event in format "Day, DD Mon HH:MM | Status" or error message
     """
-    if not tracking_url:
+    if not tracking_number:
+        logger.debug("scrape_parcel_ninja_status: No tracking number provided")
         return None
     
-    # Use the provided tracking URL directly
-    url = tracking_url
-    tracking_number = url.split('=')[-1] if '=' in url else url.split('/')[-1]
-
+    # Construct the Optimise Parcel Ninja URL for scraping
+    url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
+    
     try:
-        response = requests.get(url, timeout=30)
+        logger.info(f"Scraping Parcel Ninja status from: {url}")
+        session = get_requests_session()
+        response = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        
+        # Handle error status codes
+        if response.status_code == 404:
+            logger.warning(f"Tracking not found for {tracking_number} (404)")
+            return "Tracking not found (404)"
+        if response.status_code in (401, 403):
+            return "Tracking blocked/unauthorised"
+        if response.status_code == 429:
+            return "Tracking rate limited (429)"
+        if 500 <= response.status_code <= 599:
+            return "Tracking service error (5xx)"
+        if response.status_code != 200:
+            return f"Tracking error ({response.status_code})"
+        
         response.raise_for_status()
-        content = response.text
-
-        # Try multiple regex patterns to match status
-        patterns = [
-            r"([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)",  # Original: "Thu, 22 Jan 12:35 | Delivered"
-            r"(\d{2} [A-Za-z]{3} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)",  # Without day: "22 Jan 12:35 | Delivered"
-            r"([A-Za-z]+, \d{2} [A-Za-z]+ \d{4} \d{2}:\d{2}\s+\|\s+[A-Za-z ]+)",  # With year
-            r"(Latest Status:\s*[A-Za-z ]+)",  # Simple "Latest Status: Delivered"
-            r"([A-Za-z ]+)\s*\|\s*\d{2} [A-Za-z]{3} \d{2}:\d{2}",  # Status first
-            r"<strong>([A-Za-z ]+)</strong>",  # Look for strong tags
-            r"Status:\s*([A-Za-z ]+)",  # Simple status prefix
-        ]
+        html_content = response.text
         
-        for i, pattern in enumerate(patterns):
-            matches = re.findall(pattern, content)
-            if matches:
-                # Return the exact status line
-                full_status = matches[0].strip()
-                logger.info(f"Pattern {i} matched: Scraped status '{full_status}' for tracking {tracking_number}")
-                return full_status
-
-        # If no pattern matched, try to find any status-like text
-        logger.warning(f"Could not extract status for {tracking_number} with regex patterns. Raw content snippet: {content[:500]}...")
-
+        # Parse HTML with BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Find the table with tracking events
+        table = soup.find('table')
+        if not table:
+            logger.warning(f"No tracking table found for {tracking_number}")
+            return "No tracking events found"
+        
+        # Find all rows in the table
+        rows = table.find_all('tr')
+        
+        # Extract events from table rows
+        events = []
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 2:
+                # Get text content from both columns
+                timestamp_col = cols[0].get_text(strip=True)
+                status_col = cols[1].get_text(strip=True)
+                
+                # Check if the timestamp starts with a day abbreviation
+                day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
+                if re.match(day_pattern, timestamp_col):
+                    # Format: "Day, DD Mon HH:MM | Status"
+                    event_text = f"{timestamp_col} | {status_col}"
+                    events.append(event_text)
+                    logger.debug(f"Found event: {event_text}")
+        
+        if events:
+            # Return the first event (most recent, as they're ordered newest-first)
+            latest_event = events[0]
+            logger.info(f"Latest tracking event for {tracking_number}: {latest_event}")
+            return latest_event
+        else:
+            logger.warning(f"No valid tracking events found for {tracking_number}")
+            return "No tracking events found"
+            
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
+        logger.error(f"Request failed for Parcel Ninja tracking {tracking_number}: {e}", exc_info=True)
+        return "Tracking request failed"
     except Exception as e:
-        logger.error(f"Unexpected error scraping PN tracking for {tracking_number}: {e}", exc_info=True)
-        
-    return None
-
-
-def _extract_json_object(html: str, start_pos: int) -> Optional[str]:
-    depth = 0
-    in_string = False
-    escape = False
-
-    for i in range(start_pos, len(html)):
-        char = html[i]
-
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return html[start_pos : i + 1]
-
-        if depth < 0:
-            return None
-
-    return None
-
-
-def _extract_json_array(html: str, start_pos: int) -> Optional[str]:
-    depth = 0
-    in_string = False
-    escape = False
-
-    for i in range(start_pos, len(html)):
-        char = html[i]
-
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-        elif char == "[":
-            depth += 1
-        elif char == "]":
-            depth -= 1
-            if depth == 0:
-                return html[start_pos : i + 1]
-
-        if depth < 0:
-            return None
-
-    return None
+        logger.error(f"Unexpected error scraping Parcel Ninja for {tracking_number}: {e}", exc_info=True)
+        return "Tracking check failed"
 
 
 def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
     """
     Scrapes The Courier Guy website to get the latest tracking status.
+    This is used as a fallback for The Courier Guy tracking URLs.
     """
     if not tracking_url:
         logger.warning("scrape_the_courier_guy_status: No tracking URL provided.")
@@ -578,15 +554,15 @@ def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
         response.raise_for_status()
         content = response.text
 
-        # --- NEW: Try multiple regex patterns from specific to generic ---
+        # Try multiple regex patterns from specific to generic
         patterns = [
             # 1. Original specific pattern for "podb-status-description"
             re.compile(r'class="podb-status-description"[^>]*>\s*([^<]+)\s*<', re.IGNORECASE),
-            # 2. Look for the title of a "timeline" item, as that often contains the status
+            # 2. Look for the title of a "timeline" item
             re.compile(r'class="timeline-item-title"[^>]*>\s*([^<]+)\s*<', re.IGNORECASE),
-            # 3. A more generic pattern for any element with "status" in its class, with a strong tag
+            # 3. Generic pattern for any element with "status" in its class
             re.compile(r'class="[^"]*status[^"]*"[^>]*>\s*<strong>([^<]+)</strong>', re.IGNORECASE),
-            # 4. A pattern looking for a label like "Status:" followed by the value in a strong tag
+            # 4. Pattern looking for a label like "Status:" followed by value
             re.compile(r'Status:?\s*<strong[^>]*>\s*([^<]+)\s*</strong>', re.IGNORECASE),
         ]
 
@@ -595,7 +571,7 @@ def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
             if statuses:
                 # The latest status is usually the last one found on the page
                 latest_status = statuses[-1].strip()
-                if latest_status:  # Ensure it's not an empty string
+                if latest_status:
                     logger.info(f"Pattern {i+1} found status on The Courier Guy: '{latest_status}'")
                     return latest_status
         
@@ -616,81 +592,11 @@ def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
         return "Scraping check failed (UNKNOWN)"
 
 
-def check_courier_status_web_scraping(tracking_number: str) -> str:
-    if not tracking_number:
-        logger.debug("check_courier_status_web_scraping: No tracking number provided")
-        return "No tracking number"
-
-    try:
-        url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
-        logger.debug("Fetching courier status for %s from %s", tracking_number, url)
-        session = get_requests_session() # Using existing session factory
-        res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-
-        if res.status_code == 404:
-            logger.warning("Tracking not found for %s (404)", tracking_number)
-            return "Tracking not found (404)"
-        if res.status_code in (401, 403):
-            return "Tracking blocked/unauthorised (401/403)"
-        if res.status_code == 429:
-            return "Tracking rate limited (429)"
-        if 500 <= res.status_code <= 599:
-            return "Tracking service error (5xx)"
-        if res.status_code != 200:
-            return f"Tracking error ({res.status_code})"
-
-        html_content = res.text
-
-        def format_event(event: dict) -> str:
-            status = (event.get("status") or event.get("description") or "Unknown")
-            date_str = (event.get("date") or event.get("eventDate") or "")
-            try:
-                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                formatted_date = dt.strftime("%Y-%m-%d %H:%M")
-                return f"{status}\t{formatted_date}"
-            except (ValueError, TypeError):
-                return status
-
-        # 1. Attempt to find embedded JSON
-        var_pattern = re.compile(r"window\.__INITIAL_STATE__\s*=\s*(\{)", re.IGNORECASE)
-        match = var_pattern.search(html_content)
-        if match:
-            json_start = match.start(1)
-            json_str = _extract_json_object(html_content, json_start)
-            if json_str:
-                try:
-                    data = json.loads(json_str)
-                    events = safe_get(data, "shipment.events", [])
-                    if events and isinstance(events, list):
-                        return format_event(events[-1])
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    pass # Fallback to HTML parsing
-
-        # 2. Fallback to simple HTML parsing
-        clean_html = re.sub(r"<(script|style).*?</\1>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
-        rows = re.findall(r"<tr[^>]*>.*?</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
-        if rows:
-            # Find the first row that looks like it has event data
-            for row_html in rows:
-                cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL)
-                cleaned_cells = [re.sub(r"<[^>]+>", " ", c).strip() for c in cells]
-                # A plausible row has at least 2 cells and the first one contains a digit (date/time)
-                if len(cleaned_cells) >= 2 and re.search(r"\d", cleaned_cells[0]):
-                    return "\t".join(cleaned_cells[:2])
-
-        return "No tracking events found"
-
-    except requests.exceptions.RequestException as exc:
-        logger.error("Request failed for %s: %s", tracking_number, exc)
-        return "Tracking request failed"
-    except Exception as exc:
-        logger.exception("Unexpected tracking error for %s", tracking_number)
-        return "Tracking check failed (ERR_UNKNOWN)"
-
-
 def get_shipment_status(rma_data: dict) -> Optional[str]:
     """
-    Gets the shipment status by scraping the appropriate courier website based on tracking URL or number format.
+    Gets the shipment status by scraping the appropriate courier website.
+    Always uses the Parcel Ninja Optimise URL for scraping, regardless of tracking URL.
+    The Courier Guy portal URL is kept for display purposes only.
     """
     shipments = safe_get(rma_data, "shipments", [])
     if not shipments:
@@ -702,7 +608,7 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
     for shipment in shipments:
         if shipment and shipment.get("trackingNumber"):
             tracking_number = shipment.get("trackingNumber")
-            tracking_url = shipment.get("trackingUrl")  # This might be None
+            tracking_url = shipment.get("trackingUrl")
             break
     
     logger.debug(f"get_shipment_status: tracking_number={tracking_number}, tracking_url={tracking_url}")
@@ -711,40 +617,16 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
         logger.debug("get_shipment_status: No tracking number found in shipments.")
         return "No tracking number"
 
-    # --- NEW LOGIC: Detect courier and scrape ---
-
-    # 1. Check for The Courier Guy by URL or tracking number format
-    is_courier_guy = False
-    if tracking_url and "thecourierguy.co.za" in tracking_url:
-        is_courier_guy = True
-    elif tracking_number.startswith("OPT-"):
-        is_courier_guy = True
-        # If URL is missing, construct it.
-        if not tracking_url:
-            tracking_url = f"https://portal.thecourierguy.co.za/track?ref={tracking_number}"
-            logger.info(f"Constructed The Courier Guy URL: {tracking_url}")
+    # Always use Parcel Ninja Optimise URL for scraping
+    logger.info(f"Using Parcel Ninja scraper for tracking number: {tracking_number}")
+    scraped_status = scrape_parcel_ninja_status(tracking_number)
     
-    if is_courier_guy:
-        logger.info(f"Using The Courier Guy scraper for: {tracking_url}")
-        return scrape_the_courier_guy_status(tracking_url)
-
-    # 2. Check for Parcel Ninja via URL (if needed for other cases)
-    if tracking_url and "parcelninja.com" in tracking_url:
-         logger.info(f"Detected Parcel Ninja URL. Using PN scraper for: {tracking_number}")
-         return check_courier_status_web_scraping(tracking_number)
-
-    # 3. If no specific courier detected, use the default (Parcel Ninja) scraper as a fallback
-    logger.info(f"No specific courier detected. Using default (Parcel Ninja) scraper for tracking number: {tracking_number}")
-    scraped_status = check_courier_status_web_scraping(tracking_number)
-    
-    logger.debug(f"get_shipment_status: default scraper returned scraped_status='{scraped_status}'")
     if scraped_status:
-        logger.info(f"Default scraper returned '{scraped_status}' for tracking {tracking_number}")
+        logger.info(f"Parcel Ninja scraper returned '{scraped_status}' for tracking {tracking_number}")
         return scraped_status
     else:
-        logger.warning(f"Default scraper failed for tracking {tracking_number}")
+        logger.warning(f"Parcel Ninja scraper failed for tracking {tracking_number}")
         return f"Tracking: {tracking_number} (Status unknown)"
-
 
 
 @st.cache_data(ttl=43200)
@@ -854,7 +736,7 @@ def fetch_and_cache_data() -> pd.DataFrame:
     metrics = load_performance_metrics()
     metrics.last_sync_duration = sync_duration
     save_performance_metrics(metrics)
-    time.sleep(1) # Keep the progress bar visible for a moment
+    time.sleep(1)
     
     return df
 
@@ -876,12 +758,12 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "courier_status" in df.columns:
         non_null_count = df['courier_status'].notna().sum()
         non_empty_count = (df['courier_status'] != '').sum()
-        st.info(f"DEBUG: DataFrame has {len(df)} rows. courier_status column: {non_null_count} non-null, {non_empty_count} non-empty")
+        logger.info(f"DataFrame has {len(df)} rows. courier_status column: {non_null_count} non-null, {non_empty_count} non-empty")
         if non_null_count > 0:
             sample_values = df['courier_status'].head(3).tolist()
-            st.info(f"DEBUG: Sample courier_status values: {sample_values}")
+            logger.info(f"Sample courier_status values: {sample_values}")
     else:
-        st.error("DEBUG: courier_status column is missing from DataFrame!")
+        logger.error("courier_status column is missing from DataFrame!")
 
     def get_comment_date(comments: list, text_to_find: str) -> Optional[datetime]:
         if not comments:
@@ -935,6 +817,10 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["days_since_requested"] = df["requested_date"].apply(compute_days_since)
 
     def classify_tracking_status(row):
+        """
+        Classifies the tracking status based on courier_status and RMA status.
+        Returns the full event string in format: "Day, DD Mon HH:MM | Status"
+        """
         courier_status = row.get("courier_status", "")
         status = row.get("status", "")
         tracking_number = row.get("tracking_number", "")
@@ -945,8 +831,8 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             logger.debug(f"No tracking number, returning 'No tracking number'")
             return "No tracking number"
 
-        # Define substrings of statuses that are not "real" tracking updates
-        non_update_substrings = [
+        # Define substrings of statuses that are error messages, not real tracking events
+        error_substrings = [
             "not found",
             "blocked",
             "unauthorised",
@@ -956,25 +842,34 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             "no tracking events",
             "request failed",
             "check failed",
-            "status unknown", # From the fallback in get_shipment_status
+            "status unknown",
         ]
 
-        is_real_update = courier_status and not any(sub in courier_status.lower() for sub in non_update_substrings)
+        # Check if courier_status is a real tracking event (starts with day abbreviation)
+        is_real_event = False
+        if courier_status:
+            # Check if it matches the expected format: "Day, DD Mon HH:MM | Status"
+            day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
+            if re.match(day_pattern, courier_status):
+                is_real_event = True
+            # Also check it's not an error message
+            if any(sub in courier_status.lower() for sub in error_substrings):
+                is_real_event = False
 
-        # If we have a scraped courier status, and it's a real update, use it.
-        if is_real_update:
-            logger.debug(f"Using informative courier_status: {courier_status}")
+        # If we have a real tracking event, return it as-is
+        if is_real_event:
+            logger.debug(f"Using real tracking event: {courier_status}")
             return courier_status
         
-        # If the status is "approved" and we have a tracking number, but no informative courier status yet,
+        # If the status is "approved" and we have a tracking number, but no real event yet,
         # it's most likely just been submitted.
         if status.lower() == "approved":
-            logger.debug(f"No informative courier_status, but status is approved. Returning 'Submitted to Courier'")
+            logger.debug(f"No real tracking event, but status is approved. Returning 'Submitted to Courier'")
             return "Submitted to Courier"
         
-        # For other RMA statuses (like 'Received'), if we have a non-update status, it might be relevant to show it.
+        # For other RMA statuses, if we have an error status, show it
         if courier_status:
-            logger.debug(f"Returning the original non-informative courier_status: {courier_status}")
+            logger.debug(f"Returning the error courier_status: {courier_status}")
             return courier_status
         
         logger.debug(f"Final fallback, returning '-'")
@@ -1013,8 +908,8 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["failures"] = df.apply(detect_failures, axis=1)
     
     # DEBUG: Show final tracking_status values
-    st.info(f"DEBUG: Final tracking_status values sample: {df['tracking_status'].head(5).tolist()}")
-    st.info(f"DEBUG: tracking_status value counts: {df['tracking_status'].value_counts().to_dict()}")
+    logger.info(f"Final tracking_status values sample: {df['tracking_status'].head(5).tolist()}")
+    logger.info(f"tracking_status value counts: {df['tracking_status'].value_counts().to_dict()}")
 
     return df
 
@@ -1602,7 +1497,7 @@ def main():
         
         # Cache controls
         st.subheader("Cache Controls")
-        if st.button("🔄 Clear Cache & Refresh Data", width="stretch"):
+        if st.button("🔄 Clear Cache & Refresh Data", use_container_width=True):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
@@ -1671,7 +1566,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_total_open", width="stretch"):
+        if st.button("View", key="btn_total_open", use_container_width=True):
             st.session_state.active_filter = "All"
             st.rerun()
     
@@ -1686,7 +1581,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_pending", width="stretch"):
+        if st.button("View", key="btn_pending", use_container_width=True):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
@@ -1701,7 +1596,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_in_transit", width="stretch"):
+        if st.button("View", key="btn_in_transit", use_container_width=True):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
@@ -1717,7 +1612,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_issues", width="stretch"):
+        if st.button("View", key="btn_issues", use_container_width=True):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1738,7 +1633,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_pending_req", width="stretch"):
+        if st.button("Filter", key="btn_pending_req", use_container_width=True):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
@@ -1754,7 +1649,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_received", width="stretch"):
+        if st.button("Filter", key="btn_received", use_container_width=True):
             st.session_state.active_filter = "Received"
             st.rerun()
     
@@ -1770,7 +1665,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_courier_cancelled", width="stretch"):
+        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
@@ -1786,7 +1681,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_submitted", width="stretch"):
+        if st.button("Filter", key="btn_submitted", use_container_width=True):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1805,7 +1700,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_delivered", width="stretch"):
+        if st.button("Filter", key="btn_delivered", use_container_width=True):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
@@ -1821,7 +1716,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_no_tracking", width="stretch"):
+        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
@@ -1837,7 +1732,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_res_actioned", width="stretch"):
+        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
@@ -1853,7 +1748,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("Filter", key="btn_no_res_actioned", width="stretch"):
+        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
@@ -1868,7 +1763,7 @@ def main():
             key="search_query_input",
         )
     with sc3:
-        if st.button("📋 View All", width="stretch"):
+        if st.button("📋 View All", use_container_width=True):
             st.session_state.active_filter = "All"
             clear_all_filters()
             st.rerun()
@@ -1896,7 +1791,7 @@ def main():
             st.multiselect("Tracking Status", options=COURIER_STATUS_OPTIONS, key="tracking_multi")
         
         with c5:
-            if st.button("🧼 Clear filters", width="stretch"):
+            if st.button("🧼 Clear filters", use_container_width=True):
                 clear_all_filters()
                 st.rerun()
 
@@ -1966,7 +1861,7 @@ def main():
             lambda x: f"https://app.returngo.ai/dashboard/returns?filter_status=open&rmaid={x}" if x else "-"
         )
         
-        # Create tracking links
+        # Create tracking links - always use The Courier Guy portal for display
         display_df["Tracking Number"] = display_df.apply(
             lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
             if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
@@ -2074,12 +1969,12 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     
     action_col1, action_col2 = st.columns([1, 1])
     with action_col1:
-        if st.button("Data table log", key="btn_data_table_log", width="stretch"):
+        if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
             st.session_state["suppress_row_dialog"] = True
             show_data_table_log()
     
     with action_col2:
-        if st.button("📋 Copy all", key="btn_copy_all", width="stretch"):
+        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True):
             st.session_state["copy_all_payload"] = tsv_text
             st.session_state["suppress_row_dialog"] = True
 
