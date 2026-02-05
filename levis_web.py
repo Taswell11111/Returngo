@@ -1075,13 +1075,13 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
     filter_map = {
         "Pending Requests": lambda d: d["status"].str.lower() == "pending",
         "Received": lambda d: d["status"].str.lower() == "received",
-        "Courier Cancelled": lambda d: d["tracking_status"].str.lower() == "courier cancelled",
-        "Approved > Submitted": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower() == "submitted to courier"),
-        "Approved > Delivered": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower() == "delivered"),
+        "Courier Cancelled": lambda d: d["tracking_status"].str.lower().str.contains("courier cancelled", na=False),
+        "Approved > Submitted": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower().str.contains("submitted to courier", na=False)),
+        "Approved > Delivered": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower().str.contains("delivered", na=False)),
         "No Tracking": lambda d: d["tracking_status"].str.lower() == "no tracking number",
         "Resolution Actioned": lambda d: d["resolution_actioned"].str.lower() == "yes",
         "No Resolution Actioned": lambda d: (d["status"].str.lower() == "received") & (d["resolution_actioned"].str.lower() != "yes"),
-        "In Transit": lambda d: d["tracking_status"].str.lower() == "in transit",
+        "In Transit": lambda d: d["tracking_status"].str.lower().str.contains("routing delivery|out for delivery", na=False),
         "Issues": lambda d: d["failures"] != "",
     }
 
@@ -1154,14 +1154,14 @@ def inject_custom_css():
         <style>
         /* Top header with Night-Blue/Sapphire-Red gradient and more sparkles */
         .main-header {
-            background: linear-gradient(90deg, 
+            background: linear-gradient(90deg,
                 #0A1931 0%, /* Night Blue */
-                #C70039 100%); /* Sapphire Red */
+                #0077FF 100%); /* Sparkly Blue */
             padding: 20px;
             text-align: center;
             border-radius: 10px;
             margin-bottom: 10px;
-            box-shadow: 0 0 20px rgba(10, 25, 49, 0.7), 0 0 20px rgba(199, 0, 57, 0.7);
+            box-shadow: 0 0 20px rgba(10, 25, 49, 0.7), 0 0 25px rgba(0, 119, 255, 0.6);
             position: relative;
             overflow: hidden;
         }
@@ -1380,6 +1380,29 @@ def main():
         initial_sidebar_state="expanded",
     )
 
+    # Disconnected state overlay
+    if st.session_state.get("disconnected"):
+        st.markdown(
+            """
+            <style>
+            .shutdown-overlay {
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(0,0,0,0.9); z-index: 9998;
+                display: flex; justify-content: center; align-items: center;
+                color: white; text-align: center;
+            }
+            .shutdown-overlay h2 { color: #ff4b4b; }
+            </style>
+            <div class="shutdown-overlay">
+                <div>
+                    <h2>System Shutdown</h2>
+                    <p>All processing has been stopped. Please close the browser tab.</p>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.stop() # type: ignore
+    
+
     inject_custom_css()
 
     # Initialize session state
@@ -1455,6 +1478,13 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
         
         st.markdown("---")
+
+        # Sync Pending button
+        st.subheader("Targeted Sync")
+        if st.button("🔄 Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
+            with st.spinner("Syncing pending RMAs..."):
+                st.cache_data.clear()
+            st.rerun()
         
         # Power button (red neon)
         st.markdown(
@@ -1465,6 +1495,12 @@ def main():
             """,
             unsafe_allow_html=True
         )
+        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
+            st.session_state.disconnected = True
+            st.rerun()
+
+        st.markdown("---")
+
         
         # Performance metrics in one line
         perf_metrics = st.session_state.performance_metrics
@@ -1501,7 +1537,7 @@ def main():
         
         # Cache controls
         st.subheader("Cache Controls")
-        if st.button("🔄 Clear Cache & Refresh Data", use_container_width=True):
+        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
@@ -1561,7 +1597,7 @@ def main():
     # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-All" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Total Open', 0)}</div>
                 <div class='label'>Total Open</div>
@@ -1570,13 +1606,14 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_total_open", use_container_width=True):
+        if st.button("View", key="btn_total_open", use_container_width=True, help="Show all open RMAs"):
             st.session_state.active_filter = "All"
             st.rerun()
     
     with metric_cols[1]:
         st.markdown(
             f"""
+            <a href="#" id="filter-Pending Requests" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Pending', 0)}</div>
                 <div class='label'>Pending</div>
@@ -1585,13 +1622,14 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_pending", use_container_width=True):
+        if st.button("View", key="btn_pending", use_container_width=True, help="Show RMAs with 'Pending' status"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     with metric_cols[2]:
         st.markdown(
             f"""
+            <a href="#" id="filter-In Transit" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('In Transit', 0)}</div>
                 <div class='label'>In Transit</div>
@@ -1600,14 +1638,14 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_in_transit", use_container_width=True):
+        if st.button("View", key="btn_in_transit", use_container_width=True, help="Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Issues" style="text-decoration: none;">
             <div class='metric-card' title='Issues include: No Tracking, Courier Cancelled, No Resolution Actioned'>
                 <div class='count'>{issues_count}</div>
                 <div class='label'>Issues ⓘ</div>
@@ -1616,7 +1654,7 @@ def main():
             """,
             unsafe_allow_html=True
         )
-        if st.button("View", key="btn_issues", use_container_width=True):
+        if st.button("View", key="btn_issues", use_container_width=True, help="Show RMAs with identified issues"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1628,7 +1666,7 @@ def main():
     # PENDING REQUESTS
     with metric_cols2[0]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Pending Requests" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Pending', 0)}</div>
                 <div class='label'>Pending Requests</div>
@@ -1644,7 +1682,7 @@ def main():
     # RECEIVED
     with metric_cols2[1]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Received" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Received', 0)}</div>
                 <div class='label'>Received</div>
@@ -1660,7 +1698,7 @@ def main():
     # COURIER CANCELLED
     with metric_cols2[2]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Courier Cancelled" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Courier Cancelled', 0)}</div>
                 <div class='label'>Courier Cancelled</div>
@@ -1676,7 +1714,7 @@ def main():
     # APPROVED > SUBMITTED
     with metric_cols2[3]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Approved-Submitted" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Submitted', 0)}</div>
                 <div class='label'>Approved > Submitted</div>
@@ -1695,7 +1733,7 @@ def main():
     # APPROVED > DELIVERED
     with metric_cols3[0]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Approved-Delivered" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Delivered', 0)}</div>
                 <div class='label'>Approved > Delivered</div>
@@ -1711,7 +1749,7 @@ def main():
     # NO TRACKING
     with metric_cols3[1]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-No Tracking" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('No Tracking', 0)}</div>
                 <div class='label'>No Tracking</div>
@@ -1727,7 +1765,7 @@ def main():
     # RESOLUTION ACTIONED
     with metric_cols3[2]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-Resolution Actioned" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('Resolution Actioned', 0)}</div>
                 <div class='label'>Resolution Actioned</div>
@@ -1743,7 +1781,7 @@ def main():
     # NO RESOLUTION ACTIONED
     with metric_cols3[3]:
         st.markdown(
-            f"""
+            f"""<a href="#" id="filter-No Resolution Actioned" style="text-decoration: none;">
             <div class='metric-card'>
                 <div class='count'>{counts.get('No Resolution Actioned', 0)}</div>
                 <div class='label'>No Resolution Actioned</div>
@@ -1894,7 +1932,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
         "Received date": st.column_config.TextColumn("Received date"),
-        "Days since requested": st.column_config.NumberColumn("Days since requested"),
+        "Days since requested": st.column_config.NumberColumn("Days since requested", help="Number of days since the RMA was requested."),
         "resolutionType": st.column_config.TextColumn("resolutionType"),
         "Resolution actioned": st.column_config.TextColumn("Resolution actioned"),
         "Is_tracking_updated": st.column_config.TextColumn("Is_tracking_updated"),
