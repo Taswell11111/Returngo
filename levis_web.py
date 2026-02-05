@@ -2067,7 +2067,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         failures_mask = (df['failures'] != '') & (df['failures'].notna())
         style_df.loc[failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
 
-        no_tracking_mask = df['tracking_status'] == 'No tracking number'
+        no_tracking_mask = df['Tracking Status'] == 'No tracking number'
         style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(234, 88, 12, 0.35);'
 
         res_actioned_mask = (df['Resolution actioned'] == 'Yes') & (df['Current Status'] == 'Approved')
