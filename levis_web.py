@@ -2062,11 +2062,17 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         style_df = pd.DataFrame('', index=df.index, columns=df.columns)
 
         no_res_mask = (df['Resolution actioned'] == 'No') & (df['Current Status'] == 'Received')
-        style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);'
+        # This rule is now handled by the "NO_RESOLUTION" failure check below.
+        # style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);'
 
-        failures_mask = (df['failures'] != '') & (df['failures'].notna())
-        style_df.loc[failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
+        # Yellow highlight for "NO_RESOLUTION" failures
+        no_resolution_mask = df['failures'].str.contains("NO_RESOLUTION", na=False)
+        style_df.loc[no_resolution_mask, :] = 'background-color: rgba(253, 224, 71, 0.4);' # yellow with opacity
 
+        # Red highlight for other failures (will override yellow if both are present, e.g., "COURIER_CANCELLED,NO_RESOLUTION")
+        other_failures_mask = df['failures'].str.contains("COURIER_CANCELLED", na=False)
+        style_df.loc[other_failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
+        
         no_tracking_mask = df['Tracking Status'] == 'No tracking number'
         style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(234, 88, 12, 0.35);'
 
