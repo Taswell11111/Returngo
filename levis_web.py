@@ -1919,11 +1919,11 @@ def main():
         
         # Create tracking links - always use The Courier Guy portal for display
         # The URL is now the value of the 'Tracking Number' column, and the display text is handled by LinkColumn
-        display_df["Tracking Number"] = display_df["tracking_number"].apply(
+        display_df["Tracking Number"] = display_df["Tracking Number"].apply(
             lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-"
         )
         # The display text for the link column will be the tracking number itself
-        display_df["Tracking Number Display"] = display_df["tracking_number"]
+        display_df["Tracking Number Display"] = display_df["Tracking Number"]
         
         render_data_table(display_df, display_cols)
     else:
