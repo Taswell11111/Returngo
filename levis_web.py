@@ -1918,12 +1918,12 @@ def main():
         )
         
         # Create tracking links - always use The Courier Guy portal for display
-        def create_tracking_link(tracking_num):
-            if tracking_num and tracking_num not in ["", "-"]:
-                return f"https://portal.thecourierguy.co.za/track?ref={tracking_num}"
-            return "-"
-
-        display_df["Tracking Number Link"] = display_df["Tracking Number"].apply(create_tracking_link)
+        # The URL is now the value of the 'Tracking Number' column, and the display text is handled by LinkColumn
+        display_df["Tracking Number"] = display_df["tracking_number"].apply(
+            lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-"
+        )
+        # The display text for the link column will be the tracking number itself
+        display_df["Tracking Number Display"] = display_df["tracking_number"]
         
         render_data_table(display_df, display_cols)
     else:
@@ -1954,11 +1954,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     }
 
     # Add the link column for the table
-    # Prepare columns for the table, replacing "Tracking Number" with the link version
-    table_display_cols = display_cols.copy()
-    table_display_cols[table_display_cols.index("Tracking Number")] = "Tracking Number Link"
-
-    table_df = display_df[table_display_cols].copy()
+    table_df = display_df[display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
         if column not in data.columns or data.empty:
@@ -1972,23 +1968,17 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number Link": {"display_text": r"ref=(.*)"},
-        "Tracking Number Link": {"display_text": r"ref=([^&]*)"},
+        "Tracking Number": {"display_text": r"^(OPT-.*)"},
     }
 
     if st.session_state.get("table_autosize"):
         column_config = {}
-        for key in table_display_cols:
+        for key in display_cols:
             width = _autosize_width(key, table_df)
             if key in link_column_configs:
                 column_config[key] = st.column_config.LinkColumn(
                     key,
                     display_text=link_column_configs[key]["display_text"],
-                    width=width,
-                )
-            elif key == "Days since requested":
-                column_config[key] = st.column_config.NumberColumn(
-                    key,
                     width=width,
                 )
             else:
@@ -2111,7 +2101,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         column_config=column_config,
         on_select="rerun", # type: ignore
         selection_mode="single-row",
-        column_order=table_display_cols, # Ensure correct column order
+        column_order=display_cols, # Ensure correct column order
         key="rma_table",
     )
 
