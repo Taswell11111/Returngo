@@ -900,12 +900,6 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         tracking_status = row.get("tracking_status", "")
         resolution_actioned = row.get("resolution_actioned", "")
 
-        if status.lower() == "approved" and not row.get("tracking_number"):
-            failures.append("NO_TRACKING")
-        # The user requested to remove the highlight for blank tracking numbers.
-        # We achieve this by removing the failure condition that causes it.
-        # if status.lower() == "approved" and not row.get("tracking_number"):
-        #     failures.append("NO_TRACKING")
         if "cancelled" in tracking_status.lower():
             failures.append("COURIER_CANCELLED")
         if status.lower() == "received" and resolution_actioned.lower() != "yes":
@@ -2065,26 +2059,19 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     def dataframe_styler(df: pd.DataFrame):
         """Applies conditional styling to the dataframe."""
-        # Create a style dataframe with the same shape, filled with empty strings
         style_df = pd.DataFrame('', index=df.index, columns=df.columns)
 
-        # Condition 1: No Resolution Actioned (dark orange row)
-        # Condition 1: No Resolution Actioned (dark orange row) - from previous request
         no_res_mask = (df['Resolution actioned'] == 'No') & (df['Current Status'] == 'Received')
-        style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);' # dark orange with opacity
         style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);'
 
-        # Condition 2: Failures (red row)
-        # Condition 2: Failures (red row) - from previous request
-        failures_mask = df['failures'] != ''
+        failures_mask = (df['failures'] != '') & (df['failures'].notna())
         style_df.loc[failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
 
-        # Condition 3: No Tracking Number (highlight only the cell)
-        no_tracking_mask = df['Tracking Status'] == 'No tracking number'
-        style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(245, 158, 11, 0.3);' # amber/yellow
-        # Condition 3: Highlight "Resolution actioned" in yellow where "Yes" and status is "Approved"
+        no_tracking_mask = df['tracking_status'] == 'No tracking number'
+        style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(234, 88, 12, 0.35);'
+
         res_actioned_mask = (df['Resolution actioned'] == 'Yes') & (df['Current Status'] == 'Approved')
-        style_df.loc[res_actioned_mask, 'Resolution actioned'] = 'background-color: rgba(253, 224, 71, 0.4);' # yellow with opacity
+        style_df.loc[res_actioned_mask, 'Resolution actioned'] = 'background-color: rgba(253, 224, 71, 0.4);'
 
         return style_df
 
@@ -2109,15 +2096,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     if sel_rows:
         if not st.session_state.pop("suppress_row_dialog", False):
             idx = int(sel_rows[0])
-            selected_row_data = display_df.iloc[idx]
-            
-            # Based on your request, it seems you want a dedicated dialog for tracking updates.
-            # Let's create a simple one. If you want to combine them, we can adjust.
-            # show_rma_actions_dialog(selected_row_data)
-            
-            # For now, let's assume clicking a row opens the tracking update dialog.
-            # You can add more complex logic here (e.g., show different dialogs based on column clicked).
-            show_update_tracking_dialog(selected_row_data)
             show_rma_actions_dialog(display_df.iloc[idx])
 
 
