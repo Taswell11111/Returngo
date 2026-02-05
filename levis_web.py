@@ -19,7 +19,6 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 import pickle
 from pathlib import Path
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
@@ -492,26 +491,31 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
         response.raise_for_status()
         html_content = response.text
         
-        # Parse HTML with BeautifulSoup
-        soup = BeautifulSoup(html_content, 'html.parser')
+        # Remove script and style tags to clean the HTML
+        clean_html = re.sub(r"<(script|style).*?</\1>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
         
-        # Find the table with tracking events
-        table = soup.find('table')
-        if not table:
-            logger.warning(f"No tracking table found for {tracking_number}")
-            return "No tracking events found"
-        
-        # Find all rows in the table
-        rows = table.find_all('tr')
+        # Find all table rows
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
         
         # Extract events from table rows
         events = []
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) >= 2:
-                # Get text content from both columns
-                timestamp_col = cols[0].get_text(strip=True)
-                status_col = cols[1].get_text(strip=True)
+        for row_html in rows:
+            # Extract table cells (td tags)
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
+            
+            if len(cells) >= 2:
+                # Clean up the cell contents by removing HTML tags and extra whitespace
+                def clean_cell(cell_html):
+                    # Remove all HTML tags
+                    text = re.sub(r"<[^>]+>", " ", cell_html)
+                    # Decode HTML entities
+                    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+                    # Clean up whitespace
+                    text = " ".join(text.split())
+                    return text.strip()
+                
+                timestamp_col = clean_cell(cells[0])
+                status_col = clean_cell(cells[1])
                 
                 # Check if the timestamp starts with a day abbreviation
                 day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
