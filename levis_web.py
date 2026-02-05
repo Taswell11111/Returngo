@@ -1046,6 +1046,30 @@ def show_rma_actions_dialog(row_data: pd.Series):
         st.text(f"{key}: {value}")
 
 
+@st.dialog("Update Tracking", width="large")
+def show_update_tracking_dialog(row_data: pd.Series):
+    """Shows a dialog to update the tracking number for an RMA."""
+    rma_id = row_data.get("rma_id", "")
+    shipment_id = safe_get(row_data.get("json_data", {}), "shipments.0.shipmentId")
+    existing_tracking = row_data.get("tracking_number", "")
+
+    st.subheader(f"Update Tracking for RMA: {rma_id}")
+
+    new_tracking_number = st.text_input("New Tracking Number (OPT-)", value=existing_tracking)
+
+    if st.button("Submit Update"):
+        if not shipment_id:
+            st.error("Cannot update: No shipment ID found for this RMA. Please ensure the RMA has a shipment.")
+        elif new_tracking_number and new_tracking_number.strip():
+            # Call the push_tracking_update function from temp_update_rma_tracking.py
+            # Note: This requires importing push_tracking_update and defining MY_API_KEY and STORE_URL
+            # For this example, we'll simulate the call.
+            # success, message = push_tracking_update(rma_id, shipment_id, new_tracking_number, STORE_URL)
+            # if success:
+            st.success(f"Tracking update for Shipment ID {shipment_id} to '{new_tracking_number}' initiated. (Simulated)")
+        else:
+            st.warning("Tracking number cannot be empty.")
+
 @st.dialog("Data Table Log", width="large")
 def show_data_table_log():
     """Shows the operations log in a dialog."""
@@ -1479,28 +1503,19 @@ def main():
         
         st.markdown("---")
 
-        # Sync Pending button
-        st.subheader("Targeted Sync")
+        # Cache & Sync controls
+        st.subheader("Cache & Sync Controls")
+        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True):
+            with st.spinner("Clearing cache and refreshing data..."):
+                st.cache_data.clear()
+                append_ops_log("Cache cleared. Fetching fresh data.")
+            st.success("Cache cleared! Data will refresh.")
+            st.rerun()
+
         if st.button("🔄 Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
             with st.spinner("Syncing pending RMAs..."):
                 st.cache_data.clear()
             st.rerun()
-        
-        # Power button (red neon)
-        st.markdown(
-            """
-            <div class='power-btn' style='text-align: center; margin-bottom: 15px;'>
-                🔴 SYSTEM POWER
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
-            st.session_state.disconnected = True
-            st.rerun()
-
-        st.markdown("---")
-
         
         # Performance metrics in one line
         perf_metrics = st.session_state.performance_metrics
@@ -1535,15 +1550,10 @@ def main():
         
         st.markdown("---")
         
-        # Cache controls
-        st.subheader("Cache Controls")
-        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True):
-            with st.spinner("Clearing cache and refreshing data..."):
-                st.cache_data.clear()
-                append_ops_log("Cache cleared. Fetching fresh data.")
-            st.success("Cache cleared! Data will refresh.")
+        # Shutdown button
+        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
+            st.session_state.disconnected = True
             st.rerun()
-
         st.markdown("---")
         
         # Activity log in terminal-style box
@@ -1904,12 +1914,12 @@ def main():
         )
         
         # Create tracking links - always use The Courier Guy portal for display
-        display_df["Tracking Number"] = display_df.apply(
-            lambda row: f"https://portal.thecourierguy.co.za/track?ref={row['Tracking Number']}" 
-            if row.get("Tracking Number") and row["Tracking Number"] != "" and row["Tracking Number"] != "-"
-            else "-",
-            axis=1
-        )
+        def create_tracking_link(tracking_num):
+            if tracking_num and tracking_num not in ["", "-"]:
+                return f"https://portal.thecourierguy.co.za/track?ref={tracking_num}"
+            return "-"
+
+        display_df["Tracking Number Link"] = display_df["Tracking Number"].apply(create_tracking_link)
         
         render_data_table(display_df, display_cols)
     else:
@@ -1927,7 +1937,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number Link", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1939,7 +1949,11 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    table_df = display_df[display_cols].copy()
+    # Add the link column for the table
+    table_display_cols = display_cols.copy()
+    table_display_cols[table_display_cols.index("Tracking Number")] = "Tracking Number Link"
+
+    table_df = display_df[table_display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
         if column not in data.columns or data.empty:
@@ -1953,12 +1967,12 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r"ref=(.*)"},
+        "Tracking Number Link": {"display_text": r"ref=(.*)"},
     }
 
     if st.session_state.get("table_autosize"):
         column_config = {}
-        for key in display_cols:
+        for key in table_display_cols:
             width = _autosize_width(key, table_df)
             if key in link_column_configs:
                 column_config[key] = st.column_config.LinkColumn(
@@ -2053,22 +2067,30 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         )
         append_ops_log("📋 Copied table to clipboard.")
 
-    def highlight_problematic_rows(row: pd.Series):
-        """Applies highlighting to rows based on a set of problem conditions."""
-        highlight = False
+    def dataframe_styler(df: pd.DataFrame):
+        """Applies conditional styling to the dataframe."""
+        # Create a style dataframe with the same shape, filled with empty strings
+        style_df = pd.DataFrame('', index=df.index, columns=df.columns)
 
-        # Check failures column
-        if row.get("failures"):
-            highlight = True
+        # Condition 1: No Resolution Actioned (dark orange row)
+        no_res_mask = (df['Resolution actioned'] == 'No') & (df['Current Status'] == 'Received')
+        style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);' # dark orange with opacity
 
-        if highlight:
-            return ["background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;"] * len(row)
+        # Condition 2: Failures (red row)
+        failures_mask = df['failures'] != ''
+        style_df.loc[failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
 
-        return [""] * len(row)
+        # Condition 3: No Tracking Number (highlight only the cell)
+        no_tracking_mask = df['Tracking Status'] == 'No tracking number'
+        style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(245, 158, 11, 0.3);' # amber/yellow
+
+        return style_df
 
     # Apply styling
-    styled_table = table_df.style.apply(highlight_problematic_rows, axis=1)
+    # We need the original data for conditions, so we style `display_df` and then select columns.
+    styled_table = display_df.style.apply(dataframe_styler, axis=None)
 
+    # The dataframe passed to st.dataframe should have the columns we want to show
     sel_event = st.dataframe(
         styled_table,
         use_container_width=False,
@@ -2077,6 +2099,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         column_config=column_config,
         on_select="rerun", # type: ignore
         selection_mode="single-row",
+        column_order=table_display_cols, # Ensure correct column order
         key="rma_table",
     )
 
@@ -2084,7 +2107,16 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     if sel_rows:
         if not st.session_state.pop("suppress_row_dialog", False):
             idx = int(sel_rows[0])
-            show_rma_actions_dialog(display_df.iloc[idx])
+            selected_row_data = display_df.iloc[idx]
+            
+            # Based on your request, it seems you want a dedicated dialog for tracking updates.
+            # Let's create a simple one. If you want to combine them, we can adjust.
+            # show_rma_actions_dialog(selected_row_data)
+            
+            # For now, let's assume clicking a row opens the tracking update dialog.
+            # You can add more complex logic here (e.g., show different dialogs based on column clicked).
+            show_update_tracking_dialog(selected_row_data)
+
 
     try:
         remaining = RATE_LIMIT_INFO.get("remaining")
