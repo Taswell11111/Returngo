@@ -1001,6 +1001,48 @@ def show_ops_log():
         unsafe_allow_html=True
     )
 
+def _clickable_metric_card(filter_name: str, count: int, label: str, help_text: str, key: str, updated_text: str = "Updated just now") -> bool:
+    """
+    Renders a metric card as a clickable HTML component.
+    When clicked, it sends its `filter_name` back to Streamlit.
+    """
+    # CSS must be included inside the component's HTML as it runs in an iframe.
+    # We also add a body style to ensure the background is transparent.
+    full_html = f"""
+    <style>
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: transparent;
+        }}
+        .metric-card {{
+            background: linear-gradient(135deg, rgba(30, 30, 30, 0.9), rgba(50, 50, 50, 0.9));
+            border: 1px solid rgba(100, 100, 100, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            transition: box-shadow 0.2s;
+            color: #f0f2f6; /* Default text color */
+            cursor: pointer;
+        }}
+        .metric-card:hover {{
+            box-shadow: 0 8px 12px rgba(0, 0, 0, 0.5);
+        }}
+        .metric-card .count {{ font-size: 32px; font-weight: bold; color: #00ff00; margin-bottom: 5px; }}
+        .metric-card .label {{ font-size: 14px; color: #aaaaaa; text-transform: uppercase; }}
+        .metric-card .updated {{ font-size: 11px; color: #666666; margin-top: 5px; }}
+    </style>
+    <div class='metric-card' title='{help_text}' onclick="Streamlit.setComponentValue('{filter_name}')">
+        <div class='count'>{count}</div>
+        <div class='label'>{label}</div>
+        <div class='updated'>{updated_text}</div>
+    </div>
+    """
+
+    clicked_value = components.html(full_html, height=125)
+    return clicked_value == filter_name
+
 # ==========================================
 # 10. STREAMLIT UI - DIALOGS
 # ==========================================
@@ -1916,11 +1958,7 @@ def main():
         
         # Create tracking links - always use The Courier Guy portal for display
         # The URL is now the value of the 'Tracking Number' column, and the display text is handled by LinkColumn
-        display_df["Tracking Number"] = display_df["Tracking Number"].apply(
-            lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-"
-        )
-        # The display text for the link column will be the tracking number itself
-        display_df["Tracking Number Display"] = display_df["Tracking Number"]
+        display_df["Tracking Number Link"] = display_df["Tracking Number"].apply(lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-")
         
         render_data_table(display_df, display_cols)
     else:
@@ -1938,7 +1976,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number Link", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r".*ref=(OPT-.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1950,7 +1988,10 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    # Add the link column for the table
+    # The dataframe passed to st.dataframe should have the columns we want to show.
+    # We need to rename our generated link column to match what the config expects.
+    table_df = display_df.rename(columns={"Tracking Number Link": "Tracking Number"})
+
     table_df = display_df[display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
@@ -1965,7 +2006,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r"^(OPT-.*)"},
+        "Tracking Number": {"display_text": r".*ref=(OPT-.*)"},
     }
 
     if st.session_state.get("table_autosize"):
