@@ -1664,65 +1664,51 @@ def main():
     
     # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
-        st.markdown(
-            f"""<a href="#" id="filter-All" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Total Open', 0)}</div>
                 <div class='label'>Total Open</div>
                 <div class='updated'>Updated just now</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_total_open", use_container_width=True, help="Show all open RMAs"):
+            """
+        if st.button(card_html, key="btn_total_open", use_container_width=True, help="Show all open RMAs"):
             st.session_state.active_filter = "All"
             st.rerun()
     
     with metric_cols[1]:
-        st.markdown(
-            f"""
-            <a href="#" id="filter-Pending Requests" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Pending', 0)}</div>
                 <div class='label'>Pending</div>
                 <div class='updated'>Updated just now</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_pending", use_container_width=True, help="Show RMAs with 'Pending' status"):
+            """
+        if st.button(card_html, key="btn_pending", use_container_width=True, help="Show RMAs with 'Pending' status"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     with metric_cols[2]:
-        st.markdown(
-            f"""
-            <a href="#" id="filter-In Transit" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('In Transit', 0)}</div>
                 <div class='label'>In Transit</div>
                 <div class='updated'>Updated just now</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_in_transit", use_container_width=True, help="Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'"):
+            """
+        if st.button(card_html, key="btn_in_transit", use_container_width=True, help="Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
-        st.markdown(
-            f"""<a href="#" id="filter-Issues" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card' title='Issues include: No Tracking, Courier Cancelled, No Resolution Actioned'>
                 <div class='count'>{issues_count}</div>
                 <div class='label'>Issues ⓘ</div>
                 <div class='updated'>Updated just now</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_issues", use_container_width=True, help="Show RMAs with identified issues"):
+            """
+        if st.button(card_html, key="btn_issues", use_container_width=True, help="Show RMAs with identified issues"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1733,65 +1719,53 @@ def main():
     
     # PENDING REQUESTS
     with metric_cols2[0]:
-        st.markdown(
-            f"""<a href="#" id="filter-Pending Requests" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Pending', 0)}</div>
                 <div class='label'>Pending Requests</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_pending_req", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_pending_req", use_container_width=True):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     # RECEIVED
     with metric_cols2[1]:
-        st.markdown(
-            f"""<a href="#" id="filter-Received" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Received', 0)}</div>
                 <div class='label'>Received</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_received", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_received", use_container_width=True):
             st.session_state.active_filter = "Received"
             st.rerun()
     
     # COURIER CANCELLED
     with metric_cols2[2]:
-        st.markdown(
-            f"""<a href="#" id="filter-Courier Cancelled" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Courier Cancelled', 0)}</div>
                 <div class='label'>Courier Cancelled</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_courier_cancelled", use_container_width=True):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
     # APPROVED > SUBMITTED
     with metric_cols2[3]:
-        st.markdown(
-            f"""<a href="#" id="filter-Approved-Submitted" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Submitted', 0)}</div>
                 <div class='label'>Approved > Submitted</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_submitted", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_submitted", use_container_width=True):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1800,65 +1774,53 @@ def main():
     
     # APPROVED > DELIVERED
     with metric_cols3[0]:
-        st.markdown(
-            f"""<a href="#" id="filter-Approved-Delivered" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Delivered', 0)}</div>
                 <div class='label'>Approved > Delivered</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_delivered", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_delivered", use_container_width=True):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
     # NO TRACKING
     with metric_cols3[1]:
-        st.markdown(
-            f"""<a href="#" id="filter-No Tracking" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('No Tracking', 0)}</div>
                 <div class='label'>No Tracking</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_no_tracking", use_container_width=True):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
     # RESOLUTION ACTIONED
     with metric_cols3[2]:
-        st.markdown(
-            f"""<a href="#" id="filter-Resolution Actioned" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('Resolution Actioned', 0)}</div>
                 <div class='label'>Resolution Actioned</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_res_actioned", use_container_width=True):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
     # NO RESOLUTION ACTIONED
     with metric_cols3[3]:
-        st.markdown(
-            f"""<a href="#" id="filter-No Resolution Actioned" style="text-decoration: none;">
+        card_html = f"""
             <div class='metric-card'>
                 <div class='count'>{counts.get('No Resolution Actioned', 0)}</div>
                 <div class='label'>No Resolution Actioned</div>
                 <div class='updated'>Updated just now 🔄</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
+            """
+        if st.button(card_html, key="btn_no_res_actioned", use_container_width=True):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
