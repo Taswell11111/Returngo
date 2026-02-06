@@ -928,8 +928,8 @@ def compute_counts(df: pd.DataFrame) -> Dict[str, int]:
     counts_dict["In Transit"] = len(df[df["tracking_status"].str.lower().str.contains("routing delivery|out for delivery", na=False)])
     counts_dict["Submitted"] = len(df[(df["status"].str.lower() == "approved") & (df["tracking_status"].str.lower().str.contains("submitted to courier", na=False))])
     counts_dict["Delivered"] = len(df[(df["status"].str.lower() == "approved") & (df["tracking_status"].str.lower().str.contains("delivered", na=False))])
-    counts_dict["Courier Cancelled"] = len(df[df["tracking_status"].str.lower().str.contains("courier cancelled", na=False)])
-    counts_dict["No Tracking"] = len(df[df["tracking_status"].str.lower() == "no tracking number"])
+    counts_dict["Courier Cancelled"] = len(df[df["is_cc"]])
+    counts_dict["No Tracking"] = len(df[df["tracking_number"] == ""])
 
     # Resolution
     counts_dict["Resolution Actioned"] = len(df[df["resolution_actioned"].str.lower() == "yes"])
