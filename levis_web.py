@@ -603,14 +603,14 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
     shipments = safe_get(rma_data, "shipments", [])
     if not shipments:
         logger.debug("get_shipment_status: No shipments array in RMA data.")
-        return "No tracking number"
+        return None
 
     tracking_number = safe_get(shipments, "0.trackingNumber")
     logger.debug(f"get_shipment_status: tracking_number={tracking_number}")
 
     if not tracking_number:
         logger.debug("get_shipment_status: No tracking number found in shipments.")
-        return "No tracking number"
+        return None
 
     # Always use Parcel Ninja Optimise URL for scraping
     logger.info(f"Using Parcel Ninja scraper for tracking number: {tracking_number}")
