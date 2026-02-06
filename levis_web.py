@@ -1450,6 +1450,28 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
 
+def clickable_metric_card(filter_name: str, count: int, label: str, help_text: str, key: str, updated_text: str = "Updated just now"):
+    """
+    Renders a metric card as a clickable HTML component.
+    When clicked, it sends its `filter_name` back to Streamlit.
+    """
+    # The HTML for the card, including a title for the hover tooltip.
+    card_html = f"""
+        <div class='metric-card' title='{help_text}'>
+            <div class='count'>{count}</div>
+            <div class='label'>{label}</div>
+            <div class='updated'>{updated_text}</div>
+        </div>
+    """
+    
+    # Wrap the card in a div with an onclick event that sends the filter_name back to Streamlit.
+    clicked_value = components.html(
+        f'<div onclick="Streamlit.setComponentValue(\'{filter_name}\')" style="cursor: pointer;">{card_html}</div>',
+        height=125  # Set a fixed height for the component's iframe
+    )
+    
+    return clicked_value == filter_name
+
 # ==========================================
 # 13. STREAMLIT UI - MAIN FUNCTION
 # ==========================================
@@ -1664,51 +1686,23 @@ def main():
     
     # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Total Open', 0)}</div>
-                <div class='label'>Total Open</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_total_open", use_container_width=True, help="Show all open RMAs"):
+        if clickable_metric_card("All", counts.get('Total Open', 0), "Total Open", "Show all open RMAs", "card_total_open"):
             st.session_state.active_filter = "All"
             st.rerun()
     
     with metric_cols[1]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Pending', 0)}</div>
-                <div class='label'>Pending</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_pending", use_container_width=True, help="Show RMAs with 'Pending' status"):
+        if clickable_metric_card("Pending Requests", counts.get('Pending', 0), "Pending", "Show RMAs with 'Pending' status", "card_pending"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     with metric_cols[2]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('In Transit', 0)}</div>
-                <div class='label'>In Transit</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_in_transit", use_container_width=True, help="Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'"):
+        if clickable_metric_card("In Transit", counts.get('In Transit', 0), "In Transit", "Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'", "card_in_transit"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
-        card_html = f"""
-            <div class='metric-card' title='Issues include: No Tracking, Courier Cancelled, No Resolution Actioned'>
-                <div class='count'>{issues_count}</div>
-                <div class='label'>Issues ⓘ</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_issues", use_container_width=True, help="Show RMAs with identified issues"):
+        if clickable_metric_card("Issues", issues_count, "Issues ⓘ", "Show RMAs with identified issues", "card_issues"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1716,56 +1710,29 @@ def main():
     st.markdown("---")
     
     metric_cols2 = st.columns(4)
+    updated_text_sync = "Updated just now 🔄"
     
     # PENDING REQUESTS
     with metric_cols2[0]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Pending', 0)}</div>
-                <div class='label'>Pending Requests</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_pending_req", use_container_width=True):
+        if clickable_metric_card("Pending Requests", counts.get('Pending', 0), "Pending Requests", "Filter by Pending Requests", "card_pending_req", updated_text_sync):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     # RECEIVED
     with metric_cols2[1]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Received', 0)}</div>
-                <div class='label'>Received</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_received", use_container_width=True):
+        if clickable_metric_card("Received", counts.get('Received', 0), "Received", "Filter by Received", "card_received", updated_text_sync):
             st.session_state.active_filter = "Received"
             st.rerun()
     
     # COURIER CANCELLED
     with metric_cols2[2]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Courier Cancelled', 0)}</div>
-                <div class='label'>Courier Cancelled</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_courier_cancelled", use_container_width=True):
+        if clickable_metric_card("Courier Cancelled", counts.get('Courier Cancelled', 0), "Courier Cancelled", "Filter by Courier Cancelled", "card_courier_cancelled", updated_text_sync):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
     # APPROVED > SUBMITTED
     with metric_cols2[3]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Submitted', 0)}</div>
-                <div class='label'>Approved > Submitted</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_submitted", use_container_width=True):
+        if clickable_metric_card("Approved > Submitted", counts.get('Submitted', 0), "Approved > Submitted", "Filter by Approved > Submitted", "card_submitted", updated_text_sync):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1774,53 +1741,25 @@ def main():
     
     # APPROVED > DELIVERED
     with metric_cols3[0]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Delivered', 0)}</div>
-                <div class='label'>Approved > Delivered</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_delivered", use_container_width=True):
+        if clickable_metric_card("Approved > Delivered", counts.get('Delivered', 0), "Approved > Delivered", "Filter by Approved > Delivered", "card_delivered", updated_text_sync):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
     # NO TRACKING
     with metric_cols3[1]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('No Tracking', 0)}</div>
-                <div class='label'>No Tracking</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_no_tracking", use_container_width=True):
+        if clickable_metric_card("No Tracking", counts.get('No Tracking', 0), "No Tracking", "Filter by No Tracking", "card_no_tracking", updated_text_sync):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
     # RESOLUTION ACTIONED
     with metric_cols3[2]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Resolution Actioned', 0)}</div>
-                <div class='label'>Resolution Actioned</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_res_actioned", use_container_width=True):
+        if clickable_metric_card("Resolution Actioned", counts.get('Resolution Actioned', 0), "Resolution Actioned", "Filter by Resolution Actioned", "card_res_actioned", updated_text_sync):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
     # NO RESOLUTION ACTIONED
     with metric_cols3[3]:
-        card_html = f"""
-            <div class='metric-card'>
-                <div class='count'>{counts.get('No Resolution Actioned', 0)}</div>
-                <div class='label'>No Resolution Actioned</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """
-        if st.button(card_html, key="btn_no_res_actioned", use_container_width=True):
+        if clickable_metric_card("No Resolution Actioned", counts.get('No Resolution Actioned', 0), "No Resolution Actioned", "Filter by No Resolution Actioned", "card_no_res_actioned", updated_text_sync):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
@@ -2114,7 +2053,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         height=700,
         hide_index=True,
         column_config=column_config,
-        on_select="rerun", # type: ignore
+        on_select="rerun",
         selection_mode="single-row",
         column_order=display_cols, # Ensure correct column order
         key="rma_table",
@@ -2126,6 +2065,31 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
 
+
+    try:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
+            remain_int = int(remaining)
+            limit_int = int(limit)
+            if remain_int < limit_int * 0.2:
+                st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
+    except (ValueError, TypeError):
+        pass
+    
+    last_sync_time = st.session_state.get("last_sync_time")
+    last_sync_display = (
+        last_sync_time.strftime("%Y-%m-%d %H:%M:%S")
+        if last_sync_time
+        else "Never"
+    )
+    st.markdown(
+        f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+if __name__ == "__main__":
 
     try:
         remaining = RATE_LIMIT_INFO.get("remaining")
