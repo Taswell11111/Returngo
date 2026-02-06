@@ -1478,14 +1478,14 @@ def main():
 
         # Cache & Sync controls
         st.subheader("Cache & Sync")
-        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True, help="Clears all local data and fetches the latest from the API."):
+        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True, help="Clears all local data and fetches the latest from the API.", key="btn_clear_cache"):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
             st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
+        if st.button("Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status.", key="btn_sync_pending"):
             with st.spinner("Syncing pending RMAs..."):
                 st.cache_data.clear()
             st.rerun()
@@ -1493,7 +1493,7 @@ def main():
         st.markdown("---")
         
         # Shutdown button
-        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
+        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True, type="primary"):
             st.session_state.disconnected = True
             st.rerun()
         st.markdown("---")
@@ -1583,26 +1583,26 @@ def main():
     # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
         st.markdown(f"<div class='metric-card' title='Show all open RMAs'><div class='count'>{counts.get('Total Open', 0)}</div><div class='label'>Total Open</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View All Open", key="btn_total_open", use_container_width=True):
+        if st.button("View All Open", key="btn_total_open", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "All"
             st.rerun()
     
     with metric_cols[1]:
         st.markdown(f"<div class='metric-card' title='Show RMAs with Pending status'><div class='count'>{counts.get('Pending', 0)}</div><div class='label'>Pending</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View Pending", key="btn_pending", use_container_width=True):
+        if st.button("View Pending", key="btn_pending", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     with metric_cols[2]:
         st.markdown(f"<div class='metric-card' title='Show RMAs with tracking status Out for delivery or Routing delivery'><div class='count'>{counts.get('In Transit', 0)}</div><div class='label'>In Transit</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View In Transit", key="btn_in_transit", use_container_width=True):
+        if st.button("View In Transit", key="btn_in_transit", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
         st.markdown(f"<div class='metric-card' title='Issues include: Courier Cancelled, No Resolution Actioned'><div class='count'>{issues_count}</div><div class='label'>Issues ⓘ</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View Issues", key="btn_issues", use_container_width=True):
+        if st.button("View Issues", key="btn_issues", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1614,28 +1614,28 @@ def main():
     # PENDING REQUESTS
     with metric_cols2[0]:
         st.markdown(f"<div class='metric-card' title='Filter by Pending Requests'><div class='count'>{counts.get('Pending', 0)}</div><div class='label'>Pending Requests</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_pending_req", use_container_width=True):
+        if st.button("Filter", key="btn_pending_req", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     # RECEIVED
     with metric_cols2[1]:
         st.markdown(f"<div class='metric-card' title='Filter by Received'><div class='count'>{counts.get('Received', 0)}</div><div class='label'>Received</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_received", use_container_width=True):
+        if st.button("Filter", key="btn_received", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Received"
             st.rerun()
     
     # COURIER CANCELLED
     with metric_cols2[2]:
         st.markdown(f"<div class='metric-card' title='Filter by Courier Cancelled'><div class='count'>{counts.get('Courier Cancelled', 0)}</div><div class='label'>Courier Cancelled</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
+        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
     # APPROVED > SUBMITTED
     with metric_cols2[3]:
         st.markdown(f"<div class='metric-card' title='Filter by Approved > Submitted'><div class='count'>{counts.get('Submitted', 0)}</div><div class='label'>Approved > Submitted</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_submitted", use_container_width=True):
+        if st.button("Filter", key="btn_submitted", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1645,28 +1645,28 @@ def main():
     # APPROVED > DELIVERED
     with metric_cols3[0]:
         st.markdown(f"<div class='metric-card' title='Filter by Approved > Delivered'><div class='count'>{counts.get('Delivered', 0)}</div><div class='label'>Approved > Delivered</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_delivered", use_container_width=True):
+        if st.button("Filter", key="btn_delivered", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
     # NO TRACKING
     with metric_cols3[1]:
         st.markdown(f"<div class='metric-card' title='Filter by No Tracking'><div class='count'>{counts.get('No Tracking', 0)}</div><div class='label'>No Tracking</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
+        if st.button("Filter", key="btn_no_tracking", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
     # RESOLUTION ACTIONED
     with metric_cols3[2]:
         st.markdown(f"<div class='metric-card' title='Filter by Resolution Actioned'><div class='count'>{counts.get('Resolution Actioned', 0)}</div><div class='label'>Resolution Actioned</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
+        if st.button("Filter", key="btn_res_actioned", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
     # NO RESOLUTION ACTIONED
     with metric_cols3[3]:
         st.markdown(f"<div class='metric-card' title='Filter by No Resolution Actioned'><div class='count'>{counts.get('No Resolution Actioned', 0)}</div><div class='label'>No Resolution Actioned</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
+        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
@@ -1681,7 +1681,7 @@ def main():
             key="search_query_input",
         )
     with sc3:
-        if st.button("📋 View All", use_container_width=True):
+        if st.button("📋 View All", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "All"
             clear_all_filters()
             st.rerun()
@@ -1709,7 +1709,7 @@ def main():
             st.multiselect("Tracking Status", options=COURIER_STATUS_OPTIONS, key="tracking_multi")
         
         with c5:
-            if st.button("🧼 Clear filters", use_container_width=True):
+            if st.button("🧼 Clear filters", use_container_width=True, type="secondary"):
                 clear_all_filters()
                 st.rerun()
 
@@ -1878,12 +1878,12 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     
     action_col1, action_col2 = st.columns([1, 1])
     with action_col1:
-        if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
+        if st.button("Data table log", key="btn_data_table_log", use_container_width=True, type="secondary"):
             st.session_state["suppress_row_dialog"] = True
             show_data_table_log()
     
     with action_col2:
-        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True):
+        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True, type="secondary"):
             st.session_state["copy_all_payload"] = tsv_text
             st.session_state["suppress_row_dialog"] = True
 
@@ -1942,9 +1942,9 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     styled_table = display_df.style.apply(dataframe_styler, axis=None)
 
     # The dataframe passed to st.dataframe should have the columns we want to show
+    # This also fixes the ArrowInvalid error by removing the complex 'json_data' column
     sel_event = st.dataframe(
-        styled_table,
-        use_container_width=False,
+        styled_table[display_cols],
         height=700,
         hide_index=True,
         column_config=column_config,
