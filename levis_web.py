@@ -816,9 +816,9 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         Classifies the tracking status based on courier_status and RMA status.
         Returns the full event string in format: "Day, DD Mon HH:MM | Status"
         """
-        courier_status = str(row.get("courier_status", "")).strip()
         rma_status = str(row.get("status", "")).lower()
         tracking_number = str(row.get("tracking_number", "")).strip()
+        courier_status = str(row.get("courier_status", "")).strip()
         
         logger.debug(f"Classifying tracking for RMA with status '{rma_status}', tracking_number '{tracking_number}', and scraped courier_status '{courier_status}'")
 
@@ -826,18 +826,22 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             logger.debug("Result: No tracking number.")
             return "No tracking number"
 
-        # If the scraper returned any status (even an error message), prioritize it.
+        # If a pre-scraped status exists, use it.
         if courier_status:
             logger.debug(f"Result: Using scraped status '{courier_status}'.")
             return courier_status
         
-        # If scraping returned nothing, but the RMA is approved, assume it's just submitted.
-        if rma_status == "approved":
-            logger.debug("Result: Scraped status is empty, but RMA is approved. Defaulting to 'Submitted to Courier'.")
-            return "Submitted to Courier"
+        # If no pre-scraped status, but we have a tracking number, try scraping now.
+        # This handles cases where the initial bulk scrape might have failed.
+        logger.debug(f"No pre-scraped status for {tracking_number}. Attempting on-the-fly scrape.")
+        live_scraped_status = scrape_parcel_ninja_status(tracking_number)
+        if live_scraped_status:
+            logger.debug(f"Result: On-the-fly scrape successful: '{live_scraped_status}'.")
+            return live_scraped_status
         
-        # Final fallback for any other case.
-        logger.debug("Result: Final fallback, returning '-'.")
+        # If all scraping fails, fall back to a default based on RMA status.
+        logger.debug("Result: All scraping attempts failed. Using fallback status.")
+        if rma_status == "approved": return "Submitted to Courier"
         return "-"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
