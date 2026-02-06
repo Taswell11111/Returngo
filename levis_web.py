@@ -1940,11 +1940,17 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     # Apply styling
     # We need the original data for conditions, so we style `display_df` and then select columns.
     styled_table = display_df.style.apply(dataframe_styler, axis=None)
+    # Create a copy for styling and drop the complex 'json_data' column to prevent Arrow errors.
+    df_for_styling = display_df.copy()
+    if 'json_data' in df_for_styling.columns:
+        df_for_styling = df_for_styling.drop(columns=['json_data'])
+        
+    styled_table = df_for_styling.style.apply(dataframe_styler, axis=None)
 
     # The dataframe passed to st.dataframe should have the columns we want to show
     # This also fixes the ArrowInvalid error by removing the complex 'json_data' column
     sel_event = st.dataframe(
-        styled_table[display_cols],
+        styled_table,
         height=700,
         hide_index=True,
         column_config=column_config,
