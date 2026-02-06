@@ -511,49 +511,27 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
         response.raise_for_status()
         html_content = response.text
         
-        # Remove script and style tags to clean the HTML
-        clean_html = re.sub(r"<(script|style).*?</\1>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
+        # Regex to find lines that match the tracking history format.
+        # Example: "Tue, 08 Jul 10:46	Delivered"
+        # It looks for a day, date, month, time, and then the status text.
+        event_pattern = re.compile(
+            r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{2}:\d{2}\s+.*$",
+            re.MULTILINE
+        )
         
-        # Find all table rows
-        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Extract events from table rows
-        events = []
-        for row_html in rows:
-            # Extract table cells (td tags)
-            cells = re.findall(r"<td[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
-            
-            if len(cells) >= 2:
-                # Clean up the cell contents by removing HTML tags and extra whitespace
-                def clean_cell(cell_html):
-                    # Remove all HTML tags
-                    text = re.sub(r"<[^>]+>", " ", cell_html)
-                    # Decode HTML entities
-                    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-                    # Clean up whitespace
-                    text = " ".join(text.split())
-                    return text.strip()
-                
-                timestamp_col = clean_cell(cells[0])
-                status_col = clean_cell(cells[1])
-                
-                # Check if the timestamp starts with a day abbreviation
-                day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
-                if re.match(day_pattern, timestamp_col):
-                    # Format: "Day, DD Mon HH:MM | Status"
-                    event_text = f"{timestamp_col} | {status_col}"
-                    events.append(event_text)
-                    logger.debug(f"Found event: {event_text}")
+        # Find all matching event lines in the HTML content
+        events = event_pattern.findall(html_content)
         
         if events:
-            # Return the first event (most recent, as they're ordered newest-first)
-            latest_event = events[0]
+            # The first match is the most recent event on the page.
+            # We replace the tab character with a pipe for consistent formatting.
+            latest_event = events[0].strip().replace('\t', ' | ')
             logger.info(f"Latest tracking event for {tracking_number}: {latest_event}")
             return latest_event
         else:
             logger.warning(f"No valid tracking events found for {tracking_number}")
             return "No tracking events found"
-            
+
     except requests.exceptions.RequestException as e:
         logger.error(f"Request failed for Parcel Ninja tracking {tracking_number}: {e}", exc_info=True)
         return "Tracking request failed"
