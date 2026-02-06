@@ -1450,24 +1450,62 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
 
-def clickable_metric_card(filter_name: str, count: int, label: str, help_text: str, key: str, updated_text: str = "Updated just now"):
+def clickable_metric_card(filter_name: str, count: int, label: str, help_text: str, key: str, updated_text: str = "Updated just now") -> bool:
     """
     Renders a metric card as a clickable HTML component.
     When clicked, it sends its `filter_name` back to Streamlit.
     """
-    # The HTML for the card, including a title for the hover tooltip.
-    card_html = f"""
-        <div class='metric-card' title='{help_text}'>
-            <div class='count'>{count}</div>
-            <div class='label'>{label}</div>
-            <div class='updated'>{updated_text}</div>
-        </div>
+    # CSS must be included inside the component's HTML as it runs in an iframe.
+    # We also add a body style to ensure the background is transparent.
+    full_html = f"""
+    <style>
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: transparent;
+        }}
+        .metric-card {{
+            background: linear-gradient(135deg, rgba(30, 30, 30, 0.9), rgba(50, 50, 50, 0.9));
+            border: 1px solid rgba(100, 100, 100, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+            color: #f0f2f6; /* Default text color */
+        }}
+        .metric-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0, 0, 0, 0.5);
+        }}
+        .metric-card .count {{
+            font-size: 32px;
+            font-weight: bold;
+            color: #00ff00;
+            margin-bottom: 5px;
+        }}
+        .metric-card .label {{
+            font-size: 14px;
+            color: #aaaaaa;
+            text-transform: uppercase;
+        }}
+        .metric-card .updated {{
+            font-size: 11px;
+            color: #666666;
+            margin-top: 5px;
+        }}
+    </style>
+    <div class='metric-card' title='{help_text}' onclick="Streamlit.setComponentValue('{filter_name}')">
+        <div class='count'>{count}</div>
+        <div class='label'>{label}</div>
+        <div class='updated'>{updated_text}</div>
+    </div>
     """
-    
-    # Wrap the card in a div with an onclick event that sends the filter_name back to Streamlit.
+
     clicked_value = components.html(
-        f'<div onclick="Streamlit.setComponentValue(\'{filter_name}\')" style="cursor: pointer;">{card_html}</div>',
-        height=125  # Set a fixed height for the component's iframe
+        full_html,
+        height=125,
     )
     
     return clicked_value == filter_name
