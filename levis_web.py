@@ -1012,31 +1012,48 @@ def show_rma_actions_dialog(row_data: pd.Series):
     existing_tracking = row_data.get("tracking_number", "")
 
     st.subheader(f"Actions for RMA: {rma_id}")
+    st.subheader(f"RMA Actions: {rma_id}")
 
     left_col, right_col = st.columns(2)
+    tab_comments, tab_tracking, tab_details = st.tabs(["Comment Timeline", "Update Tracking", "RMA Details"])
 
     # --- Left Column: Comments ---
     with left_col:
         st.markdown("#### Comment Timeline")
 
+    with tab_comments:
         # Form to add a new comment
         with st.form(key=f"comment_form_{rma_id}"):
             new_comment_text = st.text_area("Add a new comment:", height=100, key=f"comment_input_{rma_id}")
             submit_comment = st.form_submit_button("Post Comment")
 
-            if submit_comment and new_comment_text.strip():
+            if submit_comment and new_comment_text and new_comment_text.strip():
+                if not MY_API_KEY:
+                    st.error("Cannot post comment: API Key is not configured.")
+                    return
                 success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
                 if success:
                     st.success("Comment posted successfully!")
                     append_ops_log(f"Posted comment to RMA {rma_id}.")
                     st.cache_data.clear()
                     st.rerun()
+                if MY_API_KEY:
+                    success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
+                    if success:
+                        st.success("Comment posted successfully!")
+                        append_ops_log(f"Posted comment to RMA {rma_id}.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Failed to post comment.")
                 else:
                     st.error("Failed to post comment.")
+                    st.error("Cannot post comment: API Key is not configured.")
 
         st.divider()
 
         # Display existing comments
+        st.markdown("#### Comment History")
         comments = safe_get(row_data.get("json_data", {}), "comments", [])
         if not comments:
             st.info("No comments found for this RMA.")
@@ -1049,17 +1066,27 @@ def show_rma_actions_dialog(row_data: pd.Series):
                 st.markdown(f"**{comment_date}** by *{author}*")
                 st.markdown(f"> {html_text}", unsafe_allow_html=True)
                 st.markdown("---")
+            with st.container(height=400):
+                sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
+                for comment in sorted_comments:
+                    comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
+                    author = comment.get('triggeredBy', 'System')
+                    html_text = comment.get('htmlText', 'No content.')
+                    st.markdown(f"**{comment_date}** by *{author}*")
+                    st.markdown(f"> {html_text}", unsafe_allow_html=True)
+                    st.markdown("---")
 
     # --- Right Column: Tracking Update ---
     with right_col:
         st.markdown("#### Update Tracking")
 
+    with tab_tracking:
         new_tracking_number = st.text_input("New Tracking Number (OPT-)", value=existing_tracking, key=f"tracking_input_{rma_id}")
 
         if st.button("Submit Tracking Update", key=f"submit_tracking_{rma_id}"):
             if not shipment_id:
                 st.error("Cannot update: No shipment ID found for this RMA.")
-            elif new_tracking_number.strip():
+            elif new_tracking_number and new_tracking_number.strip():
                 success, message = push_tracking_update(rma_id, shipment_id, new_tracking_number, STORE_URL)
                 if success:
                     st.success(f"Tracking update for Shipment ID {shipment_id} to '{new_tracking_number}' initiated.")
@@ -1070,6 +1097,11 @@ def show_rma_actions_dialog(row_data: pd.Series):
                     st.error(f"Tracking update failed: {message}")
             else:
                 st.warning("Tracking number cannot be empty.")
+
+    with tab_details:
+        st.markdown("#### Raw RMA Data")
+        # Displaying the raw JSON data can be very useful for debugging
+        st.json(row_data.get("json_data", {}))
 
 
 @st.dialog("Update Tracking", width="large")
