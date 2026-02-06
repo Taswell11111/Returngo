@@ -816,58 +816,28 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         Classifies the tracking status based on courier_status and RMA status.
         Returns the full event string in format: "Day, DD Mon HH:MM | Status"
         """
-        courier_status = row.get("courier_status", "")
-        status = row.get("status", "")
-        tracking_number = row.get("tracking_number", "")
+        courier_status = str(row.get("courier_status", "")).strip()
+        rma_status = str(row.get("status", "")).lower()
+        tracking_number = str(row.get("tracking_number", "")).strip()
         
-        logger.debug(f"classify_tracking_status: courier_status='{courier_status}', status='{status}', tracking_number='{tracking_number}'")
+        logger.debug(f"Classifying tracking for RMA with status '{rma_status}', tracking_number '{tracking_number}', and scraped courier_status '{courier_status}'")
 
         if not tracking_number: 
-            logger.debug(f"No tracking number, returning 'No tracking number'")
+            logger.debug("Result: No tracking number.")
             return "No tracking number"
 
-        # Define substrings of statuses that are error messages, not real tracking events
-        error_substrings = [
-            "not found",
-            "blocked",
-            "unauthorised",
-            "rate limited",
-            "service error",
-            "tracking error",
-            "no tracking events",
-            "request failed",
-            "check failed",
-            "status unknown",
-        ]
-
-        # Check if courier_status is a real tracking event (starts with day abbreviation)
-        is_real_event = False
+        # If the scraper returned any status (even an error message), prioritize it.
         if courier_status:
-            # Check if it matches the expected format: "Day, DD Mon HH:MM | Status"
-            day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
-            if re.match(day_pattern, courier_status):
-                is_real_event = True
-            # Also check it's not an error message
-            if any(sub in courier_status.lower() for sub in error_substrings):
-                is_real_event = False
-
-        # If we have a real tracking event, return it as-is
-        if is_real_event:
-            logger.debug(f"Using real tracking event: {courier_status}")
+            logger.debug(f"Result: Using scraped status '{courier_status}'.")
             return courier_status
         
-        # If the status is "approved" and we have a tracking number, but no real event yet,
-        # it's most likely just been submitted.
-        if status.lower() == "approved":
-            logger.debug(f"No real tracking event, but status is approved. Returning 'Submitted to Courier'")
+        # If scraping returned nothing, but the RMA is approved, assume it's just submitted.
+        if rma_status == "approved":
+            logger.debug("Result: Scraped status is empty, but RMA is approved. Defaulting to 'Submitted to Courier'.")
             return "Submitted to Courier"
         
-        # For other RMA statuses, if we have an error status, show it
-        if courier_status:
-            logger.debug(f"Returning the error courier_status: {courier_status}")
-            return courier_status
-        
-        logger.debug(f"Final fallback, returning '-'")
+        # Final fallback for any other case.
+        logger.debug("Result: Final fallback, returning '-'.")
         return "-"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
