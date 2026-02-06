@@ -448,6 +448,26 @@ def post_rma_comment(api_key: str, store_url: str, rma_id: str, comment_text: st
         logger.error(f"Failed to post comment to RMA {rma_id}: {e}", exc_info=True)
         return False
 
+def push_tracking_update(rma_id: str, shipment_id: str, tracking_number: str, store_url: str) -> Tuple[bool, str]:
+    """Update tracking number for a shipment."""
+    url = api_url(f"/shipment/{shipment_id}")
+    headers = {
+        "x-api-key": MY_API_KEY, "X-API-KEY": MY_API_KEY,
+        "x-shop-name": store_url, "Content-Type": "application/json"
+    }
+    payload = {
+        "status": "LabelCreated", "carrierName": "CourierGuy",
+        "trackingNumber": tracking_number,
+        "trackingURL": f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}",
+    }
+    try:
+        res = requests.put(url, headers=headers, json=payload, timeout=15)
+        if res.status_code in [200, 201]:
+            return True, "Success"
+        return False, f"API Error {res.status_code}: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
 # ==========================================
 # 6. DATA FETCHING AND CACHING
 # ==========================================
@@ -987,61 +1007,69 @@ def show_ops_log():
 @st.dialog("RMA Actions", width="large")
 def show_rma_actions_dialog(row_data: pd.Series):
     """Shows a dialog with action buttons for a selected RMA."""
-    rma_id = row_data.get("rma_id", "")
+    rma_id = row_data.get("rma_id", "N/A")
+    shipment_id = safe_get(row_data.get("json_data", {}), "shipments.0.shipmentId")
+    existing_tracking = row_data.get("tracking_number", "")
+
     st.subheader(f"Actions for RMA: {rma_id}")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Refresh Data (Clear Cache)", key=f"refresh_{rma_id}"):
-            st.cache_data.clear()
-            append_ops_log(f"Cache cleared to refresh RMA {rma_id}. Rerunning.")
-            st.success(f"Cache cleared. Data will be refreshed.")
-            time.sleep(1)
-            st.rerun()
+    left_col, right_col = st.columns(2)
 
-    with col2:
-        if st.button("💬 Add Comment", key=f"comment_{rma_id}"):
-            st.session_state["show_comment_input"] = rma_id
+    # --- Left Column: Comments ---
+    with left_col:
+        st.markdown("#### Comment Timeline")
 
-    if st.session_state.get("show_comment_input") == rma_id:
-        comment_text = st.text_area("Enter your comment:", key=f"comment_text_{rma_id}")
-        if st.button("Submit Comment", key=f"submit_comment_{rma_id}"):
-            if comment_text.strip():
-                if not MY_API_KEY:
-                    st.error("Cannot post comment: 'RETURNGO_API_KEY' is not configured.")
-                    return
-                success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, comment_text)
+        # Form to add a new comment
+        with st.form(key=f"comment_form_{rma_id}"):
+            new_comment_text = st.text_area("Add a new comment:", height=100, key=f"comment_input_{rma_id}")
+            submit_comment = st.form_submit_button("Post Comment")
+
+            if submit_comment and new_comment_text.strip():
+                success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
                 if success:
-                    st.success("Comment posted!")
-                    append_ops_log(f"Posted comment to RMA {rma_id}")
+                    st.success("Comment posted successfully!")
+                    append_ops_log(f"Posted comment to RMA {rma_id}.")
+                    st.cache_data.clear()
+                    st.rerun()
                 else:
                     st.error("Failed to post comment.")
-                st.session_state.pop("show_comment_input", None)
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.warning("Comment cannot be empty.")
 
-    st.divider()
-    st.subheader("RMA Details")
-    
-    details_dict = {
-        "RMA ID": rma_id,
-        "Order": row_data.get("order_name", "-"),
-        "Status": row_data.get("status", "-"),
-        "Requested": format_date(row_data.get("requested_date")),
-        "Approved": format_date(row_data.get("approved_date")),
-        "Received": format_date(row_data.get("received_date")),
-        "Tracking Number": row_data.get("tracking_number", "-"),
-        "Tracking Status": row_data.get("tracking_status", "-"),
-        "Resolution Type": row_data.get("resolution_type", "-"),
-        "Resolution Actioned": row_data.get("resolution_actioned", "-"),
-        "Days Since Requested": row_data.get("days_since_requested", 0),
-        "Failures": row_data.get("failures", "-"),
-    }
-    
-    for key, value in details_dict.items():
-        st.text(f"{key}: {value}")
+        st.divider()
+
+        # Display existing comments
+        comments = safe_get(row_data.get("json_data", {}), "comments", [])
+        if not comments:
+            st.info("No comments found for this RMA.")
+        else:
+            sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
+            for comment in sorted_comments:
+                comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
+                author = comment.get('triggeredBy', 'System')
+                html_text = comment.get('htmlText', 'No content.')
+                st.markdown(f"**{comment_date}** by *{author}*")
+                st.markdown(f"> {html_text}", unsafe_allow_html=True)
+                st.markdown("---")
+
+    # --- Right Column: Tracking Update ---
+    with right_col:
+        st.markdown("#### Update Tracking")
+
+        new_tracking_number = st.text_input("New Tracking Number (OPT-)", value=existing_tracking, key=f"tracking_input_{rma_id}")
+
+        if st.button("Submit Tracking Update", key=f"submit_tracking_{rma_id}"):
+            if not shipment_id:
+                st.error("Cannot update: No shipment ID found for this RMA.")
+            elif new_tracking_number.strip():
+                success, message = push_tracking_update(rma_id, shipment_id, new_tracking_number, STORE_URL)
+                if success:
+                    st.success(f"Tracking update for Shipment ID {shipment_id} to '{new_tracking_number}' initiated.")
+                    append_ops_log(f"Updated tracking for RMA {rma_id} to {new_tracking_number}.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Tracking update failed: {message}")
+            else:
+                st.warning("Tracking number cannot be empty.")
 
 
 @st.dialog("Update Tracking", width="large")
