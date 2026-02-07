@@ -1471,10 +1471,12 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             padding: 15px;
             text-align: center;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            transition: box-shadow 0.2s;
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
             color: #f0f2f6; /* Default text color */
         }}
         .metric-card:hover {{
+            transform: translateY(-5px);
             box-shadow: 0 8px 12px rgba(0, 0, 0, 0.5);
         }}
         .metric-card .count {{
@@ -1482,12 +1484,6 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             font-weight: bold;
             color: #00ff00;
             margin-bottom: 5px;
-            cursor: pointer;
-            transition: transform 0.2s, color 0.2s;
-        }}
-        .metric-card .count:hover {{
-            transform: scale(1.1);
-            color: #80ff80; /* Brighter green on hover */
         }}
         .metric-card .label {{
             font-size: 14px;
@@ -1500,8 +1496,8 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             margin-top: 5px;
         }}
     </style>
-    <div class='metric-card' title='{help_text}'>
-        <div class='count' onclick="Streamlit.setComponentValue('{filter_name}')">{count}</div>
+    <div class='metric-card' title='{help_text}' onclick="Streamlit.setComponentValue('{filter_name}')">
+        <div class='count'>{count}</div>
         <div class='label'>{label}</div>
         <div class='updated'>{updated_text}</div>
     </div>
