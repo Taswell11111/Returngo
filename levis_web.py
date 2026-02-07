@@ -1502,12 +1502,12 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
     </style>
     <script>
       function handleClick(filterName) {
-        // Ensure Streamlit is available before sending the value
-        if (window.Streamlit) {
+        // Ensure Streamlit is available before sending the value.
+        if (window.Streamlit) {{
           Streamlit.setComponentValue(filterName);
-        }
+        }}
       }
-    </style>
+    </script>
     <div class='metric-card' title='{help_text}'>
         <div class='count' onclick="handleClick('{filter_name}')">{count}</div>
         <div class='label'>{label}</div>
