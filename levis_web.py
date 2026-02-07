@@ -627,8 +627,15 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
         logger.debug("get_shipment_status: No shipments array in RMA data.")
         return "No tracking number"
 
-    tracking_number = safe_get(shipments, "0.trackingNumber")
-    logger.debug(f"get_shipment_status: tracking_number={tracking_number}")
+    tracking_number = None
+    tracking_url = None
+    for shipment in shipments:
+        if shipment and shipment.get("trackingNumber"):
+            tracking_number = shipment.get("trackingNumber")
+            tracking_url = shipment.get("trackingUrl")
+            break
+    
+    logger.debug(f"get_shipment_status: tracking_number={tracking_number}, tracking_url={tracking_url}")
 
     if not tracking_number:
         logger.debug("get_shipment_status: No tracking number found in shipments.")
@@ -1000,36 +1007,36 @@ def show_ops_log():
 @st.dialog("RMA Actions", width="large")
 def show_rma_actions_dialog(row_data: pd.Series):
     """Shows a dialog with action buttons for a selected RMA."""
-    rma_id = row_data.get("RMA ID", "N/A").split("rmaid=")[-1] # Extract from URL
+    rma_id = row_data.get("rma_id", "N/A")
     shipment_id = safe_get(row_data.get("json_data", {}), "shipments.0.shipmentId")
     existing_tracking = row_data.get("tracking_number", "")
 
     st.subheader(f"Actions for RMA: {rma_id}")
+    st.subheader(f"RMA Actions: {rma_id}")
 
+    left_col, right_col = st.columns(2)
     tab_comments, tab_tracking, tab_details = st.tabs(["Comment Timeline", "Update Tracking", "RMA Details"])
 
-    with tab_comments:
-        st.markdown("#### Comment History")
-        comments = safe_get(row_data.get("json_data", {}), "comments", [])
-        with st.container(height=400):
-            if not comments:
-                st.info("No comments found for this RMA.")
-            else:
-                sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
-                for comment in sorted_comments:
-                    comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
-                    author = comment.get('triggeredBy', 'System')
-                    html_text = comment.get('htmlText', 'No content.')
-                    st.markdown(f"**{comment_date}** by *{author}*")
-                    st.markdown(f"> {html_text}", unsafe_allow_html=True)
-                    st.markdown("---")
+    # --- Left Column: Comments ---
+    with left_col:
+        st.markdown("#### Comment Timeline")
 
+    with tab_comments:
         # Form to add a new comment
         with st.form(key=f"comment_form_{rma_id}"):
             new_comment_text = st.text_area("Add a new comment:", height=100, key=f"comment_input_{rma_id}")
             submit_comment = st.form_submit_button("Post Comment")
 
             if submit_comment and new_comment_text and new_comment_text.strip():
+                if not MY_API_KEY:
+                    st.error("Cannot post comment: API Key is not configured.")
+                    return
+                success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
+                if success:
+                    st.success("Comment posted successfully!")
+                    append_ops_log(f"Posted comment to RMA {rma_id}.")
+                    st.cache_data.clear()
+                    st.rerun()
                 if MY_API_KEY:
                     success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
                     if success:
@@ -1040,10 +1047,40 @@ def show_rma_actions_dialog(row_data: pd.Series):
                     else:
                         st.error("Failed to post comment.")
                 else:
+                    st.error("Failed to post comment.")
                     st.error("Cannot post comment: API Key is not configured.")
 
-    with tab_tracking:
+        st.divider()
+
+        # Display existing comments
+        st.markdown("#### Comment History")
+        comments = safe_get(row_data.get("json_data", {}), "comments", [])
+        if not comments:
+            st.info("No comments found for this RMA.")
+        else:
+            sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
+            for comment in sorted_comments:
+                comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
+                author = comment.get('triggeredBy', 'System')
+                html_text = comment.get('htmlText', 'No content.')
+                st.markdown(f"**{comment_date}** by *{author}*")
+                st.markdown(f"> {html_text}", unsafe_allow_html=True)
+                st.markdown("---")
+            with st.container(height=400):
+                sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
+                for comment in sorted_comments:
+                    comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
+                    author = comment.get('triggeredBy', 'System')
+                    html_text = comment.get('htmlText', 'No content.')
+                    st.markdown(f"**{comment_date}** by *{author}*")
+                    st.markdown(f"> {html_text}", unsafe_allow_html=True)
+                    st.markdown("---")
+
+    # --- Right Column: Tracking Update ---
+    with right_col:
         st.markdown("#### Update Tracking")
+
+    with tab_tracking:
         new_tracking_number = st.text_input("New Tracking Number (OPT-)", value=existing_tracking, key=f"tracking_input_{rma_id}")
 
         if st.button("Submit Tracking Update", key=f"submit_tracking_{rma_id}"):
@@ -1413,6 +1450,70 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
 
+def clickable_metric_card(filter_name: str, count: int, label: str, help_text: str, key: str, updated_text: str = "Updated just now") -> bool:
+    """
+    Renders a metric card as a clickable HTML component.
+    When clicked, it sends its `filter_name` back to Streamlit.
+    """
+    # CSS must be included inside the component's HTML as it runs in an iframe.
+    # We also add a body style to ensure the background is transparent.
+    full_html = f"""
+    <style>
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: transparent;
+        }}
+        .metric-card {{
+            background: linear-gradient(135deg, rgba(30, 30, 30, 0.9), rgba(50, 50, 50, 0.9));
+            border: 1px solid rgba(100, 100, 100, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            transition: box-shadow 0.2s;
+            color: #f0f2f6; /* Default text color */
+        }}
+        .metric-card:hover {{
+            box-shadow: 0 8px 12px rgba(0, 0, 0, 0.5);
+        }}
+        .metric-card .count {{
+            font-size: 32px;
+            font-weight: bold;
+            color: #00ff00;
+            margin-bottom: 5px;
+            cursor: pointer;
+            transition: transform 0.2s, color 0.2s;
+        }}
+        .metric-card .count:hover {{
+            transform: scale(1.1);
+            color: #80ff80; /* Brighter green on hover */
+        }}
+        .metric-card .label {{
+            font-size: 14px;
+            color: #aaaaaa;
+            text-transform: uppercase;
+        }}
+        .metric-card .updated {{
+            font-size: 11px;
+            color: #666666;
+            margin-top: 5px;
+        }}
+    </style>
+    <div class='metric-card' title='{help_text}'>
+        <div class='count' onclick="Streamlit.setComponentValue('{filter_name}')">{count}</div>
+        <div class='label'>{label}</div>
+        <div class='updated'>{updated_text}</div>
+    </div>
+    """
+
+    clicked_value = components.html(
+        full_html,
+        height=125,
+    )
+    
+    return clicked_value == filter_name
+
 # ==========================================
 # 13. STREAMLIT UI - MAIN FUNCTION
 # ==========================================
@@ -1525,26 +1626,18 @@ def main():
         st.markdown("---")
 
         # Cache & Sync controls
-        st.subheader("Cache & Sync")
-        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True, help="Clears all local data and fetches the latest from the API."):
+        st.subheader("Cache & Sync Controls")
+        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
             st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
+        if st.button("🔄 Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
             with st.spinner("Syncing pending RMAs..."):
                 st.cache_data.clear()
             st.rerun()
-        
-        st.markdown("---")
-        
-        # Shutdown button
-        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
-            st.session_state.disconnected = True
-            st.rerun()
-        st.markdown("---")
         
         # Performance metrics in one line
         perf_metrics = st.session_state.performance_metrics
@@ -1578,6 +1671,11 @@ def main():
         )
         
         st.markdown("---")
+        
+        # Shutdown button
+        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
+            st.session_state.disconnected = True
+            st.rerun()
         st.markdown("---")
         
         # Activity log in terminal-style box
@@ -1606,13 +1704,13 @@ def main():
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
         
         if not timeline_df.empty:
-            date_counts = (timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # type: ignore
-                           .size()
-                           .reset_index(name="Count"))
+            date_counts = (
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)  # type: ignore
+                .size()
+                .reset_index(name="Count")
+            )
             date_counts.columns = ["Date", "Count"]
-            
-            if not date_counts.empty:
-                st.line_chart(date_counts.set_index("Date"), height=300)
+            st.line_chart(date_counts.set_index("Date"), height=300)
         else:
             st.info("No valid requested dates found for charting.")
     else:
@@ -1630,27 +1728,23 @@ def main():
     
     # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
-        st.markdown(f"<div class='metric-card' title='Show all open RMAs'><div class='count'>{counts.get('Total Open', 0)}</div><div class='label'>Total Open</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View All Open", key="btn_total_open", use_container_width=True):
+        if clickable_metric_card("All", counts.get('Total Open', 0), "Total Open", "Show all open RMAs", "card_total_open"):
             st.session_state.active_filter = "All"
             st.rerun()
     
     with metric_cols[1]:
-        st.markdown(f"<div class='metric-card' title='Show RMAs with Pending status'><div class='count'>{counts.get('Pending', 0)}</div><div class='label'>Pending</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View Pending", key="btn_pending", use_container_width=True):
+        if clickable_metric_card("Pending Requests", counts.get('Pending', 0), "Pending", "Show RMAs with 'Pending' status", "card_pending"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     with metric_cols[2]:
-        st.markdown(f"<div class='metric-card' title='Show RMAs with tracking status Out for delivery or Routing delivery'><div class='count'>{counts.get('In Transit', 0)}</div><div class='label'>In Transit</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View In Transit", key="btn_in_transit", use_container_width=True):
+        if clickable_metric_card("In Transit", counts.get('In Transit', 0), "In Transit", "Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'", "card_in_transit"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
-        st.markdown(f"<div class='metric-card' title='Issues include: Courier Cancelled, No Resolution Actioned'><div class='count'>{issues_count}</div><div class='label'>Issues ⓘ</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
-        if st.button("View Issues", key="btn_issues", use_container_width=True):
+        if clickable_metric_card("Issues", issues_count, "Issues ⓘ", "Show RMAs with identified issues", "card_issues"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1658,32 +1752,29 @@ def main():
     st.markdown("---")
     
     metric_cols2 = st.columns(4)
+    updated_text_sync = "Updated just now 🔄"
     
     # PENDING REQUESTS
     with metric_cols2[0]:
-        st.markdown(f"<div class='metric-card' title='Filter by Pending Requests'><div class='count'>{counts.get('Pending', 0)}</div><div class='label'>Pending Requests</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_pending_req", use_container_width=True):
+        if clickable_metric_card("Pending Requests", counts.get('Pending', 0), "Pending Requests", "Filter by Pending Requests", "card_pending_req", updated_text_sync):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     # RECEIVED
     with metric_cols2[1]:
-        st.markdown(f"<div class='metric-card' title='Filter by Received'><div class='count'>{counts.get('Received', 0)}</div><div class='label'>Received</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_received", use_container_width=True):
+        if clickable_metric_card("Received", counts.get('Received', 0), "Received", "Filter by Received", "card_received", updated_text_sync):
             st.session_state.active_filter = "Received"
             st.rerun()
     
     # COURIER CANCELLED
     with metric_cols2[2]:
-        st.markdown(f"<div class='metric-card' title='Filter by Courier Cancelled'><div class='count'>{counts.get('Courier Cancelled', 0)}</div><div class='label'>Courier Cancelled</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
+        if clickable_metric_card("Courier Cancelled", counts.get('Courier Cancelled', 0), "Courier Cancelled", "Filter by Courier Cancelled", "card_courier_cancelled", updated_text_sync):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
     # APPROVED > SUBMITTED
     with metric_cols2[3]:
-        st.markdown(f"<div class='metric-card' title='Filter by Approved > Submitted'><div class='count'>{counts.get('Submitted', 0)}</div><div class='label'>Approved > Submitted</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_submitted", use_container_width=True):
+        if clickable_metric_card("Approved > Submitted", counts.get('Submitted', 0), "Approved > Submitted", "Filter by Approved > Submitted", "card_submitted", updated_text_sync):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1692,35 +1783,31 @@ def main():
     
     # APPROVED > DELIVERED
     with metric_cols3[0]:
-        st.markdown(f"<div class='metric-card' title='Filter by Approved > Delivered'><div class='count'>{counts.get('Delivered', 0)}</div><div class='label'>Approved > Delivered</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_delivered", use_container_width=True):
+        if clickable_metric_card("Approved > Delivered", counts.get('Delivered', 0), "Approved > Delivered", "Filter by Approved > Delivered", "card_delivered", updated_text_sync):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
     # NO TRACKING
     with metric_cols3[1]:
-        st.markdown(f"<div class='metric-card' title='Filter by No Tracking'><div class='count'>{counts.get('No Tracking', 0)}</div><div class='label'>No Tracking</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
+        if clickable_metric_card("No Tracking", counts.get('No Tracking', 0), "No Tracking", "Filter by No Tracking", "card_no_tracking", updated_text_sync):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
     # RESOLUTION ACTIONED
     with metric_cols3[2]:
-        st.markdown(f"<div class='metric-card' title='Filter by Resolution Actioned'><div class='count'>{counts.get('Resolution Actioned', 0)}</div><div class='label'>Resolution Actioned</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
+        if clickable_metric_card("Resolution Actioned", counts.get('Resolution Actioned', 0), "Resolution Actioned", "Filter by Resolution Actioned", "card_res_actioned", updated_text_sync):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
     # NO RESOLUTION ACTIONED
     with metric_cols3[3]:
-        st.markdown(f"<div class='metric-card' title='Filter by No Resolution Actioned'><div class='count'>{counts.get('No Resolution Actioned', 0)}</div><div class='label'>No Resolution Actioned</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
-        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
+        if clickable_metric_card("No Resolution Actioned", counts.get('No Resolution Actioned', 0), "No Resolution Actioned", "Filter by No Resolution Actioned", "card_no_res_actioned", updated_text_sync):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
     # Search bar and View All button
     st.markdown("---")
-    sc1, sc3 = st.columns([9, 1], vertical_alignment="center")
+    sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
     with sc1:
         st.text_input(
             "Search",
@@ -1829,7 +1916,11 @@ def main():
         
         # Create tracking links - always use The Courier Guy portal for display
         # The URL is now the value of the 'Tracking Number' column, and the display text is handled by LinkColumn
-        display_df["Tracking Number"] = display_df["Tracking Number"].apply(lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-")
+        display_df["Tracking Number"] = display_df["Tracking Number"].apply(
+            lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-"
+        )
+        # The display text for the link column will be the tracking number itself
+        display_df["Tracking Number Display"] = display_df["Tracking Number"]
         
         render_data_table(display_df, display_cols)
     else:
@@ -1847,7 +1938,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r".*ref=(OPT-.*)", help="Click to track on The Courier Guy portal"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number Link", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1859,6 +1950,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "failures": st.column_config.TextColumn("failures"),
     }
 
+    # Add the link column for the table
     table_df = display_df[display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
@@ -1873,7 +1965,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r".*ref=(OPT-.*)"},
+        "Tracking Number": {"display_text": r"^(OPT-.*)"},
     }
 
     if st.session_state.get("table_autosize"):
@@ -1971,14 +2063,21 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     def dataframe_styler(df: pd.DataFrame):
         """Applies conditional styling to the dataframe."""
         style_df = pd.DataFrame('', index=df.index, columns=df.columns)
-        
+
+        no_res_mask = (df['Resolution actioned'] == 'No') & (df['Current Status'] == 'Received')
+        # This rule is now handled by the "NO_RESOLUTION" failure check below.
+        # style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);'
+
         # Yellow highlight for "NO_RESOLUTION" failures
         no_resolution_mask = df['failures'].str.contains("NO_RESOLUTION", na=False)
         style_df.loc[no_resolution_mask, :] = 'background-color: rgba(253, 224, 71, 0.4);' # yellow with opacity
 
         # Red highlight for other failures (will override yellow if both are present, e.g., "COURIER_CANCELLED,NO_RESOLUTION")
-        other_failures_mask = df['failures'].str.contains("COURIER_CANCELLED", na=False) | (df['Tracking Status'] == 'No tracking number')
+        other_failures_mask = df['failures'].str.contains("COURIER_CANCELLED", na=False)
         style_df.loc[other_failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
+        
+        no_tracking_mask = df['Tracking Status'] == 'No tracking number'
+        style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(234, 88, 12, 0.35);'
 
         res_actioned_mask = (df['Resolution actioned'] == 'Yes') & (df['Current Status'] == 'Approved')
         style_df.loc[res_actioned_mask, 'Resolution actioned'] = 'background-color: rgba(253, 224, 71, 0.4);'
@@ -2008,6 +2107,31 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
             idx = int(sel_rows[0])
             show_rma_actions_dialog(display_df.iloc[idx])
 
+
+    try:
+        remaining = RATE_LIMIT_INFO.get("remaining")
+        limit = RATE_LIMIT_INFO.get("limit")
+        if isinstance(remaining, (int, str)) and isinstance(limit, (int, str)):
+            remain_int = int(remaining)
+            limit_int = int(limit)
+            if remain_int < limit_int * 0.2:
+                st.warning(f"⚠️ API quota low: {remain_int}/{limit_int} requests remaining")
+    except (ValueError, TypeError):
+        pass
+    
+    last_sync_time = st.session_state.get("last_sync_time")
+    last_sync_display = (
+        last_sync_time.strftime("%Y-%m-%d %H:%M:%S")
+        if last_sync_time
+        else "Never"
+    )
+    st.markdown(
+        f"<div class='sync-time-bar'>Last sync: {last_sync_display}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+if __name__ == "__main__":
 
     try:
         remaining = RATE_LIMIT_INFO.get("remaining")
