@@ -1,0 +1,229 @@
+Responses
+Snippets
+
+cURL (bash)
+
+curl -X 'GET' \
+  'https://api.returngo.ai/rma/10030552' \
+  -H 'accept: application/json' \
+  -H 'x-shop-name: hurley-dev-south-africa.myshopify.com' \
+  -H 'x-api-key: G0dxSEprxa5iOAIsK5X6g7fCDdPl09q2882osmWD'
+Request URL
+https://api.returngo.ai/rma/10030552
+Server response
+Code	Details
+200	
+Response body
+Download
+{
+  "rmaSummary": {
+    "rmaId": "10030552",
+    "status": "Approved",
+    "order_name": "H12043",
+    "events": [
+      {
+        "eventName": "RMA_CREATED",
+        "eventDate": "2026-02-04T07:02:24+00:00",
+        "triggeredVia": "Return Portal",
+        "storeLocationId": "online",
+        "userDetails": null
+      },
+      {
+        "eventName": "RMA_APPROVED",
+        "eventDate": "2026-02-04T09:08:02+00:00",
+        "triggeredVia": "Dashboard",
+        "storeLocationId": "online",
+        "userDetails": null
+      }
+    ]
+  },
+  "orderDetails": {
+    "orderId": "7396218241343",
+    "order_name": "H12043"
+  },
+  "shipments": [
+    {
+      "shipmentId": "9754270",
+      "status": "Shipped",
+      "carrierName": "CourierGuy",
+      "requestedServiceLevel": null,
+      "actualServiceLevel": null,
+      "trackingNumber": "OPT-401216876",
+      "trackingURL": "https://optimise.parcelninja.com/shipment/track/OPT-401216876",
+      "labelURL": "https://sellerportal.dpworld.com/api/file-download?link=null",
+      "customerAddress": {
+        "name": "Randall Davids",
+        "street1": "6 eldorado crescent, Ferndale, Ferndale",
+        "street2": "Ferndale",
+        "city": "Ferndale, Cape Town",
+        "state": "WC",
+        "zip": "7560",
+        "country": "ZA",
+        "phone": "+10662589364",
+        "email": "randalldavids511@gmail.com"
+      },
+      "returnAddress": {
+        "name": "National Warehouse Centre",
+        "street1": "Ashworth Logistics Park, Building C",
+        "street2": "18 Laneshaw Street",
+        "city": "Johannesburg",
+        "state": "Gauteng",
+        "zip": "1609",
+        "country": "ZA",
+        "phone": "010 446 7748",
+        "email": "randalldavids511@gmail.com"
+      },
+      "isOutbound": false
+    }
+  ],
+  "items": [
+    {
+      "shopLineItemId": "17444647338303",
+      "shopProductId": "10128426074431",
+      "variantId": "51485081469247",
+      "returnedItemId": "47006391",
+      "fullName": "Iconic Flip Flops",
+      "productName": "Iconic Flip Flops",
+      "image": "https://cdn.shopify.com/s/files/1/0900/8824/3519/files/SP25HLFICO1121-BLK_1_600x600.jpg?v=1760621496",
+      "sku": "H1003766",
+      "paidPrice": {
+        "amount": 199,
+        "currency": "ZAR",
+        "shopAmount": 199,
+        "shopCurrency": "ZAR"
+      },
+      "paidTax": {
+        "amount": 25.96,
+        "currency": "ZAR",
+        "shopAmount": 25.96,
+        "shopCurrency": "ZAR"
+      },
+      "taxIncluded": true,
+      "returnReason": "Does not fit",
+      "resolutionName": "Refund to payment method",
+      "policyRuleName": "SALE ITEMS | Refund to Payment Method",
+      "isAutoApprove": 0,
+      "resolutionType": "RefundToPaymentMethod",
+      "restockingFee": 0,
+      "returnFee": 0,
+      "shipmentFee": 0,
+      "shipmentId": "9754270",
+      "extendedReason": " > Too small / tight",
+      "returnMethod": {
+        "type": "Ship with any carrier",
+        "name": "Courier return"
+      },
+      "itemValidationStatusResponse": {
+        "isRestockable": false,
+        "isReturned": false,
+        "nonRestockableReason": null,
+        "nonReturnedReason": null,
+        "storeLocationId": null,
+        "lastValidationDate": null,
+        "lastValidatedBy": null,
+        "thirdPartyName": null,
+        "userDetails": null
+      },
+      "exchangeItems": [],
+      "followUpQuestions": [
+        {
+          "type": "Text",
+          "name": "Why?",
+          "answer": {
+            "textAnswer": "Too small / tight"
+          }
+        },
+        {
+          "type": "Media",
+          "name": "Image request",
+          "answer": {}
+        }
+      ]
+    }
+  ],
+  "comments": [
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-06T15:51:53+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-06T15:41:49+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-06T15:40:22+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "Automation",
+      "htmlText": "Shipment <strong>IN TRANSIT</strong>",
+      "datetime": "2026-02-06T15:40:21+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-04T09:09:44+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-04T09:08:54+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-04T09:08:53+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-04T09:08:17+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "ReturnGO API",
+      "htmlText": "Shipment with ID: 9754270 was updated",
+      "datetime": "2026-02-04T09:08:16+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "Taswell Solomons",
+      "htmlText": "Request <strong>APPROVED</strong>",
+      "datetime": "2026-02-04T09:08:07+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "Taswell Solomons",
+      "htmlText": "Created & approved Shopify return H12043-R1 for order H12043",
+      "datetime": "2026-02-04T09:08:06+00:00"
+    },
+    {
+      "commentType": "system",
+      "triggeredBy": "",
+      "htmlText": "Request SUBMITTED",
+      "datetime": "2026-02-04T07:02:26+00:00"
+    }
+  ],
+  "exchangeOrders": [],
+  "exchangeItems": [],
+  "cancellationFee": 0,
+  "transactions": [],
+  "createdAt": "2026-02-04T07:02:24+00:00",
+  "lastUpdated": "2026-02-04T09:08:06+00:00",
+  "isOutOfPolicy": 0
+}
+Response headers
+ content-length: 4518 
+ content-type: application/json 
+Responses
