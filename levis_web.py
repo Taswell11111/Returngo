@@ -1,3 +1,4 @@
+
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
@@ -1471,10 +1472,12 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             padding: 15px;
             text-align: center;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-            transition: box-shadow 0.2s;
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
             color: #f0f2f6; /* Default text color */
         }}
         .metric-card:hover {{
+            transform: translateY(-5px);
             box-shadow: 0 8px 12px rgba(0, 0, 0, 0.5);
         }}
         .metric-card .count {{
@@ -1482,12 +1485,6 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             font-weight: bold;
             color: #00ff00;
             margin-bottom: 5px;
-            cursor: pointer;
-            transition: transform 0.2s, color 0.2s;
-        }}
-        .metric-card .count:hover {{
-            transform: scale(1.1);
-            color: #80ff80; /* Brighter green on hover */
         }}
         .metric-card .label {{
             font-size: 14px;
@@ -1500,8 +1497,8 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             margin-top: 5px;
         }}
     </style>
-    <div class='metric-card' title='{help_text}'>
-        <div class='count' onclick="Streamlit.setComponentValue('{filter_name}')">{count}</div>
+    <div class='metric-card' title='{help_text}' onclick="Streamlit.setComponentValue('{filter_name}')">
+        <div class='count'>{count}</div>
         <div class='label'>{label}</div>
         <div class='updated'>{updated_text}</div>
     </div>
@@ -1744,7 +1741,7 @@ def main():
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
-        if clickable_metric_card("Issues", issues_count, "Issues ⓘ", "Issues include: Courier Cancelled, No Resolution Actioned", "card_issues"):
+        if clickable_metric_card("Issues", issues_count, "Issues ⓘ", "Show RMAs with identified issues", "card_issues"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1916,7 +1913,11 @@ def main():
         
         # Create tracking links - always use The Courier Guy portal for display
         # The URL is now the value of the 'Tracking Number' column, and the display text is handled by LinkColumn
-        display_df["Tracking Number"] = display_df["Tracking Number"].apply(lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-")
+        display_df["Tracking Number"] = display_df["Tracking Number"].apply(
+            lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-"
+        )
+        # The display text for the link column will be the tracking number itself
+        display_df["Tracking Number Display"] = display_df["Tracking Number"]
         
         render_data_table(display_df, display_cols)
     else:
@@ -1934,7 +1935,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r".*ref=(OPT-.*)", help="Click to track on The Courier Guy portal"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number Link", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -1946,6 +1947,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "failures": st.column_config.TextColumn("failures"),
     }
 
+    # Add the link column for the table
     table_df = display_df[display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
@@ -1960,7 +1962,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r".*ref=(OPT-.*)"},
+        "Tracking Number": {"display_text": r"^(OPT-.*)"},
     }
 
     if st.session_state.get("table_autosize"):
