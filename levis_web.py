@@ -471,21 +471,20 @@ def push_tracking_update(rma_id: str, shipment_id: str, tracking_number: str, st
 # ==========================================
 # 6. DATA FETCHING AND CACHING
 # ==========================================
-
-def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
+def scrape_parcel_ninja_status(tracking_number: str) -> str:
     """
     Scrapes the Parcel Ninja/Optimise website to get the latest tracking status.
-    Returns the exact status line with the pipe format: "Day, DD Mon HH:MM | Status"
+    Returns the exact status line with the pipe format: "Day, DD Mon HH:MM | Status" or "N/A" if not found
     
     Args:
         tracking_number: The tracking/waybill number (e.g., OPT-645925251)
     
     Returns:
-        Latest tracking event in format "Day, DD Mon HH:MM | Status" or error message
+        Latest tracking event in format "Day, DD Mon HH:MM | Status" or "N/A"
     """
     if not tracking_number:
         logger.debug("scrape_parcel_ninja_status: No tracking number provided")
-        return None
+        return "N/A"
     
     # Construct the Optimise Parcel Ninja URL for scraping
     url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
@@ -498,46 +497,51 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
         # Handle error status codes
         if response.status_code == 404:
             logger.warning(f"Tracking not found for {tracking_number} (404)")
-            return "Tracking not found (404)"
+            return "N/A"
         if response.status_code in (401, 403):
-            return "Tracking blocked/unauthorised"
+            logger.warning(f"Tracking blocked for {tracking_number}")
+            return "N/A"
         if response.status_code == 429:
-            return "Tracking rate limited (429)"
+            logger.warning(f"Rate limited for {tracking_number}")
+            return "N/A"
         if 500 <= response.status_code <= 599:
-            return "Tracking service error (5xx)"
+            logger.warning(f"Service error for {tracking_number}")
+            return "N/A"
         if response.status_code != 200:
-            return f"Tracking error ({response.status_code})"
+            logger.warning(f"HTTP {response.status_code} for {tracking_number}")
+            return "N/A"
         
         response.raise_for_status()
         html_content = response.text
         
-        # Regex to find lines that match the tracking history format.
-        # Example: "Tue, 08 Jul 10:46	Delivered"
-        # It looks for a day, date, month, time, and then the status text.
+        # Regex pattern to match tracking events in format: "Day, DD Mon HH:MM<tab>Status"
+        # Example: "Wed, 21 Jan 12:16	Delivered"
+        # Captures the date/time part and the status part separately
         event_pattern = re.compile(
-            r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{2}:\d{2}\s+.*$",
+            r'^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{2}:\d{2})\s+(.+)$',
             re.MULTILINE
         )
         
         # Find all matching event lines in the HTML content
-        events = event_pattern.findall(html_content)
+        matches = event_pattern.findall(html_content)
         
-        if events:
-            # The first match is the most recent event on the page.
-            # We replace the tab character with a pipe for consistent formatting.
-            latest_event = events[0].strip().replace('\t', ' | ')
+        if matches:
+            # matches is a list of tuples: [(datetime, status), ...]
+            # The first match is the most recent event
+            datetime_part, status_part = matches[0]
+            latest_event = f"{datetime_part.strip()} | {status_part.strip()}"
             logger.info(f"Latest tracking event for {tracking_number}: {latest_event}")
             return latest_event
         else:
             logger.warning(f"No valid tracking events found for {tracking_number}")
-            return "No tracking events found"
+            return "N/A"
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Request failed for Parcel Ninja tracking {tracking_number}: {e}", exc_info=True)
-        return "Tracking request failed"
+        return "N/A"
     except Exception as e:
         logger.error(f"Unexpected error scraping Parcel Ninja for {tracking_number}: {e}", exc_info=True)
-        return "Tracking check failed"
+        return "N/A"
 
 
 def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
@@ -616,15 +620,15 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
     logger.info(f"Using Parcel Ninja scraper for tracking number: {tracking_number}")
     scraped_status = scrape_parcel_ninja_status(tracking_number)
     
-    if scraped_status:
+    if scraped_status and scraped_status != "N/A":
         logger.info(f"Parcel Ninja scraper returned '{scraped_status}' for tracking {tracking_number}")
         return scraped_status
     else:
-        logger.warning(f"Parcel Ninja scraper failed for tracking {tracking_number}")
-        return f"Tracking: {tracking_number} (Status unknown)"
+        logger.warning(f"Parcel Ninja scraper returned N/A for tracking {tracking_number}")
+        return "N/A"
 
 
-@st.cache_data(ttl=43200)
+@st.cache_data(ttl=43200, show_spinner=False)
 def fetch_and_cache_data() -> pd.DataFrame:
     """
     Fetches all active RMAs from the ReturnGO API, enriches them with details
@@ -814,35 +818,34 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     def classify_tracking_status(row):
         """
         Classifies the tracking status based on courier_status and RMA status.
-        Returns the full event string in format: "Day, DD Mon HH:MM | Status"
+        Returns the full event string in format: "Day, DD Mon HH:MM | Status" or "N/A"
         """
         rma_status = str(row.get("status", "")).lower()
         tracking_number = str(row.get("tracking_number", "")).strip()
         courier_status = str(row.get("courier_status", "")).strip()
         
         logger.debug(f"Classifying tracking for RMA with status '{rma_status}', tracking_number '{tracking_number}', and scraped courier_status '{courier_status}'")
-
+    
         if not tracking_number: 
             logger.debug("Result: No tracking number.")
             return "No tracking number"
-
-        # If a pre-scraped status exists, use it.
-        if courier_status:
+    
+        # If a pre-scraped status exists and is not "N/A", use it
+        if courier_status and courier_status != "N/A":
             logger.debug(f"Result: Using scraped status '{courier_status}'.")
             return courier_status
         
-        # If no pre-scraped status, but we have a tracking number, try scraping now.
-        # This handles cases where the initial bulk scrape might have failed.
-        logger.debug(f"No pre-scraped status for {tracking_number}. Attempting on-the-fly scrape.")
+        # If pre-scraped status is "N/A" or doesn't exist, try scraping now
+        logger.debug(f"Pre-scraped status was '{courier_status}'. Attempting on-the-fly scrape for {tracking_number}.")
         live_scraped_status = scrape_parcel_ninja_status(tracking_number)
-        if live_scraped_status:
+        
+        if live_scraped_status and live_scraped_status != "N/A":
             logger.debug(f"Result: On-the-fly scrape successful: '{live_scraped_status}'.")
             return live_scraped_status
         
-        # If all scraping fails, fall back to a default based on RMA status.
-        logger.debug("Result: All scraping attempts failed. Using fallback status.")
-        if rma_status == "approved": return "Submitted to Courier"
-        return "-"
+        # If scraping returns "N/A", just return "N/A"
+        logger.debug("Result: Scraping returned N/A.")
+        return "N/A"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
 
@@ -903,7 +906,7 @@ def compute_counts(df: pd.DataFrame) -> Dict[str, int]:
     counts_dict["Submitted"] = len(df[(df["status"].str.lower() == "approved") & (df["tracking_status"].str.lower().str.contains("submitted to courier", na=False))])
     counts_dict["Delivered"] = len(df[(df["status"].str.lower() == "approved") & (df["tracking_status"].str.lower().str.contains("delivered", na=False))])
     counts_dict["Courier Cancelled"] = len(df[df["is_cc"]])
-    counts_dict["No Tracking"] = len(df[df["tracking_number"] == ""])
+    counts_dict["No Tracking"] = len(df[(df["tracking_number"] == "") | (df["tracking_status"] == "N/A")])
 
     # Resolution
     counts_dict["Resolution Actioned"] = len(df[df["resolution_actioned"].str.lower() == "yes"])
@@ -1075,7 +1078,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         "Courier Cancelled": lambda d: d["tracking_status"].str.lower().str.contains("courier cancelled", na=False),
         "Approved > Submitted": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower().str.contains("submitted to courier", na=False)),
         "Approved > Delivered": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower().str.contains("delivered", na=False)),
-        "No Tracking": lambda d: d["tracking_status"].str.lower() == "no tracking number",
+        "No Tracking": lambda d: (d["tracking_status"].str.lower() == "no tracking number") | (d["tracking_status"] == "N/A"),
         "Resolution Actioned": lambda d: d["resolution_actioned"].str.lower() == "yes",
         "No Resolution Actioned": lambda d: (d["status"].str.lower() == "received") & (d["resolution_actioned"].str.lower() != "yes"),
         "In Transit": lambda d: d["tracking_status"].str.lower().str.contains("routing delivery|out for delivery", na=False),
