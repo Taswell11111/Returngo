@@ -1500,16 +1500,8 @@ def clickable_metric_card(filter_name: str, count: int, label: str, help_text: s
             margin-top: 5px;
         }}
     </style>
-    <script>
-      function handleClick(filterName) {
-        // Ensure Streamlit is available before sending the value.
-        if (window.Streamlit) {{    
-          Streamlit.setComponentValue(filterName);
-        }}
-      }
-    </script>
     <div class='metric-card' title='{help_text}'>
-        <div class='count' onclick="handleClick('{filter_name}')">{count}</div>
+        <div class='count' onclick="Streamlit.setComponentValue('{filter_name}')">{count}</div>
         <div class='label'>{label}</div>
         <div class='updated'>{updated_text}</div>
     </div>
@@ -1634,26 +1626,18 @@ def main():
         st.markdown("---")
 
         # Cache & Sync controls
-        st.subheader("Cache & Sync")
-        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True, help="Clears all local data and fetches the latest from the API."):
+        st.subheader("Cache & Sync Controls")
+        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
             st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
+        if st.button("🔄 Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
             with st.spinner("Syncing pending RMAs..."):
                 st.cache_data.clear()
             st.rerun()
-        
-        st.markdown("---")
-        
-        # Shutdown button
-        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
-            st.session_state.disconnected = True
-            st.rerun()
-        st.markdown("---")
         
         # Performance metrics in one line
         perf_metrics = st.session_state.performance_metrics
@@ -1687,6 +1671,11 @@ def main():
         )
         
         st.markdown("---")
+        
+        # Shutdown button
+        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
+            st.session_state.disconnected = True
+            st.rerun()
         st.markdown("---")
         
         # Activity log in terminal-style box
@@ -1715,13 +1704,13 @@ def main():
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
         
         if not timeline_df.empty:
-            date_counts = (timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # type: ignore
-                           .size()
-                           .reset_index(name="Count"))
+            date_counts = (
+                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)  # type: ignore
+                .size()
+                .reset_index(name="Count")
+            )
             date_counts.columns = ["Date", "Count"]
-            
-            if not date_counts.empty:
-                st.line_chart(date_counts.set_index("Date"), height=300)
+            st.line_chart(date_counts.set_index("Date"), height=300)
         else:
             st.info("No valid requested dates found for charting.")
     else:
