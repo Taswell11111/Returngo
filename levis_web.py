@@ -471,21 +471,20 @@ def push_tracking_update(rma_id: str, shipment_id: str, tracking_number: str, st
 # ==========================================
 # 6. DATA FETCHING AND CACHING
 # ==========================================
-
-def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
+def scrape_parcel_ninja_status(tracking_number: str) -> str:
     """
     Scrapes the Parcel Ninja/Optimise website to get the latest tracking status.
-    Returns the exact status line with the pipe format: "Day, DD Mon HH:MM | Status"
+    Returns the exact status line with the pipe format: "Day, DD Mon HH:MM | Status" or "N/A" if not found
     
     Args:
         tracking_number: The tracking/waybill number (e.g., OPT-645925251)
     
     Returns:
-        Latest tracking event in format "Day, DD Mon HH:MM | Status" or error message
+        Latest tracking event in format "Day, DD Mon HH:MM | Status" or "N/A"
     """
     if not tracking_number:
         logger.debug("scrape_parcel_ninja_status: No tracking number provided")
-        return None
+        return "N/A"
     
     # Construct the Optimise Parcel Ninja URL for scraping
     url = f"https://optimise.parcelninja.com/shipment/track?WaybillNo={tracking_number}"
@@ -498,68 +497,51 @@ def scrape_parcel_ninja_status(tracking_number: str) -> Optional[str]:
         # Handle error status codes
         if response.status_code == 404:
             logger.warning(f"Tracking not found for {tracking_number} (404)")
-            return "Tracking not found (404)"
+            return "N/A"
         if response.status_code in (401, 403):
-            return "Tracking blocked/unauthorised"
+            logger.warning(f"Tracking blocked for {tracking_number}")
+            return "N/A"
         if response.status_code == 429:
-            return "Tracking rate limited (429)"
+            logger.warning(f"Rate limited for {tracking_number}")
+            return "N/A"
         if 500 <= response.status_code <= 599:
-            return "Tracking service error (5xx)"
+            logger.warning(f"Service error for {tracking_number}")
+            return "N/A"
         if response.status_code != 200:
-            return f"Tracking error ({response.status_code})"
+            logger.warning(f"HTTP {response.status_code} for {tracking_number}")
+            return "N/A"
         
         response.raise_for_status()
         html_content = response.text
         
-        # Remove script and style tags to clean the HTML
-        clean_html = re.sub(r"<(script|style).*?</\1>", "", html_content, flags=re.DOTALL | re.IGNORECASE)
+        # Regex pattern to match tracking events in format: "Day, DD Mon HH:MM<tab>Status"
+        # Example: "Wed, 21 Jan 12:16	Delivered"
+        # Captures the date/time part and the status part separately
+        event_pattern = re.compile(
+            r'^((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{2}:\d{2})\s+(.+)$',
+            re.MULTILINE
+        )
         
-        # Find all table rows
-        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", clean_html, flags=re.IGNORECASE | re.DOTALL)
+        # Find all matching event lines in the HTML content
+        matches = event_pattern.findall(html_content)
         
-        # Extract events from table rows
-        events = []
-        for row_html in rows:
-            # Extract table cells (td tags)
-            cells = re.findall(r"<td[^>]*>(.*?)</td>", row_html, flags=re.IGNORECASE | re.DOTALL)
-            
-            if len(cells) >= 2:
-                # Clean up the cell contents by removing HTML tags and extra whitespace
-                def clean_cell(cell_html):
-                    # Remove all HTML tags
-                    text = re.sub(r"<[^>]+>", " ", cell_html)
-                    # Decode HTML entities
-                    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-                    # Clean up whitespace
-                    text = " ".join(text.split())
-                    return text.strip()
-                
-                timestamp_col = clean_cell(cells[0])
-                status_col = clean_cell(cells[1])
-                
-                # Check if the timestamp starts with a day abbreviation
-                day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
-                if re.match(day_pattern, timestamp_col):
-                    # Format: "Day, DD Mon HH:MM | Status"
-                    event_text = f"{timestamp_col} | {status_col}"
-                    events.append(event_text)
-                    logger.debug(f"Found event: {event_text}")
-        
-        if events:
-            # Return the first event (most recent, as they're ordered newest-first)
-            latest_event = events[0]
+        if matches:
+            # matches is a list of tuples: [(datetime, status), ...]
+            # The first match is the most recent event
+            datetime_part, status_part = matches[0]
+            latest_event = f"{datetime_part.strip()} | {status_part.strip()}"
             logger.info(f"Latest tracking event for {tracking_number}: {latest_event}")
             return latest_event
         else:
             logger.warning(f"No valid tracking events found for {tracking_number}")
-            return "No tracking events found"
-            
+            return "N/A"
+
     except requests.exceptions.RequestException as e:
         logger.error(f"Request failed for Parcel Ninja tracking {tracking_number}: {e}", exc_info=True)
-        return "Tracking request failed"
+        return "N/A"
     except Exception as e:
         logger.error(f"Unexpected error scraping Parcel Ninja for {tracking_number}: {e}", exc_info=True)
-        return "Tracking check failed"
+        return "N/A"
 
 
 def scrape_the_courier_guy_status(tracking_url: Optional[str]) -> Optional[str]:
@@ -625,35 +607,28 @@ def get_shipment_status(rma_data: dict) -> Optional[str]:
     shipments = safe_get(rma_data, "shipments", [])
     if not shipments:
         logger.debug("get_shipment_status: No shipments array in RMA data.")
-        return "No tracking number"
+        return None
 
-    tracking_number = None
-    tracking_url = None
-    for shipment in shipments:
-        if shipment and shipment.get("trackingNumber"):
-            tracking_number = shipment.get("trackingNumber")
-            tracking_url = shipment.get("trackingUrl")
-            break
-    
-    logger.debug(f"get_shipment_status: tracking_number={tracking_number}, tracking_url={tracking_url}")
+    tracking_number = safe_get(shipments, "0.trackingNumber")
+    logger.debug(f"get_shipment_status: tracking_number={tracking_number}")
 
     if not tracking_number:
         logger.debug("get_shipment_status: No tracking number found in shipments.")
-        return "No tracking number"
+        return None
 
     # Always use Parcel Ninja Optimise URL for scraping
     logger.info(f"Using Parcel Ninja scraper for tracking number: {tracking_number}")
     scraped_status = scrape_parcel_ninja_status(tracking_number)
     
-    if scraped_status:
+    if scraped_status and scraped_status != "N/A":
         logger.info(f"Parcel Ninja scraper returned '{scraped_status}' for tracking {tracking_number}")
         return scraped_status
     else:
-        logger.warning(f"Parcel Ninja scraper failed for tracking {tracking_number}")
-        return f"Tracking: {tracking_number} (Status unknown)"
+        logger.warning(f"Parcel Ninja scraper returned N/A for tracking {tracking_number}")
+        return "N/A"
 
 
-@st.cache_data(ttl=43200)
+@st.cache_data(ttl=43200, show_spinner=False)
 def fetch_and_cache_data() -> pd.DataFrame:
     """
     Fetches all active RMAs from the ReturnGO API, enriches them with details
@@ -843,61 +818,34 @@ def enrich_rma_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     def classify_tracking_status(row):
         """
         Classifies the tracking status based on courier_status and RMA status.
-        Returns the full event string in format: "Day, DD Mon HH:MM | Status"
+        Returns the full event string in format: "Day, DD Mon HH:MM | Status" or "N/A"
         """
-        courier_status = row.get("courier_status", "")
-        status = row.get("status", "")
-        tracking_number = row.get("tracking_number", "")
+        rma_status = str(row.get("status", "")).lower()
+        tracking_number = str(row.get("tracking_number", "")).strip()
+        courier_status = str(row.get("courier_status", "")).strip()
         
-        logger.debug(f"classify_tracking_status: courier_status='{courier_status}', status='{status}', tracking_number='{tracking_number}'")
-
+        logger.debug(f"Classifying tracking for RMA with status '{rma_status}', tracking_number '{tracking_number}', and scraped courier_status '{courier_status}'")
+    
         if not tracking_number: 
-            logger.debug(f"No tracking number, returning 'No tracking number'")
+            logger.debug("Result: No tracking number.")
             return "No tracking number"
-
-        # Define substrings of statuses that are error messages, not real tracking events
-        error_substrings = [
-            "not found",
-            "blocked",
-            "unauthorised",
-            "rate limited",
-            "service error",
-            "tracking error",
-            "no tracking events",
-            "request failed",
-            "check failed",
-            "status unknown",
-        ]
-
-        # Check if courier_status is a real tracking event (starts with day abbreviation)
-        is_real_event = False
-        if courier_status:
-            # Check if it matches the expected format: "Day, DD Mon HH:MM | Status"
-            day_pattern = r'^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),'
-            if re.match(day_pattern, courier_status):
-                is_real_event = True
-            # Also check it's not an error message
-            if any(sub in courier_status.lower() for sub in error_substrings):
-                is_real_event = False
-
-        # If we have a real tracking event, return it as-is
-        if is_real_event:
-            logger.debug(f"Using real tracking event: {courier_status}")
+    
+        # If a pre-scraped status exists and is not "N/A", use it
+        if courier_status and courier_status != "N/A":
+            logger.debug(f"Result: Using scraped status '{courier_status}'.")
             return courier_status
         
-        # If the status is "approved" and we have a tracking number, but no real event yet,
-        # it's most likely just been submitted.
-        if status.lower() == "approved":
-            logger.debug(f"No real tracking event, but status is approved. Returning 'Submitted to Courier'")
-            return "Submitted to Courier"
+        # If pre-scraped status is "N/A" or doesn't exist, try scraping now
+        logger.debug(f"Pre-scraped status was '{courier_status}'. Attempting on-the-fly scrape for {tracking_number}.")
+        live_scraped_status = scrape_parcel_ninja_status(tracking_number)
         
-        # For other RMA statuses, if we have an error status, show it
-        if courier_status:
-            logger.debug(f"Returning the error courier_status: {courier_status}")
-            return courier_status
+        if live_scraped_status and live_scraped_status != "N/A":
+            logger.debug(f"Result: On-the-fly scrape successful: '{live_scraped_status}'.")
+            return live_scraped_status
         
-        logger.debug(f"Final fallback, returning '-'")
-        return "-"
+        # If scraping returns "N/A", just return "N/A"
+        logger.debug("Result: Scraping returned N/A.")
+        return "N/A"
 
     df["tracking_status"] = df.apply(classify_tracking_status, axis=1)
 
@@ -957,8 +905,8 @@ def compute_counts(df: pd.DataFrame) -> Dict[str, int]:
     counts_dict["In Transit"] = len(df[df["tracking_status"].str.lower().str.contains("routing delivery|out for delivery", na=False)])
     counts_dict["Submitted"] = len(df[(df["status"].str.lower() == "approved") & (df["tracking_status"].str.lower().str.contains("submitted to courier", na=False))])
     counts_dict["Delivered"] = len(df[(df["status"].str.lower() == "approved") & (df["tracking_status"].str.lower().str.contains("delivered", na=False))])
-    counts_dict["Courier Cancelled"] = len(df[df["tracking_status"].str.lower().str.contains("courier cancelled", na=False)])
-    counts_dict["No Tracking"] = len(df[df["tracking_status"].str.lower() == "no tracking number"])
+    counts_dict["Courier Cancelled"] = len(df[df["is_cc"]])
+    counts_dict["No Tracking"] = len(df[(df["tracking_number"] == "") | (df["tracking_status"] == "N/A")])
 
     # Resolution
     counts_dict["Resolution Actioned"] = len(df[df["resolution_actioned"].str.lower() == "yes"])
@@ -1007,36 +955,36 @@ def show_ops_log():
 @st.dialog("RMA Actions", width="large")
 def show_rma_actions_dialog(row_data: pd.Series):
     """Shows a dialog with action buttons for a selected RMA."""
-    rma_id = row_data.get("rma_id", "N/A")
+    rma_id = row_data.get("RMA ID", "N/A").split("rmaid=")[-1] # Extract from URL
     shipment_id = safe_get(row_data.get("json_data", {}), "shipments.0.shipmentId")
     existing_tracking = row_data.get("tracking_number", "")
 
     st.subheader(f"Actions for RMA: {rma_id}")
-    st.subheader(f"RMA Actions: {rma_id}")
 
-    left_col, right_col = st.columns(2)
     tab_comments, tab_tracking, tab_details = st.tabs(["Comment Timeline", "Update Tracking", "RMA Details"])
 
-    # --- Left Column: Comments ---
-    with left_col:
-        st.markdown("#### Comment Timeline")
-
     with tab_comments:
+        st.markdown("#### Comment History")
+        comments = safe_get(row_data.get("json_data", {}), "comments", [])
+        with st.container(height=400):
+            if not comments:
+                st.info("No comments found for this RMA.")
+            else:
+                sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
+                for comment in sorted_comments:
+                    comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
+                    author = comment.get('triggeredBy', 'System')
+                    html_text = comment.get('htmlText', 'No content.')
+                    st.markdown(f"**{comment_date}** by *{author}*")
+                    st.markdown(f"> {html_text}", unsafe_allow_html=True)
+                    st.markdown("---")
+
         # Form to add a new comment
         with st.form(key=f"comment_form_{rma_id}"):
             new_comment_text = st.text_area("Add a new comment:", height=100, key=f"comment_input_{rma_id}")
             submit_comment = st.form_submit_button("Post Comment")
 
             if submit_comment and new_comment_text and new_comment_text.strip():
-                if not MY_API_KEY:
-                    st.error("Cannot post comment: API Key is not configured.")
-                    return
-                success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
-                if success:
-                    st.success("Comment posted successfully!")
-                    append_ops_log(f"Posted comment to RMA {rma_id}.")
-                    st.cache_data.clear()
-                    st.rerun()
                 if MY_API_KEY:
                     success = post_rma_comment(MY_API_KEY, STORE_URL, rma_id, new_comment_text)
                     if success:
@@ -1047,40 +995,10 @@ def show_rma_actions_dialog(row_data: pd.Series):
                     else:
                         st.error("Failed to post comment.")
                 else:
-                    st.error("Failed to post comment.")
                     st.error("Cannot post comment: API Key is not configured.")
 
-        st.divider()
-
-        # Display existing comments
-        st.markdown("#### Comment History")
-        comments = safe_get(row_data.get("json_data", {}), "comments", [])
-        if not comments:
-            st.info("No comments found for this RMA.")
-        else:
-            sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
-            for comment in sorted_comments:
-                comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
-                author = comment.get('triggeredBy', 'System')
-                html_text = comment.get('htmlText', 'No content.')
-                st.markdown(f"**{comment_date}** by *{author}*")
-                st.markdown(f"> {html_text}", unsafe_allow_html=True)
-                st.markdown("---")
-            with st.container(height=400):
-                sorted_comments = sorted(comments, key=lambda c: c.get('datetime', ''), reverse=True)
-                for comment in sorted_comments:
-                    comment_date = format_date(safe_parse_date_iso(comment.get('datetime')))
-                    author = comment.get('triggeredBy', 'System')
-                    html_text = comment.get('htmlText', 'No content.')
-                    st.markdown(f"**{comment_date}** by *{author}*")
-                    st.markdown(f"> {html_text}", unsafe_allow_html=True)
-                    st.markdown("---")
-
-    # --- Right Column: Tracking Update ---
-    with right_col:
-        st.markdown("#### Update Tracking")
-
     with tab_tracking:
+        st.markdown("#### Update Tracking")
         new_tracking_number = st.text_input("New Tracking Number (OPT-)", value=existing_tracking, key=f"tracking_input_{rma_id}")
 
         if st.button("Submit Tracking Update", key=f"submit_tracking_{rma_id}"):
@@ -1160,7 +1078,7 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         "Courier Cancelled": lambda d: d["tracking_status"].str.lower().str.contains("courier cancelled", na=False),
         "Approved > Submitted": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower().str.contains("submitted to courier", na=False)),
         "Approved > Delivered": lambda d: (d["status"].str.lower() == "approved") & (d["tracking_status"].str.lower().str.contains("delivered", na=False)),
-        "No Tracking": lambda d: d["tracking_status"].str.lower() == "no tracking number",
+        "No Tracking": lambda d: (d["tracking_status"].str.lower() == "no tracking number") | (d["tracking_status"] == "N/A"),
         "Resolution Actioned": lambda d: d["resolution_actioned"].str.lower() == "yes",
         "No Resolution Actioned": lambda d: (d["status"].str.lower() == "received") & (d["resolution_actioned"].str.lower() != "yes"),
         "In Transit": lambda d: d["tracking_status"].str.lower().str.contains("routing delivery|out for delivery", na=False),
@@ -1562,18 +1480,26 @@ def main():
         st.markdown("---")
 
         # Cache & Sync controls
-        st.subheader("Cache & Sync Controls")
-        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True):
+        st.subheader("Cache & Sync")
+        if st.button("🔄 Clear Cache & Full Refresh", use_container_width=True, help="Clears all local data and fetches the latest from the API.", key="btn_clear_cache"):
             with st.spinner("Clearing cache and refreshing data..."):
                 st.cache_data.clear()
                 append_ops_log("Cache cleared. Fetching fresh data.")
             st.success("Cache cleared! Data will refresh.")
             st.rerun()
 
-        if st.button("🔄 Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status."):
+        if st.button("Sync Pending", use_container_width=True, help="Fetches the latest data for RMAs currently in 'Pending' status.", key="btn_sync_pending"):
             with st.spinner("Syncing pending RMAs..."):
                 st.cache_data.clear()
             st.rerun()
+        
+        st.markdown("---")
+        
+        # Shutdown button
+        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True, type="primary"):
+            st.session_state.disconnected = True
+            st.rerun()
+        st.markdown("---")
         
         # Performance metrics in one line
         perf_metrics = st.session_state.performance_metrics
@@ -1607,11 +1533,6 @@ def main():
         )
         
         st.markdown("---")
-        
-        # Shutdown button
-        if st.button("Shutdown", key="shutdown_btn", help="Disconnects the session and stops processing.", use_container_width=True):
-            st.session_state.disconnected = True
-            st.rerun()
         st.markdown("---")
         
         # Activity log in terminal-style box
@@ -1640,13 +1561,13 @@ def main():
         timeline_df = timeline_df.dropna(subset=["_req_date_parsed"])
         
         if not timeline_df.empty:
-            date_counts = (
-                timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date)  # type: ignore
-                .size()
-                .reset_index(name="Count")
-            )
+            date_counts = (timeline_df.groupby(timeline_df["_req_date_parsed"].dt.date) # type: ignore
+                           .size()
+                           .reset_index(name="Count"))
             date_counts.columns = ["Date", "Count"]
-            st.line_chart(date_counts.set_index("Date"), height=300)
+            
+            if not date_counts.empty:
+                st.line_chart(date_counts.set_index("Date"), height=300)
         else:
             st.info("No valid requested dates found for charting.")
     else:
@@ -1664,65 +1585,27 @@ def main():
     
     # First row: Total Open, Pending, In Transit, Issues
     with metric_cols[0]:
-        st.markdown(
-            f"""<a href="#" id="filter-All" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Total Open', 0)}</div>
-                <div class='label'>Total Open</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_total_open", use_container_width=True, help="Show all open RMAs"):
+        st.markdown(f"<div class='metric-card' title='Show all open RMAs'><div class='count'>{counts.get('Total Open', 0)}</div><div class='label'>Total Open</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
+        if st.button("View All Open", key="btn_total_open", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "All"
             st.rerun()
     
     with metric_cols[1]:
-        st.markdown(
-            f"""
-            <a href="#" id="filter-Pending Requests" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Pending', 0)}</div>
-                <div class='label'>Pending</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_pending", use_container_width=True, help="Show RMAs with 'Pending' status"):
+        st.markdown(f"<div class='metric-card' title='Show RMAs with Pending status'><div class='count'>{counts.get('Pending', 0)}</div><div class='label'>Pending</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
+        if st.button("View Pending", key="btn_pending", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     with metric_cols[2]:
-        st.markdown(
-            f"""
-            <a href="#" id="filter-In Transit" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('In Transit', 0)}</div>
-                <div class='label'>In Transit</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_in_transit", use_container_width=True, help="Show RMAs with tracking status 'Out for delivery' or 'Routing delivery'"):
+        st.markdown(f"<div class='metric-card' title='Show RMAs with tracking status Out for delivery or Routing delivery'><div class='count'>{counts.get('In Transit', 0)}</div><div class='label'>In Transit</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
+        if st.button("View In Transit", key="btn_in_transit", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "In Transit"
             st.rerun()
     
     with metric_cols[3]:
         issues_count = counts.get('Issues', 0)
-        st.markdown(
-            f"""<a href="#" id="filter-Issues" style="text-decoration: none;">
-            <div class='metric-card' title='Issues include: No Tracking, Courier Cancelled, No Resolution Actioned'>
-                <div class='count'>{issues_count}</div>
-                <div class='label'>Issues ⓘ</div>
-                <div class='updated'>Updated just now</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("View", key="btn_issues", use_container_width=True, help="Show RMAs with identified issues"):
+        st.markdown(f"<div class='metric-card' title='Issues include: Courier Cancelled, No Resolution Actioned'><div class='count'>{issues_count}</div><div class='label'>Issues ⓘ</div><div class='updated'>Updated just now</div></div>", unsafe_allow_html=True)
+        if st.button("View Issues", key="btn_issues", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Issues"
             st.rerun()
 
@@ -1733,65 +1616,29 @@ def main():
     
     # PENDING REQUESTS
     with metric_cols2[0]:
-        st.markdown(
-            f"""<a href="#" id="filter-Pending Requests" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Pending', 0)}</div>
-                <div class='label'>Pending Requests</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_pending_req", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by Pending Requests'><div class='count'>{counts.get('Pending', 0)}</div><div class='label'>Pending Requests</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_pending_req", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Pending Requests"
             st.rerun()
     
     # RECEIVED
     with metric_cols2[1]:
-        st.markdown(
-            f"""<a href="#" id="filter-Received" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Received', 0)}</div>
-                <div class='label'>Received</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_received", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by Received'><div class='count'>{counts.get('Received', 0)}</div><div class='label'>Received</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_received", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Received"
             st.rerun()
     
     # COURIER CANCELLED
     with metric_cols2[2]:
-        st.markdown(
-            f"""<a href="#" id="filter-Courier Cancelled" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Courier Cancelled', 0)}</div>
-                <div class='label'>Courier Cancelled</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by Courier Cancelled'><div class='count'>{counts.get('Courier Cancelled', 0)}</div><div class='label'>Courier Cancelled</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_courier_cancelled", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Courier Cancelled"
             st.rerun()
     
     # APPROVED > SUBMITTED
     with metric_cols2[3]:
-        st.markdown(
-            f"""<a href="#" id="filter-Approved-Submitted" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Submitted', 0)}</div>
-                <div class='label'>Approved > Submitted</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_submitted", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by Approved > Submitted'><div class='count'>{counts.get('Submitted', 0)}</div><div class='label'>Approved > Submitted</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_submitted", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Approved > Submitted"
             st.rerun()
 
@@ -1800,71 +1647,35 @@ def main():
     
     # APPROVED > DELIVERED
     with metric_cols3[0]:
-        st.markdown(
-            f"""<a href="#" id="filter-Approved-Delivered" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Delivered', 0)}</div>
-                <div class='label'>Approved > Delivered</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_delivered", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by Approved > Delivered'><div class='count'>{counts.get('Delivered', 0)}</div><div class='label'>Approved > Delivered</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_delivered", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Approved > Delivered"
             st.rerun()
     
     # NO TRACKING
     with metric_cols3[1]:
-        st.markdown(
-            f"""<a href="#" id="filter-No Tracking" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('No Tracking', 0)}</div>
-                <div class='label'>No Tracking</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_no_tracking", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by No Tracking'><div class='count'>{counts.get('No Tracking', 0)}</div><div class='label'>No Tracking</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_no_tracking", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "No Tracking"
             st.rerun()
     
     # RESOLUTION ACTIONED
     with metric_cols3[2]:
-        st.markdown(
-            f"""<a href="#" id="filter-Resolution Actioned" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('Resolution Actioned', 0)}</div>
-                <div class='label'>Resolution Actioned</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_res_actioned", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by Resolution Actioned'><div class='count'>{counts.get('Resolution Actioned', 0)}</div><div class='label'>Resolution Actioned</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_res_actioned", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "Resolution Actioned"
             st.rerun()
     
     # NO RESOLUTION ACTIONED
     with metric_cols3[3]:
-        st.markdown(
-            f"""<a href="#" id="filter-No Resolution Actioned" style="text-decoration: none;">
-            <div class='metric-card'>
-                <div class='count'>{counts.get('No Resolution Actioned', 0)}</div>
-                <div class='label'>No Resolution Actioned</div>
-                <div class='updated'>Updated just now 🔄</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True):
+        st.markdown(f"<div class='metric-card' title='Filter by No Resolution Actioned'><div class='count'>{counts.get('No Resolution Actioned', 0)}</div><div class='label'>No Resolution Actioned</div><div class='updated'>Updated just now 🔄</div></div>", unsafe_allow_html=True)
+        if st.button("Filter", key="btn_no_res_actioned", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "No Resolution Actioned"
             st.rerun()
 
     # Search bar and View All button
     st.markdown("---")
-    sc1, sc2, sc3 = st.columns([8, 1, 1], vertical_alignment="center")
+    sc1, sc3 = st.columns([9, 1], vertical_alignment="center")
     with sc1:
         st.text_input(
             "Search",
@@ -1873,7 +1684,7 @@ def main():
             key="search_query_input",
         )
     with sc3:
-        if st.button("📋 View All", use_container_width=True):
+        if st.button("📋 View All", use_container_width=True, type="secondary"):
             st.session_state.active_filter = "All"
             clear_all_filters()
             st.rerun()
@@ -1901,7 +1712,7 @@ def main():
             st.multiselect("Tracking Status", options=COURIER_STATUS_OPTIONS, key="tracking_multi")
         
         with c5:
-            if st.button("🧼 Clear filters", use_container_width=True):
+            if st.button("🧼 Clear filters", use_container_width=True, type="secondary"):
                 clear_all_filters()
                 st.rerun()
 
@@ -1973,11 +1784,7 @@ def main():
         
         # Create tracking links - always use The Courier Guy portal for display
         # The URL is now the value of the 'Tracking Number' column, and the display text is handled by LinkColumn
-        display_df["Tracking Number"] = display_df["Tracking Number"].apply(
-            lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-"
-        )
-        # The display text for the link column will be the tracking number itself
-        display_df["Tracking Number Display"] = display_df["Tracking Number"]
+        display_df["Tracking Number"] = display_df["Tracking Number"].apply(lambda tn: f"https://portal.thecourierguy.co.za/track?ref={tn}" if tn else "-")
         
         render_data_table(display_df, display_cols)
     else:
@@ -1995,7 +1802,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         ),
         "Order": st.column_config.TextColumn("Order"),
         "Current Status": st.column_config.TextColumn("Current Status"),
-        "Tracking Number": st.column_config.LinkColumn("Tracking Number Link", display_text=r"ref=(.*)", help="Click to track on The Courier Guy portal"),
+        "Tracking Number": st.column_config.LinkColumn("Tracking Number", display_text=r".*ref=(OPT-.*)", help="Click to track on The Courier Guy portal"),
         "Tracking Status": st.column_config.TextColumn("Tracking Status"),
         "Requested date": st.column_config.TextColumn("Requested date"),
         "Approved date": st.column_config.TextColumn("Approved date"),
@@ -2007,7 +1814,6 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
         "failures": st.column_config.TextColumn("failures"),
     }
 
-    # Add the link column for the table
     table_df = display_df[display_cols].copy()
 
     def _autosize_width(column: str, data: pd.DataFrame) -> Literal["small", "medium", "large"]:
@@ -2022,7 +1828,7 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
 
     link_column_configs = {
         "RMA ID": {"display_text": r"rmaid=([^&]*)"},
-        "Tracking Number": {"display_text": r"^(OPT-.*)"},
+        "Tracking Number": {"display_text": r".*ref=(OPT-.*)"},
     }
 
     if st.session_state.get("table_autosize"):
@@ -2075,12 +1881,12 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     
     action_col1, action_col2 = st.columns([1, 1])
     with action_col1:
-        if st.button("Data table log", key="btn_data_table_log", use_container_width=True):
+        if st.button("Data table log", key="btn_data_table_log", use_container_width=True, type="secondary"):
             st.session_state["suppress_row_dialog"] = True
             show_data_table_log()
     
     with action_col2:
-        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True):
+        if st.button("📋 Copy all", key="btn_copy_all", use_container_width=True, type="secondary"):
             st.session_state["copy_all_payload"] = tsv_text
             st.session_state["suppress_row_dialog"] = True
 
@@ -2120,21 +1926,14 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     def dataframe_styler(df: pd.DataFrame):
         """Applies conditional styling to the dataframe."""
         style_df = pd.DataFrame('', index=df.index, columns=df.columns)
-
-        no_res_mask = (df['Resolution actioned'] == 'No') & (df['Current Status'] == 'Received')
-        # This rule is now handled by the "NO_RESOLUTION" failure check below.
-        # style_df.loc[no_res_mask, :] = 'background-color: rgba(234, 88, 12, 0.25);'
-
+        
         # Yellow highlight for "NO_RESOLUTION" failures
         no_resolution_mask = df['failures'].str.contains("NO_RESOLUTION", na=False)
         style_df.loc[no_resolution_mask, :] = 'background-color: rgba(253, 224, 71, 0.4);' # yellow with opacity
 
         # Red highlight for other failures (will override yellow if both are present, e.g., "COURIER_CANCELLED,NO_RESOLUTION")
-        other_failures_mask = df['failures'].str.contains("COURIER_CANCELLED", na=False)
+        other_failures_mask = df['failures'].str.contains("COURIER_CANCELLED", na=False) | (df['Tracking Status'] == 'No tracking number')
         style_df.loc[other_failures_mask, :] = 'background-color: rgba(220, 38, 38, 0.35); color: #fee2e2;'
-        
-        no_tracking_mask = df['Tracking Status'] == 'No tracking number'
-        style_df.loc[no_tracking_mask, 'Tracking Status'] = 'background-color: rgba(234, 88, 12, 0.35);'
 
         res_actioned_mask = (df['Resolution actioned'] == 'Yes') & (df['Current Status'] == 'Approved')
         style_df.loc[res_actioned_mask, 'Resolution actioned'] = 'background-color: rgba(253, 224, 71, 0.4);'
@@ -2144,15 +1943,21 @@ def render_data_table(display_df: pd.DataFrame, display_cols: List[str]):
     # Apply styling
     # We need the original data for conditions, so we style `display_df` and then select columns.
     styled_table = display_df.style.apply(dataframe_styler, axis=None)
+    # Create a copy for styling and drop the complex 'json_data' column to prevent Arrow errors.
+    df_for_styling = display_df.copy()
+    if 'json_data' in df_for_styling.columns:
+        df_for_styling = df_for_styling.drop(columns=['json_data'])
+        
+    styled_table = df_for_styling.style.apply(dataframe_styler, axis=None)
 
     # The dataframe passed to st.dataframe should have the columns we want to show
+    # This also fixes the ArrowInvalid error by removing the complex 'json_data' column
     sel_event = st.dataframe(
         styled_table,
-        use_container_width=False,
         height=700,
         hide_index=True,
         column_config=column_config,
-        on_select="rerun", # type: ignore
+        on_select="rerun",
         selection_mode="single-row",
         column_order=display_cols, # Ensure correct column order
         key="rma_table",
